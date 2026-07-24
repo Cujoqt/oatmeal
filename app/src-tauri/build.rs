@@ -18,7 +18,9 @@ fn main() {
         // OS Swift runtime dir as an rpath so dyld resolves them (served from the
         // shared cache) — without this the binary aborts on launch with
         // "Library not loaded: @rpath/libswift_Concurrency.dylib".
-        println!("cargo:rustc-link-arg-bins=-Wl,-rpath,/usr/lib/swift");
+        // Emit for every linked artifact (bin, test, example) so `cargo test`
+        // binaries also find the Swift runtime, not just the app binary.
+        println!("cargo:rustc-link-arg=-Wl,-rpath,/usr/lib/swift");
     }
 
     tauri_build::build()

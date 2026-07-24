@@ -215,3 +215,39 @@ fn local_ymdhms() -> (i32, u32, u32, u32, u32, u32) {
     let tod = secs % 86_400;
     (1970 + (days / 365) as i32, 1, 1, (tod / 3600) as u32, (tod % 3600 / 60) as u32, (tod % 60) as u32)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mix_pads_shorter_lane_and_sums() {
+        let a = vec![0.5, 0.5, 0.5];
+        let b = vec![0.2];
+        let m = mix(&a, &b);
+        assert_eq!(m.len(), 3);
+        assert!((m[0] - 0.7).abs() < 1e-6);
+        assert!((m[1] - 0.5).abs() < 1e-6); // b padded with silence
+    }
+
+    #[test]
+    fn mix_clamps_to_unit_range() {
+        let m = mix(&[0.9, -0.9], &[0.9, -0.9]);
+        assert_eq!(m, vec![1.0, -1.0]);
+    }
+
+    #[test]
+    fn slugify_is_filesystem_safe() {
+        assert_eq!(slugify("Acme Discovery Call!"), "acme-discovery-call");
+        assert_eq!(slugify("  weird__name  "), "weird-name");
+        assert_eq!(slugify(""), "");
+        assert!(slugify("a".repeat(100).as_str()).len() <= 48);
+    }
+
+    #[test]
+    fn fmt_cs_renders_minutes_seconds() {
+        assert_eq!(fmt_cs(0), "0:00");
+        assert_eq!(fmt_cs(500), "0:05"); // 5.00s
+        assert_eq!(fmt_cs(6_500), "1:05"); // 65.00s
+    }
+}

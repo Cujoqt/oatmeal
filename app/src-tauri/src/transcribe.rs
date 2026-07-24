@@ -204,3 +204,60 @@ fn resample_linear(input: &[f32], src_rate: u32, dst_rate: u32) -> Vec<f32> {
     }
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resample_passthrough_when_rates_match() {
+        let x = vec![0.1, -0.2, 0.3];
+        assert_eq!(resample_linear(&x, 16_000, 16_000), x);
+    }
+
+    #[test]
+    fn resample_48k_to_16k_thirds_the_length() {
+        let input = vec![0.0f32; 4_800]; // 0.1s @ 48k
+        let out = resample_linear(&input, 48_000, 16_000);
+        // 4800 * (16000/48000) = 1600, ±1 for rounding.
+        assert!((out.len() as i64 - 1_600).abs() <= 1, "got {}", out.len());
+    }
+
+    #[test]
+    fn resample_interpolates_midpoint() {
+        // Upsample 2 -> 4 samples; the value between 0.0 and 1.0 should be ~0.5.
+        let out = resample_linear(&[0.0, 1.0], 2, 4);
+        assert!(out.len() >= 3);
+        assert!((out[1] - 0.5).abs() < 0.2, "midpoint was {}", out[1]);
+    }
+
+    #[test]
+    fn wav_roundtrip_downmixes_and_resamples() {
+        // Write a 2-channel 48k i16 WAV, read it back as 16k mono.
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("oatmeal-test-{}.wav", std::process::id()));
+        {
+            let spec = hound::WavSpec {
+                channels: 2,
+                sample_rate: 48_000,
+                bits_per_sample: 16,
+                sample_format: hound::SampleFormat::Int,
+            };
+            let mut w = hound::WavWriter::create(&path, spec).unwrap();
+            // 4800 stereo frames (0.1s): left = +half, right = -half -> mono ~0.
+            for _ in 0..4_800 {
+                w.write_sample(16_000i16).unwrap();
+                w.write_sample(-16_000i16).unwrap();
+            }
+            w.finalize().unwrap();
+        }
+        let mono = load_wav_mono_16k(&path).unwrap();
+        std::fs::remove_file(&path).ok();
+
+        // ~0.1s at 16k mono.
+        assert!((mono.len() as i64 - 1_600).abs() <= 2, "len {}", mono.len());
+        // L+R average cancels to near silence.
+        let peak = mono.iter().fold(0.0f32, |m, &s| m.max(s.abs()));
+        assert!(peak < 0.05, "expected near-silent downmix, peak {peak}");
+    }
+}

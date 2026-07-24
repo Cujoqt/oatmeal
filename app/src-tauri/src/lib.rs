@@ -1,8 +1,8 @@
 mod mic;
-mod model;
-mod session;
+pub mod model;
+pub mod session;
 mod sysaudio;
-mod transcribe;
+pub mod transcribe;
 mod window;
 
 use std::path::{Path, PathBuf};
