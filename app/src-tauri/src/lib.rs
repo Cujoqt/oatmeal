@@ -348,6 +348,12 @@ fn chat_model_status() -> serde_json::Value {
     })
 }
 
+/// A saved transcript's timestamped lines, for the note view's raw tab.
+#[tauri::command]
+fn meeting_segments(id: String) -> Result<Vec<library::TranscriptLine>, String> {
+    library::transcript_lines(&id)
+}
+
 /// Write structured notes for a past meeting and cache them next to the
 /// transcript, so reopening a note doesn't re-run the model.
 #[tauri::command]
@@ -427,6 +433,7 @@ pub fn run() {
             ensure_chat_model,
             chat_model_status,
             write_notes,
+            meeting_segments,
             ask_meeting,
             unload_chat_model,
             rename_meeting,

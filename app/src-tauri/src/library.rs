@@ -238,6 +238,36 @@ fn strip_transcript_markup(md: &str) -> String {
     out
 }
 
+/// One timestamped line of a saved transcript, for the note view's raw tab.
+#[derive(Debug, Clone, Serialize)]
+pub struct TranscriptLine {
+    /// Display timestamp as written in the markdown, e.g. `1:23`.
+    pub at: String,
+    pub text: String,
+}
+
+/// Parse a saved `transcript.md` back into its timestamped lines.
+pub fn transcript_lines(id: &str) -> Result<Vec<TranscriptLine>, String> {
+    let dir = meeting_dir(id)?;
+    let md = std::fs::read_to_string(dir.join("transcript.md"))
+        .map_err(|_| "this meeting has no transcript yet".to_string())?;
+
+    let mut out = Vec::new();
+    for line in md.lines() {
+        let line = line.trim();
+        let Some(rest) = line.strip_prefix("**[") else { continue };
+        let Some((at, text)) = rest.split_once("]**") else { continue };
+        let text = text.trim();
+        if !text.is_empty() {
+            out.push(TranscriptLine {
+                at: at.to_string(),
+                text: text.to_string(),
+            });
+        }
+    }
+    Ok(out)
+}
+
 /// Write structured notes for a meeting, caching them as `notes.md` beside the
 /// transcript. Returns the cached copy unless `force` asks for a rewrite —
 /// generation takes real time and the result doesn't change on its own.
