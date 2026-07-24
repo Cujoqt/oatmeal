@@ -6,6 +6,9 @@
 const { invoke } = window.__TAURI__.core
 
 const btn = document.getElementById('btn')
+const heroEl = document.getElementById('hero')
+const stageEl = document.getElementById('stage')
+const eyebrowEl = document.getElementById('eyebrow')
 const titleEl = document.getElementById('title')
 const timerEl = document.getElementById('timer')
 const statusEl = document.getElementById('status')
@@ -46,15 +49,24 @@ function stopTimer() {
   timerEl.classList.remove('on')
 }
 
+const MIC_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.8" stroke-linecap="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M6 11a6 6 0 0 0 12 0M12 17v3"/></svg>'
+const STOP_ICON = '<svg viewBox="0 0 24 24"><rect x="7" y="7" width="10" height="10" rx="2.5" fill="#fff"/></svg>'
+
 function toRecordButton() {
-  btn.classList.remove('stop')
-  btn.innerHTML = '<span class="dot"></span>Record'
+  stageEl.classList.remove('live')
+  stageEl.classList.add('idle')
+  heroEl.classList.remove('live')
+  btn.innerHTML = MIC_ICON
+  btn.setAttribute('aria-label', 'Record')
   btn.disabled = false
 }
 
 function toStopButton() {
-  btn.classList.add('stop')
-  btn.innerHTML = '<span class="dot"></span>Stop'
+  stageEl.classList.remove('idle')
+  stageEl.classList.add('live')
+  heroEl.classList.add('live')
+  btn.innerHTML = STOP_ICON
+  btn.setAttribute('aria-label', 'Stop recording')
   btn.disabled = false
 }
 
@@ -133,10 +145,20 @@ function escapeHtml(s) {
   return String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]))
 }
 
-btn.addEventListener('click', () => {
+function toggleRecording() {
   if (busy) return
   if (recording) stopRecording()
   else startRecording()
+}
+
+btn.addEventListener('click', toggleRecording)
+
+// Space toggles record — unless typing in the meeting title.
+document.addEventListener('keydown', (e) => {
+  if (e.code !== 'Space' && e.key !== ' ') return
+  if (e.target === titleEl || e.target.tagName === 'INPUT' || e.target.isContentEditable) return
+  e.preventDefault()
+  toggleRecording()
 })
 
 // ── hide-from-capture toggle ─────────────────────────────────────────────────
@@ -163,7 +185,15 @@ hideEl.addEventListener('click', async () => {
 
 // ── boot: sync with any in-progress session ──────────────────────────────────
 
+function setGreeting() {
+  const h = new Date().getHours()
+  const part = h < 12 ? 'Good morning' : h < 18 ? 'Good afternoon' : 'Good evening'
+  const day = new Date().toLocaleDateString(undefined, { weekday: 'long' })
+  eyebrowEl.textContent = `${day} · ${part}`
+}
+
 async function boot() {
+  setGreeting()
   refreshHide()
   try {
     if (await invoke('is_session_active')) {

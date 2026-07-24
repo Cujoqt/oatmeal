@@ -3,158 +3,209 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Oatmeal</title>
+  <title>Oatmeal — Home</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Newsreader:opsz,wght@6..72,400;6..72,500;6..72,600&family=Fraunces:opsz,wght@9..144,400;9..144,500&display=swap" rel="stylesheet" />
   <style>
     :root {
       color-scheme: light dark;
-      --bg: #f5eedd; --panel: #fdf8ec; --ink: #2c1e10; --ink-soft: #5c4326;
-      --line: #d9c7a3; --line-strong: #2c1e10; --accent: #b4551f; --rec: #a92318; --muted: #9a8360;
-      --serif: "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif;
-      --mono: "Cascadia Code", "SF Mono", "JetBrains Mono", Consolas, Menlo, monospace;
+      --bg: #e9e6dd; --shell: #f6f2e8; --panel: #fffdf8; --ink: #29261d; --ink-soft: #8a8474;
+      --faint: #a89f88; --line: rgba(41,38,29,.10); --line-strong: rgba(41,38,29,.16);
+      --accent: #c8613b; --accent-deep: #a44a2c; --rec: #a92318;
+      --serif: Fraunces, "Iowan Old Style", Palatino, Georgia, serif;
+      --sans: ui-sans-serif, -apple-system, "SF Pro Text", "Segoe UI", sans-serif;
+      --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
     }
     @media (prefers-color-scheme: dark) {
       :root {
-        --bg: #191310; --panel: #211a13; --ink: #eadfc6; --ink-soft: #c9b48d;
-        --line: #3b2c1c; --line-strong: #eadfc6; --accent: #e07a3c; --rec: #e05348; --muted: #8d7a5e;
+        --bg: #17140e; --shell: #201c14; --panel: #262117; --ink: #ede6d3; --ink-soft: #a89f88;
+        --faint: #8a8474; --line: rgba(237,230,211,.10); --line-strong: rgba(237,230,211,.18);
+        --accent: #e07a3c; --accent-deep: #c8613b; --rec: #e05348;
       }
     }
     * { box-sizing: border-box; }
+    html, body { height: 100%; }
     body {
-      margin: 0; background: var(--bg); color: var(--ink); font-family: var(--serif);
-      line-height: 1.5; min-height: 100vh; display: flex; flex-direction: column;
-      align-items: center; padding: 0 1.25rem 2rem;
+      margin: 0; background: var(--bg); color: var(--ink); font-family: var(--sans);
+      display: flex; flex-direction: column; align-items: center; padding: 20px;
     }
-    body::before {
-      content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 0;
-      opacity: .5; mix-blend-mode: multiply;
-      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2'/%3E%3CfeColorMatrix values='0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 .05 0'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23n)'/%3E%3C/svg%3E");
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { color: var(--accent-deep); }
+
+    /* editorial shell — the "center-stage" surface */
+    .shell {
+      width: 100%; max-width: 900px; flex: 1; background: var(--shell);
+      border-radius: 16px; border: 1px solid var(--line-strong);
+      box-shadow: 0 24px 60px -24px rgba(41,38,29,.35), 0 3px 12px rgba(41,38,29,.10);
+      display: flex; flex-direction: column; padding: 30px 40px 26px; position: relative;
+      animation: rise .5s cubic-bezier(.2,.7,.3,1) both;
     }
-    @media (prefers-color-scheme: dark) { body::before { mix-blend-mode: screen; opacity: .35; } }
-    body > * { position: relative; z-index: 1; }
     @keyframes rise { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
-    .masthead, .howto, main { animation: rise .5s cubic-bezier(.2,.7,.3,1) both; }
-    .howto { animation-delay: .08s; } main { animation-delay: .16s; }
 
-    .masthead {
-      width: 100%; max-width: 900px; text-align: center; padding: 1.8rem 0 .9rem;
-      border-bottom: 3px double var(--line-strong); position: relative;
-    }
-    .masthead h1 { margin: 0; font-size: clamp(2.4rem, 6vw, 3.4rem); font-weight: 600; letter-spacing: -.02em; }
-    .masthead h1 .bowl { font-size: .8em; margin-right: .12em; }
-    .masthead .tag {
-      font-family: var(--mono); font-size: .64rem; letter-spacing: .2em; text-transform: uppercase;
-      color: var(--muted); margin-top: .6rem; display: flex; justify-content: center; gap: 1.1rem; flex-wrap: wrap;
-    }
-    .masthead .tag span::before { content: "· "; color: var(--accent); }
-    .masthead .tag span:first-child::before { content: ""; }
-
-    /* hide-from-capture pill, top-right */
+    /* top strip: brand + hide pill */
+    .top { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
+    .brand { display: flex; align-items: center; gap: 8px; font-family: var(--serif); font-size: 17px; font-weight: 500; letter-spacing: .2px; }
+    .brand .bowl { width: 20px; height: 20px; border-radius: 50%; background: var(--accent); display: inline-block; }
     #hide {
-      position: absolute; top: 1.1rem; right: 0; font-family: var(--mono); font-size: .58rem;
-      letter-spacing: .12em; text-transform: uppercase; cursor: pointer; user-select: none;
-      border: 1px solid var(--line); border-radius: 999px; padding: .3rem .7rem; background: var(--panel);
-      color: var(--ink-soft); display: inline-flex; align-items: center; gap: .4rem;
+      font-family: var(--mono); font-size: 10px; letter-spacing: .12em; text-transform: uppercase; cursor: pointer;
+      user-select: none; border: 1px solid var(--line-strong); border-radius: 999px; padding: 5px 10px;
+      background: var(--panel); color: var(--ink-soft); display: inline-flex; align-items: center; gap: 6px;
     }
-    #hide .eye { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); }
+    #hide .eye { width: 7px; height: 7px; border-radius: 50%; background: var(--faint); }
     #hide.on { border-color: var(--accent); color: var(--accent); }
-    #hide.on .eye { background: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 20%, transparent); }
+    #hide.on .eye { background: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent); }
 
-    .howto {
-      width: 100%; max-width: 900px; display: grid; grid-template-columns: repeat(3, 1fr);
-      border-bottom: 1px solid var(--line); margin-bottom: 1.5rem;
+    /* hero */
+    .hero {
+      flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center;
+      text-align: center; gap: 22px; padding: 8px 0 4px;
     }
-    .howto > div { padding: .8rem 1rem .9rem; font-size: .8rem; color: var(--ink-soft); border-left: 1px solid var(--line); }
-    .howto > div:first-child { border-left: 0; padding-left: .2rem; }
-    .howto b {
-      display: block; font-family: var(--mono); font-size: .64rem; letter-spacing: .16em;
-      text-transform: uppercase; color: var(--accent); margin-bottom: .3rem; font-weight: 600;
+    .eyebrow { font: 500 12px var(--sans); color: var(--faint); text-transform: uppercase; letter-spacing: 1.5px; }
+    .hero h1 {
+      font-family: var(--serif); font-weight: 400; font-size: clamp(28px, 4.6vw, 38px); line-height: 1.12;
+      margin: 0; letter-spacing: -.5px; max-width: 540px; text-wrap: balance;
     }
-    @media (max-width: 640px) {
-      .howto { grid-template-columns: 1fr; }
-      .howto > div { border-left: 0; border-top: 1px solid var(--line); padding-left: .2rem; }
-      .howto > div:first-child { border-top: 0; }
+    .title-wrap { width: 100%; max-width: 420px; }
+    #title {
+      width: 100%; text-align: center; font-family: var(--serif); font-size: 16px; color: var(--ink);
+      background: transparent; border: none; border-bottom: 1px solid var(--line-strong);
+      padding: 7px 4px; outline: none; transition: border-color .15s;
     }
+    #title::placeholder { color: var(--faint); }
+    #title:focus { border-color: var(--accent); }
+    #title:disabled { opacity: .6; }
 
-    main { width: 100%; max-width: 900px; }
-    h2 {
-      font-family: var(--mono); font-size: .64rem; font-weight: 600; letter-spacing: .2em;
-      text-transform: uppercase; color: var(--muted); margin: 0 0 .8rem; display: flex; align-items: center; gap: .7rem;
-    }
-    h2::after { content: ""; flex: 1; height: 1px; background: var(--line); }
-
-    .row { display: flex; gap: .6rem; margin-bottom: .9rem; }
-    input {
-      font-family: var(--serif); font-size: 1rem; color: var(--ink); background: var(--panel);
-      border: 1px solid var(--line); border-radius: 3px; padding: .6rem .75rem; outline: none; flex: 1; min-width: 0;
-    }
-    input::placeholder { color: var(--muted); font-style: italic; }
-    input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 14%, transparent); }
-
-    .controls { display: flex; align-items: center; gap: 1.1rem; margin-bottom: .8rem; }
+    /* the record button + pulse */
+    .rec-stage { position: relative; width: 112px; height: 112px; display: flex; align-items: center; justify-content: center; margin-top: 2px; }
+    .rec-stage .pulse { position: absolute; inset: 0; border-radius: 50%; background: var(--accent); opacity: 0; }
+    @keyframes oatpulse { 0% { transform: scale(1); opacity: .45; } 70% { opacity: 0; } 100% { transform: scale(2.1); opacity: 0; } }
     button.rec {
-      font-family: var(--mono); font-size: .82rem; font-weight: 600; letter-spacing: .14em; text-transform: uppercase;
-      color: var(--panel); background: var(--ink); border: 0; border-radius: 3px; padding: .85rem 1.6rem; cursor: pointer;
-      display: inline-flex; align-items: center; gap: .6rem; transition: background .15s, transform .08s;
+      position: relative; width: 92px; height: 92px; border-radius: 50%; background: var(--accent); border: none;
+      cursor: pointer; box-shadow: 0 10px 24px -6px color-mix(in srgb, var(--accent-deep) 70%, transparent);
+      display: flex; align-items: center; justify-content: center; transition: background .15s, transform .08s;
     }
-    button.rec:hover { background: var(--accent); }
+    button.rec:hover { background: var(--accent-deep); }
     button.rec:active { transform: translateY(1px); }
-    button.rec:disabled { opacity: .45; cursor: default; }
-    button.rec .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--rec); box-shadow: 0 0 0 2px color-mix(in srgb, var(--panel) 55%, transparent); }
-    button.rec.stop { background: var(--rec); animation: seal 1.5s ease-in-out infinite; }
-    button.rec.stop .dot { background: var(--panel); animation: blinkdot 1.5s ease-in-out infinite; }
-    @keyframes seal { 50% { box-shadow: 0 0 0 7px color-mix(in srgb, var(--rec) 22%, transparent); } }
-    @keyframes blinkdot { 50% { opacity: .35; } }
+    button.rec:disabled { opacity: .5; cursor: default; }
+    button.rec svg { width: 32px; height: 32px; }
+    /* idle: gentle pulse. recording: red + faster pulse */
+    .rec-stage.idle .pulse { animation: oatpulse 2.4s ease-out infinite; }
+    .rec-stage.live .pulse { animation: oatpulse 1.3s ease-out infinite; background: var(--rec); }
+    .rec-stage.live button.rec { background: var(--rec); }
+    .rec-stage.live button.rec:hover { background: var(--rec); }
+
+    /* waveform accent — animates only while live */
+    @keyframes oatwave { 0%,100% { transform: scaleY(.25); } 50% { transform: scaleY(1); } }
+    .wave { display: flex; align-items: center; justify-content: center; gap: 4px; height: 26px; opacity: .5; transition: opacity .2s; }
+    .wave b { display: inline-block; width: 3px; border-radius: 3px; background: var(--accent); transform-origin: center; animation: oatwave 1.1s ease-in-out infinite; animation-play-state: paused; }
+    .hero.live .wave { opacity: 1; }
+    .hero.live .wave b { animation-play-state: running; }
+
+    .hint { display: flex; flex-direction: column; align-items: center; gap: 10px; margin-top: -4px; }
+    .hint .say { font: 400 13.5px var(--sans); color: var(--ink-soft); }
+    .hero.live .hint .say { display: none; }
+    .hint .say kbd { background: color-mix(in srgb, var(--faint) 30%, transparent); border-radius: 5px; padding: 2px 8px; font: 600 12px var(--mono); }
     #timer { display: none; font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 1.5rem; font-weight: 600; color: var(--rec); letter-spacing: .04em; }
     #timer.on { display: inline; }
-    #status { font-size: .84rem; font-style: italic; color: var(--ink-soft); min-height: 1.3em; margin-bottom: .4rem; }
+    #status { font: italic 13.5px var(--sans); color: var(--ink-soft); min-height: 1.2em; }
     #status.err { color: var(--rec); font-style: normal; }
 
-    #result { display: none; margin-top: 1.2rem; }
+    /* bento row: stats + recent */
+    .bento-row { display: grid; grid-template-columns: 1fr 1.55fr; gap: 14px; margin-top: 14px; }
+    .bento { border-radius: 18px; border: 1px solid var(--line); background: var(--panel); }
+    .stats { padding: 18px 20px; display: flex; gap: 14px; align-items: center; }
+    .stats .col { flex: 1; }
+    .stats .num { font-family: var(--serif); font-size: 28px; line-height: 1; }
+    .stats .num.accent { color: var(--accent); }
+    .stats .lbl { font: 400 11.5px var(--sans); color: var(--ink-soft); margin-top: 3px; }
+    .stats .sep { width: 1px; align-self: stretch; background: var(--line-strong); }
+    .recent { padding: 14px 16px 6px; }
+    .recent .head { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 4px; }
+    .recent .head .t { font: 600 11.5px var(--sans); text-transform: uppercase; letter-spacing: .7px; color: var(--faint); }
+    .recent .head .all { font: 500 12px var(--sans); color: var(--accent); cursor: pointer; }
+    .mrow { display: flex; align-items: center; gap: 14px; padding: 8px; border-radius: 11px; cursor: pointer; }
+    .mrow:hover { background: color-mix(in srgb, var(--faint) 14%, transparent); }
+    .mico { width: 30px; height: 30px; border-radius: 10px; background: color-mix(in srgb, var(--accent) 22%, var(--panel)); display: flex; align-items: center; justify-content: center; flex: none; }
+    .mico svg { width: 17px; height: 17px; }
+    .mrow .meta { flex: 1; }
+    .mrow .meta .mt { font: 600 13px var(--sans); }
+    .mrow .meta .ms { font: 400 11px var(--sans); color: var(--ink-soft); }
+    .tag { font: 600 10px var(--sans); padding: 3px 9px; border-radius: 20px; }
+    .tag.done { background: #e6f0e6; color: #3f7a4a; }
+    .tag.todo { background: #f3e9d6; color: #a07b2e; }
+
+    /* transcript result — revealed after stop */
+    #result { display: none; margin-top: 16px; }
     #result.open { display: block; animation: rise .3s ease both; }
-    .saved {
-      font-family: var(--mono); font-size: .68rem; color: var(--muted); letter-spacing: .04em;
-      word-break: break-all; margin-bottom: .6rem;
-    }
+    .saved { font-family: var(--mono); font-size: 11px; color: var(--faint); letter-spacing: .04em; word-break: break-all; margin-bottom: 8px; }
     .saved b { color: var(--accent); }
-    #transcript {
-      font-family: var(--mono); font-size: .8rem; line-height: 1.7; max-height: 42vh; overflow-y: auto;
-      border-top: 1px dashed var(--line); padding-top: .8rem;
-    }
-    .seg { margin: 0 0 .55rem; color: var(--ink-soft); animation: rise .25s ease both; }
+    #transcript { font-family: var(--mono); font-size: 12.5px; line-height: 1.7; max-height: 34vh; overflow-y: auto; border-top: 1px dashed var(--line-strong); padding-top: 12px; }
+    .seg { margin: 0 0 8px; color: var(--ink-soft); animation: rise .25s ease both; }
     .seg b { color: var(--accent); font-weight: 600; }
 
     ::selection { background: color-mix(in srgb, var(--accent) 25%, transparent); }
     ::-webkit-scrollbar { width: 8px; }
-    ::-webkit-scrollbar-thumb { background: var(--line); border-radius: 4px; }
+    ::-webkit-scrollbar-thumb { background: var(--line-strong); border-radius: 4px; }
+
+    @media (max-width: 640px) {
+      .shell { padding: 22px 20px; }
+      .bento-row { grid-template-columns: 1fr; }
+    }
   </style>
 </head>
 <body>
-  <header class="masthead">
-    <div id="hide" class="on" title="Toggle invisibility to screen sharing"><span class="eye"></span><span id="hideLabel">hidden from shares</span></div>
-    <h1><span class="bowl">🥣</span>Oatmeal</h1>
-    <div class="tag">
-      <span>local meeting recorder</span>
-      <span>audio never leaves this machine</span>
-      <span>invisible to screen shares</span>
+  <main class="shell">
+    <div class="top">
+      <div class="brand"><span class="bowl"></span>Oatmeal</div>
+      <div id="hide" class="on" title="Toggle invisibility to screen sharing"><span class="eye"></span><span id="hideLabel">hidden from shares</span></div>
     </div>
-  </header>
 
-  <section class="howto">
-    <div><b>01 — Record</b> Title the meeting and hit record. Mic <i>and</i> the other side of the call are captured natively — no “share system audio” dance.</div>
-    <div><b>02 — Invisible</b> This window is hidden from Zoom, Discord &amp; Loom screen shares. You see it; they don’t.</div>
-    <div><b>03 — Local notes</b> On stop, Whisper transcribes on-device and writes <code>transcript.md</code>. Nothing is uploaded.</div>
-  </section>
+    <section class="hero" id="hero">
+      <div class="eyebrow" id="eyebrow">Good morning</div>
+      <h1>What are we talking about today?</h1>
 
-  <main>
-    <h2>Recorder</h2>
-    <div class="row">
-      <input id="title" placeholder="Meeting title — e.g. Standup, Acme discovery call" />
+      <div class="title-wrap">
+        <input id="title" placeholder="Name this meeting — e.g. Standup, Acme discovery" />
+      </div>
+
+      <div class="rec-stage idle" id="stage">
+        <span class="pulse"></span>
+        <button id="btn" class="rec" aria-label="Record">
+          <svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.8" stroke-linecap="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M6 11a6 6 0 0 0 12 0M12 17v3"/></svg>
+        </button>
+      </div>
+
+      <div class="hint">
+        <div class="wave" aria-hidden="true">
+          <b style="height:35%;animation-delay:0s"></b><b style="height:70%;animation-delay:.1s"></b><b style="height:45%;animation-delay:.2s"></b><b style="height:100%;animation-delay:.3s"></b><b style="height:60%;animation-delay:.15s"></b><b style="height:85%;animation-delay:.25s"></b><b style="height:40%;animation-delay:.05s"></b><b style="height:75%;animation-delay:.35s"></b><b style="height:95%;animation-delay:.2s"></b><b style="height:50%;animation-delay:.1s"></b><b style="height:65%;animation-delay:.3s"></b><b style="height:30%;animation-delay:.4s"></b>
+        </div>
+        <span id="timer">00:00</span>
+        <div class="say" id="say">Tap to record &nbsp;·&nbsp; or press <kbd>Space</kbd></div>
+        <div id="status">Ready.</div>
+      </div>
+    </section>
+
+    <div class="bento-row">
+      <div class="bento stats">
+        <div class="col"><div class="num">14</div><div class="lbl">meetings<br>this week</div></div>
+        <div class="sep"></div>
+        <div class="col"><div class="num accent">6.2h</div><div class="lbl">of notes<br>written for you</div></div>
+      </div>
+      <div class="bento recent">
+        <div class="head"><div class="t">Recent</div><span class="all">View all</span></div>
+        <div class="mrow">
+          <div class="mico"><svg viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="1.9" stroke-linecap="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M6 11a6 6 0 0 0 12 0M12 17v3"/></svg></div>
+          <div class="meta"><div class="mt">Q3 Roadmap Sync</div><div class="ms">Today · 42 min · 4 people</div></div>
+          <span class="tag done">Summarized</span>
+        </div>
+        <div class="mrow">
+          <div class="mico"><svg viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="1.9" stroke-linecap="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M6 11a6 6 0 0 0 12 0M12 17v3"/></svg></div>
+          <div class="meta"><div class="mt">Design Critique — Onboarding</div><div class="ms">Yesterday · 28 min · 3 people</div></div>
+          <span class="tag todo">6 to-dos</span>
+        </div>
+      </div>
     </div>
-    <div class="controls">
-      <button id="btn" class="rec"><span class="dot"></span>Record</button>
-      <span id="timer">00:00</span>
-    </div>
-    <div id="status">Ready.</div>
 
     <section id="result">
       <div class="saved" id="saved"></div>
