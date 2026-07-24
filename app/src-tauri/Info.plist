@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- macOS TCC prompt shown the first time Oatmeal opens the microphone (M2).
+       Without this key the OS denies input capture silently and the WAV is empty. -->
+  <key>NSMicrophoneUsageDescription</key>
+  <string>Oatmeal records your microphone locally to transcribe your meetings. Audio never leaves your machine.</string>
+  <!-- ScreenCaptureKit taps system audio (the other side of your call) — macOS
+       gates that behind the screen-recording permission (M3). -->
+  <key>NSScreenCaptureUsageDescription</key>
+  <string>Oatmeal captures system audio locally to transcribe what other participants say. Nothing is streamed off your machine.</string>
+</dict>
+</plist>

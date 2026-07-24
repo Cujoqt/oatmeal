@@ -1,5 +1,10 @@
 node_modules/
 *.log
+
+# Rust / Tauri build output
+target/
+app/src-tauri/target/
+app/src-tauri/gen/
 .DS_Store
 meetings/*
 !meetings/.gitkeep

@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Oatmeal</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #f5eedd; --panel: #fdf8ec; --ink: #2c1e10; --ink-soft: #5c4326;
+      --line: #d9c7a3; --line-strong: #2c1e10; --accent: #b4551f; --rec: #a92318; --muted: #9a8360;
+      --serif: "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif;
+      --mono: "Cascadia Code", "SF Mono", "JetBrains Mono", Consolas, Menlo, monospace;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #191310; --panel: #211a13; --ink: #eadfc6; --ink-soft: #c9b48d;
+        --line: #3b2c1c; --line-strong: #eadfc6; --accent: #e07a3c; --rec: #e05348; --muted: #8d7a5e;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; background: var(--bg); color: var(--ink); font-family: var(--serif);
+      line-height: 1.5; min-height: 100vh; display: flex; flex-direction: column;
+      align-items: center; padding: 0 1.25rem 2rem;
+    }
+    body::before {
+      content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 0;
+      opacity: .5; mix-blend-mode: multiply;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2'/%3E%3CfeColorMatrix values='0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 .05 0'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23n)'/%3E%3C/svg%3E");
+    }
+    @media (prefers-color-scheme: dark) { body::before { mix-blend-mode: screen; opacity: .35; } }
+    body > * { position: relative; z-index: 1; }
+    @keyframes rise { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+    .masthead, .howto, main { animation: rise .5s cubic-bezier(.2,.7,.3,1) both; }
+    .howto { animation-delay: .08s; } main { animation-delay: .16s; }
+
+    .masthead {
+      width: 100%; max-width: 900px; text-align: center; padding: 1.8rem 0 .9rem;
+      border-bottom: 3px double var(--line-strong); position: relative;
+    }
+    .masthead h1 { margin: 0; font-size: clamp(2.4rem, 6vw, 3.4rem); font-weight: 600; letter-spacing: -.02em; }
+    .masthead h1 .bowl { font-size: .8em; margin-right: .12em; }
+    .masthead .tag {
+      font-family: var(--mono); font-size: .64rem; letter-spacing: .2em; text-transform: uppercase;
+      color: var(--muted); margin-top: .6rem; display: flex; justify-content: center; gap: 1.1rem; flex-wrap: wrap;
+    }
+    .masthead .tag span::before { content: "· "; color: var(--accent); }
+    .masthead .tag span:first-child::before { content: ""; }
+
+    /* hide-from-capture pill, top-right */
+    #hide {
+      position: absolute; top: 1.1rem; right: 0; font-family: var(--mono); font-size: .58rem;
+      letter-spacing: .12em; text-transform: uppercase; cursor: pointer; user-select: none;
+      border: 1px solid var(--line); border-radius: 999px; padding: .3rem .7rem; background: var(--panel);
+      color: var(--ink-soft); display: inline-flex; align-items: center; gap: .4rem;
+    }
+    #hide .eye { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); }
+    #hide.on { border-color: var(--accent); color: var(--accent); }
+    #hide.on .eye { background: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 20%, transparent); }
+
+    .howto {
+      width: 100%; max-width: 900px; display: grid; grid-template-columns: repeat(3, 1fr);
+      border-bottom: 1px solid var(--line); margin-bottom: 1.5rem;
+    }
+    .howto > div { padding: .8rem 1rem .9rem; font-size: .8rem; color: var(--ink-soft); border-left: 1px solid var(--line); }
+    .howto > div:first-child { border-left: 0; padding-left: .2rem; }
+    .howto b {
+      display: block; font-family: var(--mono); font-size: .64rem; letter-spacing: .16em;
+      text-transform: uppercase; color: var(--accent); margin-bottom: .3rem; font-weight: 600;
+    }
+    @media (max-width: 640px) {
+      .howto { grid-template-columns: 1fr; }
+      .howto > div { border-left: 0; border-top: 1px solid var(--line); padding-left: .2rem; }
+      .howto > div:first-child { border-top: 0; }
+    }
+
+    main { width: 100%; max-width: 900px; }
+    h2 {
+      font-family: var(--mono); font-size: .64rem; font-weight: 600; letter-spacing: .2em;
+      text-transform: uppercase; color: var(--muted); margin: 0 0 .8rem; display: flex; align-items: center; gap: .7rem;
+    }
+    h2::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+
+    .row { display: flex; gap: .6rem; margin-bottom: .9rem; }
+    input {
+      font-family: var(--serif); font-size: 1rem; color: var(--ink); background: var(--panel);
+      border: 1px solid var(--line); border-radius: 3px; padding: .6rem .75rem; outline: none; flex: 1; min-width: 0;
+    }
+    input::placeholder { color: var(--muted); font-style: italic; }
+    input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 14%, transparent); }
+
+    .controls { display: flex; align-items: center; gap: 1.1rem; margin-bottom: .8rem; }
+    button.rec {
+      font-family: var(--mono); font-size: .82rem; font-weight: 600; letter-spacing: .14em; text-transform: uppercase;
+      color: var(--panel); background: var(--ink); border: 0; border-radius: 3px; padding: .85rem 1.6rem; cursor: pointer;
+      display: inline-flex; align-items: center; gap: .6rem; transition: background .15s, transform .08s;
+    }
+    button.rec:hover { background: var(--accent); }
+    button.rec:active { transform: translateY(1px); }
+    button.rec:disabled { opacity: .45; cursor: default; }
+    button.rec .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--rec); box-shadow: 0 0 0 2px color-mix(in srgb, var(--panel) 55%, transparent); }
+    button.rec.stop { background: var(--rec); animation: seal 1.5s ease-in-out infinite; }
+    button.rec.stop .dot { background: var(--panel); animation: blinkdot 1.5s ease-in-out infinite; }
+    @keyframes seal { 50% { box-shadow: 0 0 0 7px color-mix(in srgb, var(--rec) 22%, transparent); } }
+    @keyframes blinkdot { 50% { opacity: .35; } }
+    #timer { display: none; font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 1.5rem; font-weight: 600; color: var(--rec); letter-spacing: .04em; }
+    #timer.on { display: inline; }
+    #status { font-size: .84rem; font-style: italic; color: var(--ink-soft); min-height: 1.3em; margin-bottom: .4rem; }
+    #status.err { color: var(--rec); font-style: normal; }
+
+    #result { display: none; margin-top: 1.2rem; }
+    #result.open { display: block; animation: rise .3s ease both; }
+    .saved {
+      font-family: var(--mono); font-size: .68rem; color: var(--muted); letter-spacing: .04em;
+      word-break: break-all; margin-bottom: .6rem;
+    }
+    .saved b { color: var(--accent); }
+    #transcript {
+      font-family: var(--mono); font-size: .8rem; line-height: 1.7; max-height: 42vh; overflow-y: auto;
+      border-top: 1px dashed var(--line); padding-top: .8rem;
+    }
+    .seg { margin: 0 0 .55rem; color: var(--ink-soft); animation: rise .25s ease both; }
+    .seg b { color: var(--accent); font-weight: 600; }
+
+    ::selection { background: color-mix(in srgb, var(--accent) 25%, transparent); }
+    ::-webkit-scrollbar { width: 8px; }
+    ::-webkit-scrollbar-thumb { background: var(--line); border-radius: 4px; }
+  </style>
+</head>
+<body>
+  <header class="masthead">
+    <div id="hide" class="on" title="Toggle invisibility to screen sharing"><span class="eye"></span><span id="hideLabel">hidden from shares</span></div>
+    <h1><span class="bowl">🥣</span>Oatmeal</h1>
+    <div class="tag">
+      <span>local meeting recorder</span>
+      <span>audio never leaves this machine</span>
+      <span>invisible to screen shares</span>
+    </div>
+  </header>
+
+  <section class="howto">
+    <div><b>01 — Record</b> Title the meeting and hit record. Mic <i>and</i> the other side of the call are captured natively — no “share system audio” dance.</div>
+    <div><b>02 — Invisible</b> This window is hidden from Zoom, Discord &amp; Loom screen shares. You see it; they don’t.</div>
+    <div><b>03 — Local notes</b> On stop, Whisper transcribes on-device and writes <code>transcript.md</code>. Nothing is uploaded.</div>
+  </section>
+
+  <main>
+    <h2>Recorder</h2>
+    <div class="row">
+      <input id="title" placeholder="Meeting title — e.g. Standup, Acme discovery call" />
+    </div>
+    <div class="controls">
+      <button id="btn" class="rec"><span class="dot"></span>Record</button>
+      <span id="timer">00:00</span>
+    </div>
+    <div id="status">Ready.</div>
+
+    <section id="result">
+      <div class="saved" id="saved"></div>
+      <div id="transcript"></div>
+    </section>
+  </main>
+
+  <script type="module" src="/app.js"></script>
+</body>
+</html>
