@@ -1,3 +1,4 @@
+pub mod library;
 mod mic;
 pub mod model;
 pub mod session;
@@ -268,6 +269,13 @@ fn stop_session(
     )
 }
 
+/// Every past meeting on disk, newest first — drives the home screen's recent
+/// list and headline stats. Cheap enough to call on every home-screen render.
+#[tauri::command]
+fn list_meetings() -> Vec<library::Meeting> {
+    library::list_meetings()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -286,7 +294,8 @@ pub fn run() {
             ensure_model,
             start_session,
             stop_session,
-            is_session_active
+            is_session_active,
+            list_meetings
         ])
         .setup(|app| {
             // Apply the hide flag as soon as the window exists.
