@@ -19,6 +19,8 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::SampleFormat;
 use hound::{WavSpec, WavWriter};
 
+use crate::live::Tap;
+
 type SharedWriter = Arc<Mutex<Option<WavWriter<std::io::BufWriter<std::fs::File>>>>>;
 
 /// A running microphone capture. Dropping it (or calling `stop`) ends the stream
@@ -33,6 +35,12 @@ impl MicRecorder {
     /// Begin capturing the default input device into `path` (a `.wav`). Returns
     /// once the stream is live, or an error describing why it couldn't start.
     pub fn start(path: PathBuf) -> Result<Self, String> {
+        Self::start_with_tap(path, None)
+    }
+
+    /// As `start`, but also mirror the captured audio into `tap` so the live
+    /// transcription worker can decode it while the meeting is still running.
+    pub fn start_with_tap(path: PathBuf, tap: Option<Arc<Tap>>) -> Result<Self, String> {
         let stop = Arc::new(AtomicBool::new(false));
         // Channel to surface a start-time error (bad device, unbuildable stream)
         // back to the caller synchronously.
@@ -42,7 +50,7 @@ impl MicRecorder {
         let thread_path = path.clone();
         let handle = std::thread::Builder::new()
             .name("oatmeal-mic".into())
-            .spawn(move || run_capture(thread_path, thread_stop, ready_tx))
+            .spawn(move || run_capture(thread_path, thread_stop, ready_tx, tap))
             .map_err(|e| format!("spawn mic thread: {e}"))?;
 
         // Wait for the capture thread to report the stream is up (or failed).
@@ -100,6 +108,7 @@ fn run_capture(
     path: PathBuf,
     stop: Arc<AtomicBool>,
     ready: std::sync::mpsc::Sender<Result<(), String>>,
+    tap: Option<Arc<Tap>>,
 ) -> Result<(), String> {
     // Anything that fails during setup is reported via `ready` so `start` can
     // return it synchronously; a helper keeps that plumbing tidy.
@@ -142,31 +151,55 @@ fn run_capture(
 
     // Build a stream whose callback converts whatever native format the device
     // hands us into i16 PCM and appends it to the WAV.
+    // Feeding the live tap needs f32; convert once per callback and reuse it for
+    // both the WAV and the tap so non-f32 devices don't pay twice.
     let stream_res = match sample_format {
         SampleFormat::F32 => {
             let w = writer.clone();
+            let t = tap.clone();
             device.build_input_stream(
                 &config,
-                move |data: &[f32], _| write_samples(&w, data.iter().map(|&s| f32_to_i16(s))),
+                move |data: &[f32], _| {
+                    write_samples(&w, data.iter().map(|&s| f32_to_i16(s)));
+                    if let Some(t) = &t {
+                        t.push(data, channels, sample_rate);
+                    }
+                },
                 err_fn,
                 None,
             )
         }
         SampleFormat::I16 => {
             let w = writer.clone();
+            let t = tap.clone();
             device.build_input_stream(
                 &config,
-                move |data: &[i16], _| write_samples(&w, data.iter().copied()),
+                move |data: &[i16], _| {
+                    write_samples(&w, data.iter().copied());
+                    if let Some(t) = &t {
+                        let f: Vec<f32> =
+                            data.iter().map(|&s| s as f32 / i16::MAX as f32).collect();
+                        t.push(&f, channels, sample_rate);
+                    }
+                },
                 err_fn,
                 None,
             )
         }
         SampleFormat::U16 => {
             let w = writer.clone();
+            let t = tap.clone();
             device.build_input_stream(
                 &config,
                 move |data: &[u16], _| {
-                    write_samples(&w, data.iter().map(|&s| (s as i32 - 32768) as i16))
+                    write_samples(&w, data.iter().map(|&s| (s as i32 - 32768) as i16));
+                    if let Some(t) = &t {
+                        let f: Vec<f32> = data
+                            .iter()
+                            .map(|&s| (s as i32 - 32768) as f32 / i16::MAX as f32)
+                            .collect();
+                        t.push(&f, channels, sample_rate);
+                    }
                 },
                 err_fn,
                 None,

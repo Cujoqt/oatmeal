@@ -1,4 +1,5 @@
 pub mod library;
+pub mod live;
 mod mic;
 pub mod model;
 pub mod session;
@@ -11,6 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use tauri::Manager;
 
+use live::{LiveSession, Tap};
 use mic::MicRecorder;
 use sysaudio::SysAudioRecorder;
 
@@ -25,6 +27,8 @@ pub struct AppState {
     pub sysaudio: Mutex<Option<SysAudioRecorder>>,
     /// Paths for the in-progress meeting, if a session is running.
     pub session: Mutex<Option<session::SessionPaths>>,
+    /// Live transcription worker for the in-progress meeting.
+    pub live: Mutex<Option<LiveSession>>,
 }
 
 impl Default for AppState {
@@ -35,6 +39,7 @@ impl Default for AppState {
             mic: Mutex::new(None),
             sysaudio: Mutex::new(None),
             session: Mutex::new(None),
+            live: Mutex::new(None),
         }
     }
 }
@@ -168,6 +173,7 @@ fn ensure_model() -> Result<String, String> {
 /// failing the whole meeting — but if *neither* starts, that's an error.
 #[tauri::command]
 fn start_session(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     title: String,
 ) -> Result<session::SessionPaths, String> {
@@ -177,11 +183,15 @@ fn start_session(
     }
     let paths = session::new_session(&title)?;
 
+    // Both lanes mirror into one tap, so the live worker hears the room and the
+    // call as a single stream — the same mix the final transcript is made from.
+    let tap = std::sync::Arc::new(Tap::default());
+
     let mut any = false;
     {
         let mut m = state.mic.lock().map_err(|_| "mic state poisoned")?;
         if m.is_none() {
-            match MicRecorder::start(PathBuf::from(&paths.mic_wav)) {
+            match MicRecorder::start_with_tap(PathBuf::from(&paths.mic_wav), Some(tap.clone())) {
                 Ok(r) => {
                     *m = Some(r);
                     any = true;
@@ -193,7 +203,10 @@ fn start_session(
     {
         let mut s = state.sysaudio.lock().map_err(|_| "sysaudio state poisoned")?;
         if s.is_none() {
-            match SysAudioRecorder::start(PathBuf::from(&paths.sys_wav)) {
+            match SysAudioRecorder::start_with_tap(
+                PathBuf::from(&paths.sys_wav),
+                Some(tap.clone()),
+            ) {
                 Ok(r) => {
                     *s = Some(r);
                     any = true;
@@ -206,8 +219,38 @@ fn start_session(
     if !any {
         return Err("neither the microphone nor system-audio lane could start — check permissions".into());
     }
+
+    // Live transcription is a convenience, not the product: if the worker can't
+    // start (missing model, say), the meeting still records and still gets its
+    // accurate transcript at stop.
+    {
+        let mut slot = state.live.lock().map_err(|_| "live state poisoned")?;
+        let handle = app.clone();
+        match LiveSession::start(tap, String::new(), Some("en".into()), move |line| {
+            use tauri::Emitter;
+            if let Err(e) = handle.emit("oatmeal://live-line", line) {
+                eprintln!("[oatmeal] emit live line: {e}");
+            }
+        }) {
+            Ok(live) => *slot = Some(live),
+            Err(e) => eprintln!("[oatmeal] live transcription did not start: {e}"),
+        }
+    }
+
     *sess = Some(paths.clone());
     Ok(paths)
+}
+
+/// Lines the live worker has produced so far this meeting. The recap feature
+/// reads this to answer questions before the meeting has even ended.
+#[tauri::command]
+fn live_lines(state: tauri::State<'_, AppState>) -> Vec<live::LiveLine> {
+    state
+        .live
+        .lock()
+        .ok()
+        .and_then(|l| l.as_ref().map(|s| s.lines()))
+        .unwrap_or_default()
 }
 
 /// Whether a meeting is currently being recorded.
@@ -232,6 +275,12 @@ fn stop_session(
         let mut sess = state.session.lock().map_err(|_| "session state poisoned")?;
         sess.take().ok_or("no meeting is being recorded")?
     };
+
+    // Stop the live worker first: it holds its own copy of the Whisper model,
+    // and releasing it before the accurate pass keeps peak memory down.
+    if let Some(live) = state.live.lock().map_err(|_| "live state poisoned")?.take() {
+        live.stop();
+    }
 
     if let Some(r) = state
         .mic
@@ -310,6 +359,7 @@ pub fn run() {
             stop_session,
             is_session_active,
             list_meetings,
+            live_lines,
             rename_meeting,
             delete_meeting
         ])

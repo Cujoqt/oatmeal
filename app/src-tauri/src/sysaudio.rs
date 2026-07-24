@@ -21,6 +21,8 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
 use hound::{WavSpec, WavWriter};
+
+use crate::live::Tap;
 use screencapturekit::prelude::{
     CMSampleBuffer, CMSampleBufferExt, SCContentFilter, SCShareableContent, SCStream,
     SCStreamConfiguration, SCStreamOutputType,
@@ -44,6 +46,12 @@ impl SysAudioRecorder {
     /// Begin capturing system audio into `path` (a `.wav`). Returns once the
     /// stream is live, or an error (no display, capture permission denied, …).
     pub fn start(path: PathBuf) -> Result<Self, String> {
+        Self::start_with_tap(path, None)
+    }
+
+    /// As `start`, but also mirror the captured audio into `tap` so the live
+    /// transcription worker can decode the far side of the call as it arrives.
+    pub fn start_with_tap(path: PathBuf, tap: Option<Arc<Tap>>) -> Result<Self, String> {
         let stop = Arc::new(AtomicBool::new(false));
         let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<(), String>>();
 
@@ -51,7 +59,7 @@ impl SysAudioRecorder {
         let thread_path = path.clone();
         let handle = std::thread::Builder::new()
             .name("oatmeal-sysaudio".into())
-            .spawn(move || run_capture(thread_path, thread_stop, ready_tx))
+            .spawn(move || run_capture(thread_path, thread_stop, ready_tx, tap))
             .map_err(|e| format!("spawn sysaudio thread: {e}"))?;
 
         match ready_rx.recv() {
@@ -106,6 +114,7 @@ fn run_capture(
     path: PathBuf,
     stop: Arc<AtomicBool>,
     ready: std::sync::mpsc::Sender<Result<(), String>>,
+    tap: Option<Arc<Tap>>,
 ) -> Result<(), String> {
     macro_rules! bail {
         ($e:expr) => {{
@@ -156,11 +165,12 @@ fn run_capture(
     let writer: SharedWriter = Arc::new(Mutex::new(Some(writer)));
 
     let cb_writer = writer.clone();
+    let cb_tap = tap.clone();
     let mut stream = SCStream::new(&filter, &config);
     stream.add_output_handler(
         move |sample: CMSampleBuffer, of_type: SCStreamOutputType| {
             if of_type == SCStreamOutputType::Audio {
-                write_audio_sample(&cb_writer, &sample);
+                write_audio_sample(&cb_writer, cb_tap.as_deref(), &sample);
             }
         },
         SCStreamOutputType::Audio,
@@ -191,7 +201,7 @@ fn run_capture(
 /// dispatch queue. SCK delivers Float32 non-interleaved: one `AudioBuffer` per
 /// channel, each holding the same number of frames. Averaging the channels gives
 /// a mono track; if only one buffer is present it passes through unchanged.
-fn write_audio_sample(writer: &SharedWriter, sample: &CMSampleBuffer) {
+fn write_audio_sample(writer: &SharedWriter, tap: Option<&Tap>, sample: &CMSampleBuffer) {
     let list = match sample.audio_buffer_list() {
         Some(l) => l,
         None => return,
@@ -232,6 +242,11 @@ fn write_audio_sample(writer: &SharedWriter, sample: &CMSampleBuffer) {
     };
 
     let inv = 1.0 / num_buffers as f32;
+    let mut mono_frames: Vec<f32> = if tap.is_some() {
+        Vec::with_capacity(frames)
+    } else {
+        Vec::new()
+    };
     for frame in 0..frames {
         let mut acc = 0.0f32;
         for ch in &channels {
@@ -239,5 +254,15 @@ fn write_audio_sample(writer: &SharedWriter, sample: &CMSampleBuffer) {
         }
         let mono = (acc * inv).clamp(-1.0, 1.0);
         let _ = w.write_sample((mono * i16::MAX as f32) as i16);
+        if tap.is_some() {
+            mono_frames.push(mono);
+        }
+    }
+
+    // Release the writer lock before touching the tap so the two never contend.
+    drop(guard);
+    if let Some(tap) = tap {
+        // Already mono at SCK's configured rate.
+        tap.push(&mono_frames, 1, SAMPLE_RATE);
     }
 }
