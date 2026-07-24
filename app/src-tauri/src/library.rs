@@ -27,6 +27,8 @@ pub struct Meeting {
     /// Whether `transcript.md` was written (i.e. the meeting finished and was
     /// transcribed, rather than being abandoned mid-recording).
     pub transcribed: bool,
+    /// Whether the language model has already written notes for this meeting.
+    pub has_notes: bool,
     pub dir: String,
 }
 
@@ -72,6 +74,7 @@ fn read_meeting(dir: &Path, name: &str) -> Meeting {
         started_at: parse_stamp(name).unwrap_or_default(),
         duration_secs,
         transcribed,
+        has_notes: dir.join("notes.md").is_file(),
         dir: dir.display().to_string(),
     }
 }
@@ -196,6 +199,68 @@ pub fn delete_meeting(id: &str) -> Result<String, String> {
     Ok(dest.display().to_string())
 }
 
+/// The transcript's spoken text, with the markdown scaffolding and timestamps
+/// stripped — what the language model should actually read.
+pub fn transcript_text(id: &str) -> Result<String, String> {
+    let dir = meeting_dir(id)?;
+    let path = dir.join("transcript.md");
+    let md = std::fs::read_to_string(&path)
+        .map_err(|_| "this meeting has no transcript yet".to_string())?;
+    Ok(strip_transcript_markup(&md))
+}
+
+/// Pull the spoken words out of a `transcript.md`, dropping the title, the
+/// recorded-at line, the `## Transcript` heading and the `**[m:ss]**` stamps.
+fn strip_transcript_markup(md: &str) -> String {
+    let mut out = String::new();
+    for line in md.lines() {
+        let line = line.trim();
+        if line.is_empty()
+            || line.starts_with('#')
+            || (line.starts_with('_') && line.ends_with('_'))
+        {
+            continue;
+        }
+        // `**[1:23]** words words` → `words words`
+        let text = match line.strip_prefix("**[") {
+            Some(rest) => rest.split_once("]**").map(|(_, t)| t).unwrap_or(rest),
+            None => line,
+        };
+        let text = text.trim();
+        if text.is_empty() {
+            continue;
+        }
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(text);
+    }
+    out
+}
+
+/// Write structured notes for a meeting, caching them as `notes.md` beside the
+/// transcript. Returns the cached copy unless `force` asks for a rewrite —
+/// generation takes real time and the result doesn't change on its own.
+pub fn write_notes(id: &str, force: bool) -> Result<String, String> {
+    let dir = meeting_dir(id)?;
+    let notes_path = dir.join("notes.md");
+    if !force {
+        if let Ok(existing) = std::fs::read_to_string(&notes_path) {
+            if !existing.trim().is_empty() {
+                return Ok(existing);
+            }
+        }
+    }
+
+    let transcript = transcript_text(id)?;
+    let model = crate::model::ensure_chat_model()?;
+    let notes = crate::chat::write_notes(&model, &transcript)?;
+
+    std::fs::write(&notes_path, &notes)
+        .map_err(|e| format!("write {}: {e}", notes_path.display()))?;
+    Ok(notes)
+}
+
 /// Duration of a WAV in whole seconds, or 0 if it's missing or unreadable.
 fn wav_secs(path: &Path) -> u64 {
     let Ok(reader) = hound::WavReader::open(path) else {
@@ -312,6 +377,28 @@ mod tests {
             assert!(trashed.join("transcript.md").exists());
 
             assert!(delete_meeting(id).is_err(), "already gone");
+        });
+    }
+
+    #[test]
+    fn transcript_markup_is_stripped_to_spoken_words() {
+        let md = "# Standup\n\n_Recorded 2026-07-24 10:33_\n\n## Transcript\n\n**[0:00]** Morning everyone.\n\n**[0:04]** Let's start with the roadmap.\n";
+        assert_eq!(
+            strip_transcript_markup(md),
+            "Morning everyone. Let's start with the roadmap."
+        );
+    }
+
+    #[test]
+    fn notes_are_cached_and_reused() {
+        with_temp_home(|_| {
+            let id = "20260724-110000-lecture";
+            let dir = seed_meeting(id);
+            std::fs::write(dir.join("notes.md"), "## Summary\n\ncached").unwrap();
+
+            // Returns the cache without touching the model, which isn't present.
+            assert_eq!(write_notes(id, false).unwrap(), "## Summary\n\ncached");
+            assert!(list_meetings()[0].has_notes);
         });
     }
 

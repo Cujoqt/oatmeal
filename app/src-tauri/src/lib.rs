@@ -1,3 +1,4 @@
+pub mod chat;
 pub mod library;
 pub mod live;
 mod mic;
@@ -325,6 +326,69 @@ fn list_meetings() -> Vec<library::Meeting> {
     library::list_meetings()
 }
 
+// ── Local language model — notes and recaps ─────────────────────────────────
+
+/// Ensure the chat model is downloaded. Separate from `ensure_model` because
+/// it's a much larger download and only needed for summaries, not recording.
+#[tauri::command]
+fn ensure_chat_model() -> Result<String, String> {
+    model::ensure_chat_model().map(|p| p.display().to_string())
+}
+
+/// Whether the chat model is on disk, and whether it's already resident in
+/// memory — the UI uses this to warn before a multi-gigabyte download.
+#[tauri::command]
+fn chat_model_status() -> serde_json::Value {
+    let path = model::chat_model_path();
+    serde_json::json!({
+        "path": path.display().to_string(),
+        "present": model::is_present(&path),
+        "loaded": chat::is_loaded(),
+        "approx_mb": model::CHAT_MODEL_APPROX_MB,
+    })
+}
+
+/// Write structured notes for a past meeting and cache them next to the
+/// transcript, so reopening a note doesn't re-run the model.
+#[tauri::command]
+fn write_notes(id: String, force: bool) -> Result<String, String> {
+    library::write_notes(&id, force)
+}
+
+/// Answer a question about a meeting. `id` empty means the meeting currently
+/// being recorded, answered from the live transcript so far.
+#[tauri::command]
+fn ask_meeting(
+    state: tauri::State<'_, AppState>,
+    id: String,
+    question: String,
+) -> Result<String, String> {
+    let transcript = if id.trim().is_empty() {
+        let lines = state
+            .live
+            .lock()
+            .ok()
+            .and_then(|l| l.as_ref().map(|s| s.lines()))
+            .unwrap_or_default();
+        lines
+            .iter()
+            .map(|l| l.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ")
+    } else {
+        library::transcript_text(&id)?
+    };
+
+    let path = model::ensure_chat_model()?;
+    chat::recap(&path, &transcript, &question)
+}
+
+/// Free the chat model's memory.
+#[tauri::command]
+fn unload_chat_model() {
+    chat::unload();
+}
+
 /// Retitle a past meeting. Writes `meta.json` and rewrites the transcript
 /// heading; the folder name (and so the recording's timestamp) is untouched.
 #[tauri::command]
@@ -360,6 +424,11 @@ pub fn run() {
             is_session_active,
             list_meetings,
             live_lines,
+            ensure_chat_model,
+            chat_model_status,
+            write_notes,
+            ask_meeting,
+            unload_chat_model,
             rename_meeting,
             delete_meeting
         ])
