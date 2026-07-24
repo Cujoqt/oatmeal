@@ -4,214 +4,494 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Oatmeal</title>
-  <link rel="stylesheet" href="/base.css" />
   <style>
+    /* Warm editorial palette, sidebar shell. The display face is a system serif:
+       the app ships offline and the CSP forbids remote font loading. */
+    :root {
+      color-scheme: light;
+      --bg: #f6f2e8; --panel: #efeade; --card: #fffdf8; --ink: #29261d; --ink-soft: #56513f;
+      --muted: #8a8474; --faint: #a89f88;
+      --line: rgba(41, 38, 29, .09); --line-2: rgba(41, 38, 29, .16);
+      --accent: #c8613b; --accent-deep: #a44a2c; --accent-wash: #f3e2d8;
+      --good-bg: #e6f0e6; --good-ink: #3f7a4a;
+      --key-bg: #e7e0cf; --hover: rgba(41, 38, 29, .05);
+      --danger: #c0392b;
+      /* Orange marks what you create; the accent green marks what Oatmeal does. */
+      --create: #e8952f;
+      --display: "Tiempos Text", "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+      --sans: ui-sans-serif, -apple-system, "SF Pro Text", "Segoe UI", sans-serif;
+      --mono: ui-monospace, "SF Mono", Menlo, monospace;
+      --bar-h: 46px; --side-w: 236px;
+    }
+    /* Dark values are written twice — a media query can't share a rule with a
+       plain selector. Edit both blocks together. */
+    :root[data-theme="dark"] {
+      color-scheme: dark;
+      --bg: #1c1c1c; --panel: #191919; --card: #2e2e2e; --ink: #ececea; --ink-soft: #b6b6b1;
+      --muted: #8b8b86; --faint: #6d6d68;
+      --line: rgba(236, 236, 234, .09); --line-2: rgba(236, 236, 234, .16);
+      --accent: #b9d454; --accent-deep: #c8e065; --accent-wash: #2f3520;
+      --good-bg: #2f3520; --good-ink: #b9d454;
+      --key-bg: #363636; --hover: rgba(236, 236, 234, .07);
+      --danger: #e0574c;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root:not([data-theme]) {
+        color-scheme: dark;
+        --bg: #1c1c1c; --panel: #191919; --card: #2e2e2e; --ink: #ececea; --ink-soft: #b6b6b1;
+        --muted: #8b8b86; --faint: #6d6d68;
+        --line: rgba(236, 236, 234, .09); --line-2: rgba(236, 236, 234, .16);
+        --accent: #b9d454; --accent-deep: #c8e065; --accent-wash: #2f3520;
+        --good-bg: #2f3520; --good-ink: #b9d454;
+        --key-bg: #363636; --hover: rgba(236, 236, 234, .07);
+        --danger: #e0574c;
+      }
+    }
+
+    * { box-sizing: border-box; }
+    html, body { height: 100%; }
     body {
-      background: var(--bg);
-      min-height: 100vh;
-      /* Room for the overlay traffic lights up top, and the dock down bottom. */
-      padding: 3.2rem 0 6rem;
+      margin: 0; background: var(--bg); color: var(--ink);
+      font-family: var(--sans); -webkit-font-smoothing: antialiased;
+      display: flex; flex-direction: column; overflow: hidden;
+    }
+    button { font: inherit; }
+    @keyframes rise { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+    ::selection { background: color-mix(in srgb, var(--accent) 25%, transparent); }
+    ::-webkit-scrollbar { width: 8px; height: 8px; }
+    ::-webkit-scrollbar-thumb { background: var(--line-2); border-radius: 4px; }
+
+    /* ── title bar ─────────────────────────────────────────────────────────*/
+    .topbar {
+      height: var(--bar-h); flex: none; display: flex; align-items: center;
+      padding: 0 14px 0 84px; position: relative; user-select: none;
+      background: var(--panel); border-bottom: 1px solid var(--line);
+    }
+    .brand {
+      display: flex; align-items: center; gap: 8px; pointer-events: none;
+      font-size: 12.5px; font-weight: 500; color: var(--faint);
+    }
+    .brand .mark { display: flex; align-items: center; gap: 1.5px; height: 12px; }
+    .brand .mark i { width: 2px; border-radius: 2px; background: var(--ink-soft); }
+    .brand .mark i:nth-child(4), .brand .mark i:nth-child(5) { background: var(--accent); }
+    .bar-actions { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+    #theme {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 26px; height: 26px; border-radius: 50%; cursor: pointer;
+      background: transparent; border: 1px solid var(--line-2); color: var(--muted);
+    }
+    #theme:hover { color: var(--ink); border-color: var(--ink-soft); }
+    #hide {
+      display: inline-flex; align-items: center; gap: 6px;
+      font: 500 11px var(--sans); color: var(--muted);
+      background: transparent; border: 1px solid var(--line-2); border-radius: 20px;
+      padding: 4px 10px; cursor: pointer;
+    }
+    #hide .eye { width: 6px; height: 6px; border-radius: 50%; background: var(--muted); }
+    #hide.on { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
+    #hide.on .eye { background: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 20%, transparent); }
+
+    /* ── shell ─────────────────────────────────────────────────────────────*/
+    .shell { flex: 1; min-height: 0; display: flex; }
+
+    .sidebar {
+      width: var(--side-w); flex: none; background: var(--panel);
+      border-right: 1px solid var(--line); display: flex; flex-direction: column;
+      padding: 12px 10px; gap: 10px;
+    }
+    .search {
+      display: flex; align-items: center; gap: 8px; padding: 7px 10px;
+      border: 1px solid var(--line-2); border-radius: 9px; color: var(--muted);
+    }
+    .search:focus-within { border-color: var(--accent); }
+    .search input {
+      flex: 1; min-width: 0; border: 0; background: transparent; outline: none;
+      font: 400 13px var(--sans); color: var(--ink);
+    }
+    .search input::placeholder { color: var(--faint); }
+
+    .nav {
+      display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 9px;
+      font: 500 13.5px var(--sans); color: var(--ink-soft); cursor: pointer;
+      background: none; border: 0; width: 100%; text-align: left;
+    }
+    .nav:hover { background: var(--hover); }
+    .nav.on { background: var(--key-bg); color: var(--ink); }
+    .nav svg { width: 16px; height: 16px; flex: none; }
+
+    .side-label {
+      font: 600 10.5px var(--sans); text-transform: uppercase; letter-spacing: .8px;
+      color: var(--faint); padding: 8px 10px 2px; display: flex; justify-content: space-between;
+    }
+    .side-list { flex: 1; min-height: 0; overflow-y: auto; }
+    .side-item {
+      width: 100%; text-align: left; background: none; border: 0; cursor: pointer;
+      padding: 7px 10px; border-radius: 9px; display: flex; gap: 9px; align-items: center;
+    }
+    .side-item:hover { background: var(--hover); }
+    .side-item.on { background: var(--key-bg); }
+    .side-item .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--line-2); flex: none; }
+    .side-item.done .dot { background: var(--accent); }
+    .side-item .txt { min-width: 0; }
+    .side-item .t { font: 500 13px var(--sans); color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .side-item .s { font: 400 11px var(--sans); color: var(--muted); }
+    .side-empty { font: 400 12px var(--sans); color: var(--faint); font-style: italic; padding: 8px 10px; }
+
+    .side-foot { border-top: 1px solid var(--line); padding-top: 8px; }
+    .model-chip {
+      display: flex; align-items: center; gap: 8px; width: 100%; padding: 7px 10px;
+      border-radius: 9px; background: none; border: 0; cursor: pointer; text-align: left;
+    }
+    .model-chip:hover { background: var(--hover); }
+    .model-chip .led { width: 7px; height: 7px; border-radius: 50%; background: var(--line-2); flex: none; }
+    .model-chip.ready .led { background: var(--good-ink); }
+    .model-chip.busy .led { background: var(--accent); animation: blink 1s ease-in-out infinite; }
+    @keyframes blink { 50% { opacity: .25; } }
+    .model-chip .txt { font: 400 11.5px var(--sans); color: var(--muted); line-height: 1.3; }
+
+    /* ── content ───────────────────────────────────────────────────────────*/
+    .content { flex: 1; min-width: 0; display: flex; flex-direction: column; overflow: hidden; }
+    .view { flex: 1; min-height: 0; display: none; flex-direction: column; overflow-y: auto; }
+    .view.on { display: flex; animation: rise .3s ease both; }
+
+    /* ── new-note page ─────────────────────────────────────────────────── */
+    #viewHome { padding: 0; position: relative; }
+    .sheet {
+      width: 100%; max-width: 720px; margin: 0 auto; flex: 1;
+      padding: 34px 32px 120px; animation: rise .4s cubic-bezier(.2,.7,.3,1) both;
     }
 
-    .drag { position: fixed; top: 0; left: 0; right: 0; height: 3.2rem; z-index: 5; }
-
-    .sheet { max-width: 720px; margin: 0 auto; padding: 0 2.4rem; animation: rise .4s cubic-bezier(.2,.7,.3,1) both; }
-
-    /* ── title ─────────────────────────────────────────────────────────── */
     #title {
-      font-family: var(--serif);
-      font-size: 2.3rem;
-      line-height: 1.15;
-      font-weight: 400;
-      color: var(--ink);
-      outline: none;
-      margin: 0 0 .85rem;
-      caret-color: var(--green);
+      font-family: var(--display); font-weight: 400; font-size: 38px; line-height: 1.15;
+      letter-spacing: -.4px; color: var(--ink); outline: none; margin: 0 0 14px;
+      caret-color: var(--accent);
     }
-    #title:empty::before {
-      content: attr(data-placeholder);
-      color: var(--ink-faint);
-      pointer-events: none;
-    }
+    #title:empty::before { content: attr(data-placeholder); color: var(--faint); pointer-events: none; }
 
-    /* ── metadata chips ────────────────────────────────────────────────── */
-    .meta { display: flex; align-items: center; gap: .6rem; margin-bottom: 2.2rem; }
-    .chips {
-      display: inline-flex; align-items: center; gap: .55rem;
-      border: 1px solid var(--line); border-radius: 999px;
-      padding: .34rem .8rem; font-size: .82rem; color: var(--ink-soft);
+    .meta { display: flex; align-items: center; gap: 10px; margin-bottom: 34px; }
+    .metachips {
+      display: inline-flex; align-items: center; gap: 14px;
+      border: 1px solid var(--line-2); border-radius: 20px; padding: 6px 14px;
+      font: 500 12.5px var(--sans); color: var(--ink-soft);
     }
-    .chips .chip { display: inline-flex; align-items: center; gap: .35rem; }
-    .chips .chip + .chip { margin-left: .35rem; }
-    .chips svg { width: 15px; height: 15px; color: var(--ink-muted); }
-    .meta .icon-btn { border: 1px solid var(--line); border-radius: 999px; width: 34px; height: 30px; }
+    .mchip { display: inline-flex; align-items: center; gap: 6px; }
+    .mchip svg { width: 15px; height: 15px; color: var(--muted); }
 
-    /* ── note body ─────────────────────────────────────────────────────── */
+    .round-btn {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 34px; height: 32px; padding: 0; cursor: pointer;
+      border: 1px solid var(--line-2); border-radius: 20px;
+      background: transparent; color: var(--muted); transition: background .14s, color .14s;
+    }
+    .round-btn:hover { background: var(--hover); color: var(--ink); }
+    .round-btn svg { width: 16px; height: 16px; }
+    .round-btn.sm { width: 24px; height: 24px; border: 0; }
+    .round-btn.sm svg { width: 14px; height: 14px; }
+
     #notes {
-      font-size: 1rem;
-      line-height: 1.75;
-      color: var(--ink-soft);
-      outline: none;
-      min-height: 8rem;
-      white-space: pre-wrap;
-      caret-color: var(--green);
+      font-size: 15px; line-height: 1.75; color: var(--ink-soft);
+      outline: none; min-height: 8rem; white-space: pre-wrap; caret-color: var(--accent);
     }
-    #notes:empty::before {
-      content: attr(data-placeholder);
-      color: var(--ink-faint);
-      pointer-events: none;
-    }
-    #saveHint {
-      margin-top: .9rem; font-size: .72rem; color: var(--ink-faint);
-      opacity: 0; transition: opacity .25s;
-    }
+    #notes:empty::before { content: attr(data-placeholder); color: var(--faint); pointer-events: none; }
+    #saveHint { margin-top: 14px; font-size: 11.5px; color: var(--faint); opacity: 0; transition: opacity .25s; }
     #saveHint.show { opacity: 1; }
+
+    #timer {
+      display: none; font: 600 15px var(--mono); font-variant-numeric: tabular-nums;
+      color: var(--danger); letter-spacing: .5px;
+    }
+    body.recording #timer { display: inline; }
+    #status {
+      position: absolute; left: 0; right: 0; bottom: 74px;
+      text-align: center; font-size: 12.5px; color: var(--muted);
+      pointer-events: none; min-height: 1.2em; padding: 0 32px;
+    }
+    #status.err { color: var(--danger); }
 
     /* ── onboarding card ───────────────────────────────────────────────── */
     #intro {
-      max-width: 620px; margin: 3.5rem auto 0;
-      background: var(--surface); border-radius: var(--r-lg);
-      padding: 2.6rem 2.8rem 2.2rem;
+      max-width: 620px; margin: 44px auto 0; background: var(--card);
+      border-radius: 20px; padding: 40px 44px 34px;
       box-shadow: 0 18px 50px rgba(0, 0, 0, .38);
       animation: rise .45s cubic-bezier(.2,.7,.3,1) both .1s;
     }
     #intro[hidden] { display: none; }
     .plus {
-      width: 44px; height: 44px; border-radius: 50%;
-      border: 2px solid var(--orange); color: var(--orange);
-      display: grid; place-items: center; margin-bottom: 1.6rem;
+      width: 44px; height: 44px; border-radius: 50%; margin-bottom: 26px;
+      border: 2px solid var(--create); color: var(--create);
+      display: grid; place-items: center;
     }
     .plus svg { width: 20px; height: 20px; }
-    #intro h2 { font-family: var(--serif); font-weight: 400; font-size: 1.9rem; margin: 0 0 1.4rem; }
-    #intro p { margin: 0 0 .95rem; font-size: .95rem; line-height: 1.5; color: var(--ink); }
-    #intro .hl { color: var(--green); display: inline-flex; align-items: center; gap: .3rem; }
+    #intro h2 { font-family: var(--display); font-weight: 400; font-size: 30px; margin: 0 0 22px; }
+    #intro p { margin: 0 0 15px; font-size: 15px; line-height: 1.5; color: var(--ink); }
+    #intro p.fine { color: var(--muted); font-size: 13.5px; }
+    #intro .hl { color: var(--accent); display: inline-flex; align-items: center; gap: 5px; }
     #intro .hl svg { width: 15px; height: 15px; }
     #okay {
-      margin-top: 1.5rem; font: inherit; font-size: .9rem;
-      background: #fff; color: #1a1a1a; border: 0; border-radius: 999px;
-      padding: .6rem 1.5rem; cursor: pointer; transition: opacity .14s, transform .08s;
+      margin-top: 10px; font: 500 14px var(--sans); background: #fff; color: #1a1a1a;
+      border: 0; border-radius: 999px; padding: 10px 24px; cursor: pointer;
+      transition: opacity .14s, transform .08s;
     }
     #okay:hover { opacity: .88; }
     #okay:active { transform: translateY(1px); }
 
     /* ── bottom dock ───────────────────────────────────────────────────── */
     .dock {
-      position: fixed; left: 0; right: 0; bottom: 1.4rem; z-index: 6;
-      display: flex; align-items: center; gap: .8rem;
-      padding: 0 1.6rem;
+      position: absolute; left: 0; right: 0; bottom: 22px; z-index: 6;
+      display: flex; align-items: center; gap: 12px; padding: 0 26px;
     }
-    .dock .ask {
-      flex: 1; min-width: 0;
-      background: var(--surface-2); border: 1px solid transparent; border-radius: 999px;
-      padding: .8rem 1.4rem; font: inherit; font-size: .92rem; color: var(--ink);
-      outline: none;
+    .cluster {
+      display: inline-flex; align-items: center; gap: 4px;
+      background: var(--key-bg); border-radius: 999px; padding: 7px 11px;
     }
-    .dock .ask::placeholder { color: var(--ink-faint); }
-    .dock .ask:focus { border-color: var(--line); }
+    .dots { display: inline-flex; gap: 3px; padding: 0 4px; }
+    .dots i { width: 4px; height: 4px; border-radius: 50%; background: var(--faint); transition: background .2s; }
+    body.recording .dots i { background: var(--accent); animation: dotpulse 1.4s ease-in-out infinite; }
+    body.recording .dots i:nth-child(2) { animation-delay: .18s; }
+    body.recording .dots i:nth-child(3) { animation-delay: .36s; }
+    @keyframes dotpulse { 0%, 100% { opacity: .35; } 50% { opacity: 1; } }
 
-    #status {
-      position: fixed; left: 0; right: 0; bottom: 4.4rem; z-index: 6;
-      text-align: center; font-size: .78rem; color: var(--ink-muted);
-      pointer-events: none; min-height: 1.1em;
+    .square {
+      width: 13px; height: 13px; border-radius: 3px; border: 0; padding: 0; cursor: pointer;
+      background: var(--ink-soft); transition: background .14s, transform .08s;
     }
-    #status.err { color: var(--red); }
+    .square:hover { background: var(--ink); }
+    .square:active { transform: scale(.9); }
+    .square:disabled { opacity: .45; cursor: default; }
+    body.recording .square { background: var(--danger); }
 
-    /* ── screen-share shield ───────────────────────────────────────────── */
-    #hide {
-      position: fixed; top: .9rem; right: 1rem; z-index: 7;
-      display: inline-flex; align-items: center; gap: .4rem;
-      font-size: .68rem; color: var(--ink-faint);
-      border: 1px solid var(--line-soft); border-radius: 999px;
-      padding: .28rem .7rem; cursor: pointer; user-select: none;
-      background: var(--bg); transition: color .14s, border-color .14s;
+    .dock-ask {
+      flex: 1; min-width: 0; background: var(--key-bg); border: 1px solid transparent;
+      border-radius: 999px; padding: 11px 18px; font: 400 14px var(--sans);
+      color: var(--ink); outline: none;
     }
-    #hide .eye { width: 6px; height: 6px; border-radius: 50%; background: var(--ink-faint); }
-    #hide.on { color: var(--green); border-color: color-mix(in srgb, var(--green) 35%, transparent); }
-    #hide.on .eye { background: var(--green); }
+    .dock-ask::placeholder { color: var(--faint); }
+    .dock-ask:focus { border-color: var(--line-2); }
 
-    @media (max-width: 620px) {
-      .sheet { padding: 0 1.4rem; }
-      #title { font-size: 1.9rem; }
-      #intro { padding: 2rem 1.6rem 1.6rem; }
+    /* Note view — the primary surface once a meeting exists. */
+    #viewNote { padding: 0; }
+    .note-wrap { width: 100%; max-width: 720px; margin: 0 auto; padding: 26px 32px 20px; flex: 1; }
+    .note-title {
+      font-family: var(--display); font-weight: 400; font-size: 34px; letter-spacing: -.4px;
+      color: var(--ink); background: transparent; border: 0; outline: none; width: 100%;
+      padding: 0 0 8px;
+    }
+    .chips { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 20px; }
+    .chip {
+      display: inline-flex; align-items: center; gap: 7px; padding: 6px 12px; border-radius: 20px;
+      border: 1px solid var(--line-2); background: transparent; color: var(--ink-soft);
+      font: 500 12.5px var(--sans); cursor: default;
+    }
+    .chip.act { cursor: pointer; }
+    .chip.act:hover { background: var(--hover); }
+    .chip.sel { background: var(--key-bg); border-color: transparent; color: var(--ink); }
+    .chip svg { width: 14px; height: 14px; }
+    .chip.danger:hover { color: var(--danger); border-color: var(--danger); }
+
+    .seg-toggle { display: inline-flex; border: 1px solid var(--line-2); border-radius: 20px; overflow: hidden; }
+    .seg-toggle button {
+      border: 0; background: transparent; color: var(--muted); cursor: pointer;
+      font: 500 12.5px var(--sans); padding: 6px 14px; display: inline-flex; align-items: center; gap: 6px;
+    }
+    .seg-toggle button.on { background: var(--key-bg); color: var(--ink); }
+
+    .prose { font-size: 15px; line-height: 1.7; color: var(--ink-soft); }
+    .prose h2 {
+      font-family: var(--display); font-weight: 500; font-size: 19px; color: var(--ink);
+      margin: 26px 0 8px; letter-spacing: -.2px;
+    }
+    .prose h3 { font: 600 14px var(--sans); color: var(--ink); margin: 20px 0 6px; }
+    .prose p { margin: 0 0 12px; }
+    .prose ul { margin: 0 0 12px; padding-left: 20px; }
+    .prose li { margin-bottom: 5px; }
+    .prose strong { color: var(--ink); font-weight: 600; }
+    .prose .placeholder { color: var(--faint); font-style: italic; }
+
+    .seg-line { display: flex; gap: 12px; margin-bottom: 10px; font-size: 14.5px; line-height: 1.65; }
+    .seg-line b { font: 600 11px var(--mono); color: var(--accent); flex: none; padding-top: 3px; }
+
+    .gen {
+      display: inline-flex; align-items: center; gap: 9px; padding: 10px 18px; border-radius: 11px;
+      background: var(--accent); color: #fff; border: 0; cursor: pointer; font: 600 13.5px var(--sans);
+    }
+    .gen:hover:not(:disabled) { background: var(--accent-deep); }
+    .gen:disabled { opacity: .55; cursor: default; }
+    .note-empty { text-align: center; padding: 40px 0; }
+    .note-empty p { color: var(--muted); font-size: 14px; max-width: 400px; margin: 0 auto 18px; line-height: 1.6; }
+
+    /* Ask bar — pinned to the bottom of the note view. */
+    .askbar { position: sticky; bottom: 0; background: linear-gradient(to top, var(--bg) 62%, transparent); padding: 14px 32px 18px; }
+    .askbar-inner { max-width: 720px; margin: 0 auto; }
+    .suggest { display: flex; flex-wrap: wrap; gap: 7px; margin-bottom: 9px; }
+    .suggest button {
+      border: 1px solid var(--line-2); background: var(--card); color: var(--ink-soft);
+      border-radius: 18px; padding: 6px 12px; font: 500 12.5px var(--sans); cursor: pointer;
+    }
+    .suggest button:hover { border-color: var(--accent); color: var(--accent); }
+    .ask {
+      display: flex; align-items: center; gap: 10px; background: var(--card);
+      border: 1px solid var(--line-2); border-radius: 22px; padding: 6px 6px 6px 16px;
+    }
+    .ask:focus-within { border-color: var(--accent); }
+    .ask input {
+      flex: 1; min-width: 0; border: 0; background: transparent; outline: none;
+      font: 400 14px var(--sans); color: var(--ink); padding: 6px 0;
+    }
+    .ask input::placeholder { color: var(--faint); }
+    .ask button {
+      width: 32px; height: 32px; border-radius: 50%; border: 0; cursor: pointer; flex: none;
+      background: var(--accent); color: #fff; display: flex; align-items: center; justify-content: center;
+    }
+    .ask button:disabled { opacity: .45; cursor: default; }
+
+    .answers { max-width: 720px; margin: 0 auto; padding: 0 32px; }
+    .qa { margin-bottom: 18px; animation: rise .3s ease both; }
+    .qa .q { font: 600 14px var(--sans); color: var(--ink); margin-bottom: 6px; display: flex; gap: 8px; }
+    .qa .q::before { content: "›"; color: var(--accent); }
+    .qa .a { font-size: 14.5px; line-height: 1.7; color: var(--ink-soft); }
+    .qa .a.thinking { color: var(--faint); font-style: italic; }
+
+    @media (max-width: 820px) {
+      .sidebar { width: 64px; padding: 12px 8px; }
+      .sidebar .search input, .side-label, .side-item .txt, .nav span, .model-chip .txt { display: none; }
     }
   </style>
 </head>
 <body>
-  <div class="drag" data-tauri-drag-region></div>
-
-  <div id="hide" class="on" title="Toggle invisibility to screen sharing">
-    <span class="eye"></span><span id="hideLabel">hidden from shares</span>
-  </div>
-
-  <div class="sheet">
-    <h1 id="title" contenteditable="plaintext-only" data-placeholder="New note" spellcheck="false"></h1>
-
-    <div class="meta">
-      <div class="chips">
-        <span class="chip">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round">
-            <rect x="3" y="4.5" width="18" height="16" rx="3" /><path d="M3 9h18M8 3v3M16 3v3" />
-          </svg>
-          <span id="day">Today</span>
-        </span>
-        <span class="chip">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round">
-            <circle cx="9" cy="8" r="3.2" /><path d="M2.8 19.5a6.2 6.2 0 0 1 12.4 0" />
-            <path d="M16.5 5.6a3.2 3.2 0 0 1 0 5.6M18 14.4a6.2 6.2 0 0 1 3.2 5.1" />
-          </svg>
-          <span>Me</span>
-        </span>
-      </div>
-      <button class="icon-btn" id="reveal" title="Show the recording folder">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round">
-          <path d="M3 7.5A2 2 0 0 1 5 5.5h3.6l1.8 2.2H19a2 2 0 0 1 2 2v8.3a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
-          <path d="M12 11.6v5M9.5 14.1h5" />
-        </svg>
+  <div class="topbar" data-tauri-drag-region>
+    <div class="brand" data-tauri-drag-region>
+      <span class="mark" aria-hidden="true">
+        <i style="height:26%"></i><i style="height:44%"></i><i style="height:56%"></i><i style="height:62%"></i><i style="height:32%"></i>
+      </span>Oatmeal
+    </div>
+    <div class="bar-actions">
+      <button id="theme" title="Switch theme" aria-label="Switch theme">
+        <svg id="themeIcon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"></svg>
+      </button>
+      <button id="hide" class="on" title="Toggle invisibility to screen sharing">
+        <span class="eye"></span><span id="hideLabel">hidden from shares</span>
       </button>
     </div>
-
-    <div id="notes" contenteditable="plaintext-only" data-placeholder="Write notes"></div>
-    <div id="saveHint"></div>
-
-    <section id="intro" hidden>
-      <div class="plus">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
-          <path d="M12 5v14M5 12h14" />
-        </svg>
-      </div>
-      <h2>New Note</h2>
-      <p>Use new notes for meetings that aren't on your calendar.</p>
-      <p>Oatmeal will
-        <span class="hl">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
-            <path d="M5 10v4M9 6.5v11M13 8.5v7M17 11v2" />
-          </svg>transcribe</span>, but won't know who is speaking.
-      </p>
-      <p>Oatmeal will
-        <span class="hl">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M12 3.5l1.7 4.3 4.3 1.7-4.3 1.7L12 15.5l-1.7-4.3L6 9.5l4.3-1.7z" />
-            <path d="M18.5 15l.8 2 2 .8-2 .8-.8 2-.8-2-2-.8 2-.8z" />
-          </svg>write notes for you</span> once the transcript has stopped.
-      </p>
-      <p style="color: var(--ink-muted); font-size: .86rem;">Everything stays on this machine — no audio is uploaded.</p>
-      <button id="okay">Okay</button>
-    </section>
   </div>
 
-  <div id="status">Ready.</div>
+  <div class="shell">
+    <aside class="sidebar">
+      <div class="search">
+        <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><circle cx="11" cy="11" r="7" /><path d="M21 21l-4-4" /></svg>
+        <input id="search" placeholder="Search meetings" />
+      </div>
 
-  <div class="dock">
-    <div class="cluster" id="cluster">
-      <span class="dots"><i></i><i></i><i></i></span>
-      <button class="icon-btn" id="expand" title="Show the transcript window">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M6 14l6-6 6 6" />
-        </svg>
+      <button class="nav on" id="navHome">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 11l9-8 9 8" /><path d="M5 10v10h14V10" /></svg>
+        <span>New recording</span>
       </button>
-      <button class="square" id="rec" title="Start recording"></button>
+
+      <div class="side-label"><span>Meetings</span><span id="sideCount"></span></div>
+      <div class="side-list" id="sideList"></div>
+
+      <div class="side-foot">
+        <button class="model-chip" id="modelChip" title="Local models">
+          <span class="led"></span>
+          <span class="txt" id="modelTxt">Checking models…</span>
+        </button>
+      </div>
+    </aside>
+
+    <div class="content">
+      <!-- Home: record -->
+      <!-- Home: the new-note page. Title, your own notes, and the dock. -->
+      <section class="view on" id="viewHome">
+        <div class="sheet">
+          <h1 id="title" contenteditable="plaintext-only" data-placeholder="New note" spellcheck="false"></h1>
+
+          <div class="meta">
+            <div class="metachips">
+              <span class="mchip">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round">
+                  <rect x="3" y="4.5" width="18" height="16" rx="3" /><path d="M3 9h18M8 3v3M16 3v3" />
+                </svg><span id="chipToday">Today</span>
+              </span>
+              <span class="mchip">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round">
+                  <circle cx="9" cy="8" r="3.2" /><path d="M2.8 19.5a6.2 6.2 0 0 1 12.4 0" />
+                  <path d="M16.5 5.6a3.2 3.2 0 0 1 0 5.6M18 14.4a6.2 6.2 0 0 1 3.2 5.1" />
+                </svg><span>Me</span>
+              </span>
+            </div>
+            <button class="round-btn" id="reveal" title="Where this meeting is saved">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round">
+                <path d="M3 7.5A2 2 0 0 1 5 5.5h3.6l1.8 2.2H19a2 2 0 0 1 2 2v8.3a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+                <path d="M12 11.6v5M9.5 14.1h5" />
+              </svg>
+            </button>
+            <span id="timer">00:00</span>
+          </div>
+
+          <div id="notes" contenteditable="plaintext-only" data-placeholder="Write notes"></div>
+          <div id="saveHint"></div>
+
+          <section id="intro" hidden>
+            <div class="plus">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14" /></svg>
+            </div>
+            <h2>New Note</h2>
+            <p>Use new notes for meetings that aren't on your calendar.</p>
+            <p>Oatmeal will <span class="hl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M5 10v4M9 6.5v11M13 8.5v7M17 11v2" /></svg>transcribe</span>, but won't know who is speaking.</p>
+            <p>Oatmeal will <span class="hl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5l1.7 4.3 4.3 1.7-4.3 1.7L12 15.5l-1.7-4.3L6 9.5l4.3-1.7z" /><path d="M18.5 15l.8 2 2 .8-2 .8-.8 2-.8-2-2-.8 2-.8z" /></svg>write notes for you</span> once the transcript has stopped.</p>
+            <p class="fine">Everything stays on this machine — no audio is uploaded.</p>
+            <button id="okay">Okay</button>
+          </section>
+        </div>
+
+        <div class="dock">
+          <div class="cluster" id="cluster">
+            <span class="dots"><i></i><i></i><i></i></span>
+            <button class="round-btn sm" id="expand" title="Show the transcript window">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 14l6-6 6 6" /></svg>
+            </button>
+            <button class="square" id="btn" title="Start recording"></button>
+          </div>
+          <input class="dock-ask" id="homeAsk" placeholder="Ask anything" />
+        </div>
+        <div id="status"></div>
+      </section>
+
+      <!-- Note: the primary surface for a recorded meeting -->
+      <section class="view" id="viewNote">
+        <div class="note-wrap">
+          <input class="note-title" id="noteTitle" />
+          <div class="chips">
+            <div class="seg-toggle">
+              <button id="tabNotes" class="on">
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.6 4.4L18 9l-4.4 1.6L12 15l-1.6-4.4L6 9l4.4-1.6z" /></svg>
+                Enhanced
+              </button>
+              <button id="tabRaw">Transcript</button>
+            </div>
+            <span class="chip" id="chipWhen"></span>
+            <button class="chip act danger" id="chipDelete" title="Move to Trash">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M9.5 7V5.2A1.2 1.2 0 0 1 10.7 4h2.6a1.2 1.2 0 0 1 1.2 1.2V7M6.5 7l.8 12a1.6 1.6 0 0 0 1.6 1.5h6.2a1.6 1.6 0 0 0 1.6-1.5l.8-12" /></svg>
+              Delete
+            </button>
+          </div>
+
+          <div class="prose" id="noteBody"></div>
+          <div class="answers" id="answers"></div>
+        </div>
+
+        <div class="askbar">
+          <div class="askbar-inner">
+            <div class="suggest" id="suggest"></div>
+            <div class="ask">
+              <input id="askInput" placeholder="Ask anything about this meeting" />
+              <button id="askSend" title="Ask" aria-label="Ask">
+                <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h13M13 6l6 6-6 6" /></svg>
+              </button>
+            </div>
+          </div>
+        </div>
+      </section>
     </div>
-    <input class="ask" id="ask" placeholder="Ask anything" />
   </div>
 
   <script type="module" src="/app.js"></script>

@@ -1,3 +1,5 @@
+pub mod chat;
+pub mod library;
 pub mod live;
 mod mic;
 pub mod model;
@@ -11,7 +13,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use tauri::Manager;
 
-use live::{LiveTap, LiveTranscriber};
+use live::{LiveSession, Tap};
 use mic::MicRecorder;
 use sysaudio::SysAudioRecorder;
 
@@ -29,9 +31,9 @@ pub struct AppState {
     pub sysaudio: Mutex<Option<SysAudioRecorder>>,
     /// Paths for the in-progress meeting, if a session is running.
     pub session: Mutex<Option<session::SessionPaths>>,
-    /// The live-transcription worker, if a session is running.
-    pub live: Mutex<Option<LiveTranscriber>>,
-    /// Notes typed before any session existed, flushed to disk once one does.
+    /// Live transcription worker for the in-progress meeting.
+    pub live: Mutex<Option<LiveSession>>,
+    /// Notes typed before any meeting existed, flushed to disk once one does.
     pub pending_notes: Mutex<Option<(String, String)>>,
     /// Folder of the most recent meeting, so notes typed *after* it stopped keep
     /// landing next to that meeting's audio instead of vanishing.
@@ -203,9 +205,9 @@ fn start_session(
     }
     let paths = session::new_session(&title)?;
 
-    // Both lanes mirror into this tap so the live worker can transcribe while
-    // they keep writing their WAVs for the final, higher-quality pass.
-    let tap = LiveTap::new();
+    // Both lanes mirror into one tap, so the live worker hears the room and the
+    // call as a single stream — the same mix the final transcript is made from.
+    let tap = std::sync::Arc::new(Tap::default());
 
     let mut any = false;
     {
@@ -240,14 +242,30 @@ fn start_session(
         return Err("neither the microphone nor system-audio lane could start — check permissions".into());
     }
 
-    let lang = {
-        let l = language.trim();
-        if l.is_empty() { None } else { Some(l.to_string()) }
-    };
-    *state.live.lock().map_err(|_| "live state poisoned")? =
-        Some(LiveTranscriber::start(app, tap, String::new(), lang));
+    // Live transcription is a convenience, not the product: if the worker can't
+    // start (missing model, say), the meeting still records and still gets its
+    // accurate transcript at stop.
+    {
+        let mut slot = state.live.lock().map_err(|_| "live state poisoned")?;
+        let handle = app.clone();
+        // An empty language means auto-detect, matching the offline path.
+        let lang = {
+            let l = language.trim();
+            if l.is_empty() { None } else { Some(l.to_string()) }
+        };
+        match LiveSession::start(tap, String::new(), lang, move |line| {
+            use tauri::Emitter;
+            if let Err(e) = handle.emit("oatmeal://live-line", line) {
+                eprintln!("[oatmeal] emit live line: {e}");
+            }
+        }) {
+            Ok(live) => *slot = Some(live),
+            Err(e) => eprintln!("[oatmeal] live transcription did not start: {e}"),
+        }
+    }
 
     // Any notes typed before the meeting existed now have a home.
+    *state.last_dir.lock().map_err(|_| "notes state poisoned")? = Some(paths.dir.clone());
     if let Ok(mut pending) = state.pending_notes.lock() {
         if let Some((t, body)) = pending.take() {
             if let Err(e) = session::write_notes(Path::new(&paths.dir), &t, &body) {
@@ -256,12 +274,26 @@ fn start_session(
         }
     }
 
-    *state.last_dir.lock().map_err(|_| "notes state poisoned")? = Some(paths.dir.clone());
     *sess = Some(paths.clone());
     Ok(paths)
 }
 
-/// Save the freeform notes the user is typing.
+/// Lines the live worker has produced so far this meeting. The recap feature
+/// reads this to answer questions before the meeting has even ended.
+#[tauri::command]
+fn live_lines(state: tauri::State<'_, AppState>) -> Vec<live::LiveLine> {
+    state
+        .live
+        .lock()
+        .ok()
+        .and_then(|l| l.as_ref().map(|s| s.lines()))
+        .unwrap_or_default()
+}
+
+/// Save the freeform notes the user types on the new-note page.
+///
+/// Distinct from `write_notes`, which asks the local model to write notes *for*
+/// you: this is what you typed yourself, kept verbatim in `notes.md`.
 ///
 /// Notes go to the active meeting's folder; once it stops they keep going to that
 /// same folder, so writing up straight after a call is not lost. Before any
@@ -296,7 +328,8 @@ fn save_notes(
     }
 }
 
-/// Show or hide the floating live-transcript window.
+/// Show or hide the floating live-transcript window — the panel you park over a
+/// call. It renders the same `oatmeal://live-line` events the in-app dock does.
 #[tauri::command]
 fn set_transcript_window_visible(app: tauri::AppHandle, visible: bool) -> Result<(), String> {
     let win = app
@@ -342,8 +375,8 @@ fn stop_session(
         sess.take().ok_or("no meeting is being recorded")?
     };
 
-    // Stop the live worker first: it flushes its last partial chunk, and we don't
-    // want it competing with the batch pass for CPU.
+    // Stop the live worker first: it holds its own copy of the Whisper model,
+    // and releasing it before the accurate pass keeps peak memory down.
     if let Some(live) = state.live.lock().map_err(|_| "live state poisoned")?.take() {
         live.stop();
     }
@@ -384,6 +417,96 @@ fn stop_session(
     )
 }
 
+/// Every past meeting on disk, newest first — drives the home screen's recent
+/// list and headline stats. Cheap enough to call on every home-screen render.
+#[tauri::command]
+fn list_meetings() -> Vec<library::Meeting> {
+    library::list_meetings()
+}
+
+// ── Local language model — notes and recaps ─────────────────────────────────
+
+/// Ensure the chat model is downloaded. Separate from `ensure_model` because
+/// it's a much larger download and only needed for summaries, not recording.
+#[tauri::command]
+fn ensure_chat_model() -> Result<String, String> {
+    model::ensure_chat_model().map(|p| p.display().to_string())
+}
+
+/// Whether the chat model is on disk, and whether it's already resident in
+/// memory — the UI uses this to warn before a multi-gigabyte download.
+#[tauri::command]
+fn chat_model_status() -> serde_json::Value {
+    let path = model::chat_model_path();
+    serde_json::json!({
+        "path": path.display().to_string(),
+        "present": model::is_present(&path),
+        "loaded": chat::is_loaded(),
+        "approx_mb": model::CHAT_MODEL_APPROX_MB,
+    })
+}
+
+/// A saved transcript's timestamped lines, for the note view's raw tab.
+#[tauri::command]
+fn meeting_segments(id: String) -> Result<Vec<library::TranscriptLine>, String> {
+    library::transcript_lines(&id)
+}
+
+/// Write structured notes for a past meeting and cache them next to the
+/// transcript, so reopening a note doesn't re-run the model.
+#[tauri::command]
+fn write_notes(id: String, force: bool) -> Result<String, String> {
+    library::write_notes(&id, force)
+}
+
+/// Answer a question about a meeting. `id` empty means the meeting currently
+/// being recorded, answered from the live transcript so far.
+#[tauri::command]
+fn ask_meeting(
+    state: tauri::State<'_, AppState>,
+    id: String,
+    question: String,
+) -> Result<String, String> {
+    let transcript = if id.trim().is_empty() {
+        let lines = state
+            .live
+            .lock()
+            .ok()
+            .and_then(|l| l.as_ref().map(|s| s.lines()))
+            .unwrap_or_default();
+        lines
+            .iter()
+            .map(|l| l.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ")
+    } else {
+        library::transcript_text(&id)?
+    };
+
+    let path = model::ensure_chat_model()?;
+    chat::recap(&path, &transcript, &question)
+}
+
+/// Free the chat model's memory.
+#[tauri::command]
+fn unload_chat_model() {
+    chat::unload();
+}
+
+/// Retitle a past meeting. Writes `meta.json` and rewrites the transcript
+/// heading; the folder name (and so the recording's timestamp) is untouched.
+#[tauri::command]
+fn rename_meeting(id: String, title: String) -> Result<(), String> {
+    library::rename_meeting(&id, &title)
+}
+
+/// Move a past meeting to the Trash, returning where it landed. Recoverable
+/// from Finder — audio can't be re-recorded, so this is never a hard delete.
+#[tauri::command]
+fn delete_meeting(id: String) -> Result<String, String> {
+    library::delete_meeting(&id)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -403,12 +526,22 @@ pub fn run() {
             start_session,
             stop_session,
             is_session_active,
+            list_meetings,
+            live_lines,
             save_notes,
             set_transcript_window_visible,
-            is_transcript_window_visible
+            is_transcript_window_visible,
+            ensure_chat_model,
+            chat_model_status,
+            write_notes,
+            meeting_segments,
+            ask_meeting,
+            unload_chat_model,
+            rename_meeting,
+            delete_meeting
         ])
         .setup(|app| {
-            // Apply the hide flag as soon as the windows exist.
+            // Apply the hide flag as soon as the window exists.
             let hidden = app
                 .state::<AppState>()
                 .hidden_from_capture

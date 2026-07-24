@@ -19,7 +19,7 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::SampleFormat;
 use hound::{WavSpec, WavWriter};
 
-use crate::live::{self, LiveTap};
+use crate::live::Tap;
 
 type SharedWriter = Arc<Mutex<Option<WavWriter<std::io::BufWriter<std::fs::File>>>>>;
 
@@ -38,9 +38,9 @@ impl MicRecorder {
         Self::start_with_tap(path, None)
     }
 
-    /// Same as `start`, but also mirrors the audio into `tap` as 16 kHz mono so
-    /// the live-transcription worker (M7) can read it while recording continues.
-    pub fn start_with_tap(path: PathBuf, tap: Option<Arc<LiveTap>>) -> Result<Self, String> {
+    /// As `start`, but also mirror the captured audio into `tap` so the live
+    /// transcription worker can decode it while the meeting is still running.
+    pub fn start_with_tap(path: PathBuf, tap: Option<Arc<Tap>>) -> Result<Self, String> {
         let stop = Arc::new(AtomicBool::new(false));
         // Channel to surface a start-time error (bad device, unbuildable stream)
         // back to the caller synchronously.
@@ -108,7 +108,7 @@ fn run_capture(
     path: PathBuf,
     stop: Arc<AtomicBool>,
     ready: std::sync::mpsc::Sender<Result<(), String>>,
-    tap: Option<Arc<LiveTap>>,
+    tap: Option<Arc<Tap>>,
 ) -> Result<(), String> {
     // Anything that fails during setup is reported via `ready` so `start` can
     // return it synchronously; a helper keeps that plumbing tidy.
@@ -151,33 +151,55 @@ fn run_capture(
 
     // Build a stream whose callback converts whatever native format the device
     // hands us into i16 PCM and appends it to the WAV.
+    // Feeding the live tap needs f32; convert once per callback and reuse it for
+    // both the WAV and the tap so non-f32 devices don't pay twice.
     let stream_res = match sample_format {
         SampleFormat::F32 => {
-            let (w, t) = (writer.clone(), tap.clone());
+            let w = writer.clone();
+            let t = tap.clone();
             device.build_input_stream(
                 &config,
-                move |data: &[f32], _| handle_input(&w, &t, data, |s| s, channels, sample_rate),
+                move |data: &[f32], _| {
+                    write_samples(&w, data.iter().map(|&s| f32_to_i16(s)));
+                    if let Some(t) = &t {
+                        t.push(data, channels, sample_rate);
+                    }
+                },
                 err_fn,
                 None,
             )
         }
         SampleFormat::I16 => {
-            let (w, t) = (writer.clone(), tap.clone());
+            let w = writer.clone();
+            let t = tap.clone();
             device.build_input_stream(
                 &config,
                 move |data: &[i16], _| {
-                    handle_input(&w, &t, data, i16_to_f32, channels, sample_rate)
+                    write_samples(&w, data.iter().copied());
+                    if let Some(t) = &t {
+                        let f: Vec<f32> =
+                            data.iter().map(|&s| s as f32 / i16::MAX as f32).collect();
+                        t.push(&f, channels, sample_rate);
+                    }
                 },
                 err_fn,
                 None,
             )
         }
         SampleFormat::U16 => {
-            let (w, t) = (writer.clone(), tap.clone());
+            let w = writer.clone();
+            let t = tap.clone();
             device.build_input_stream(
                 &config,
                 move |data: &[u16], _| {
-                    handle_input(&w, &t, data, u16_to_f32, channels, sample_rate)
+                    write_samples(&w, data.iter().map(|&s| (s as i32 - 32768) as i16));
+                    if let Some(t) = &t {
+                        let f: Vec<f32> = data
+                            .iter()
+                            .map(|&s| (s as i32 - 32768) as f32 / i16::MAX as f32)
+                            .collect();
+                        t.push(&f, channels, sample_rate);
+                    }
                 },
                 err_fn,
                 None,
@@ -211,29 +233,6 @@ fn run_capture(
     Ok(())
 }
 
-/// Handle one device callback whatever its native sample format: append i16 PCM
-/// to the WAV, and — when a live tap is attached — push a 16 kHz mono copy for
-/// streaming transcription. `to_f32` normalizes the device's format to -1.0..=1.0.
-///
-/// Runs on cpal's realtime audio thread. The tap path allocates one short Vec per
-/// callback (~10 ms of audio); that is the price of a live preview and is far
-/// cheaper than the writer lock already taken here.
-fn handle_input<T: Copy>(
-    writer: &SharedWriter,
-    tap: &Option<Arc<LiveTap>>,
-    data: &[T],
-    to_f32: impl Fn(T) -> f32,
-    channels: u16,
-    sample_rate: u32,
-) {
-    write_samples(writer, data.iter().map(|&s| f32_to_i16(to_f32(s))));
-    if let Some(tap) = tap {
-        let mono =
-            live::interleaved_to_mono_16k(data.iter().map(|&s| to_f32(s)), channels, sample_rate);
-        tap.push_mic(&mono);
-    }
-}
-
 /// Append i16 samples to the shared writer. Runs on cpal's realtime audio thread,
 /// so it stays allocation-light and never blocks on anything but the writer lock.
 fn write_samples<I: Iterator<Item = i16>>(writer: &SharedWriter, samples: I) {
@@ -255,42 +254,4 @@ fn write_samples<I: Iterator<Item = i16>>(writer: &SharedWriter, samples: I) {
 fn f32_to_i16(s: f32) -> i16 {
     let clamped = s.clamp(-1.0, 1.0);
     (clamped * i16::MAX as f32) as i16
-}
-
-/// Normalize a signed 16-bit sample to `-1.0..=1.0`.
-#[inline]
-fn i16_to_f32(s: i16) -> f32 {
-    s as f32 / 32_768.0
-}
-
-/// Normalize an unsigned 16-bit sample (midpoint 32768) to `-1.0..=1.0`.
-#[inline]
-fn u16_to_f32(s: u16) -> f32 {
-    (s as f32 - 32_768.0) / 32_768.0
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn i16_normalization_roundtrips_through_i16() {
-        for v in [0i16, 1_000, -1_000, i16::MAX, i16::MIN + 1] {
-            let back = f32_to_i16(i16_to_f32(v));
-            assert!((back as i32 - v as i32).abs() <= 1, "{v} -> {back}");
-        }
-    }
-
-    #[test]
-    fn u16_midpoint_is_silence() {
-        assert_eq!(u16_to_f32(32_768), 0.0);
-        assert!(u16_to_f32(65_535) > 0.99);
-        assert!(u16_to_f32(0) <= -1.0);
-    }
-
-    #[test]
-    fn f32_to_i16_clamps_out_of_range_input() {
-        assert_eq!(f32_to_i16(2.0), i16::MAX);
-        assert_eq!(f32_to_i16(-2.0), -i16::MAX);
-    }
 }

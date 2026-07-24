@@ -1,13 +1,13 @@
 // Oatmeal — the floating transcript window.
 //
-// Listens to the streaming events from `live.rs` and appends a line per chunk.
-// Chunks are final when they arrive (the worker never rewrites one), so this is
-// pure append — no flicker, no reflow of what you already read.
+// A transparent, always-on-top panel you park over a call. It renders the same
+// `oatmeal://live-line` events the backend emits while recording, one line per
+// decoded window. Lines are final when they arrive — the worker never rewrites
+// one — so this is pure append: no flicker, no reflow of what you already read.
 //
-// When the meeting stops, the batch pass produces a better transcript of the
-// whole mix; that arrives as one `ui-final` event and replaces the live lines.
+// The note window owns the session. This window only renders and asks.
 
-import { EVENTS, LANG_KEY, getLang, setLang, fmtCs, escapeHtml } from '/shared.js'
+import { EVENTS, LANG_KEY, getLang, setLang, fmtMs, escapeHtml } from '/shared.js'
 
 const { invoke } = window.__TAURI__.core
 const { listen, emit } = window.__TAURI__.event
@@ -56,63 +56,55 @@ function atBottom() {
   return scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight < 60
 }
 
-function addLine(seg) {
-  const text = (seg.text || '').trim()
+function rowFor(line) {
+  const div = document.createElement('div')
+  div.className = 'line'
+  div.innerHTML = `<time>${fmtMs(line.at_ms)}</time><span>${escapeHtml(line.text)}</span>`
+  return div
+}
+
+function addLine(line) {
+  const text = (line.text || '').trim()
   if (!text) return
   const stick = atBottom()
 
-  lines.push({ start_cs: seg.start_cs, text })
-  const div = document.createElement('div')
-  div.className = 'line'
-  div.innerHTML = `<time>${fmtCs(seg.start_cs)}</time><span>${escapeHtml(text)}</span>`
-  linesEl.appendChild(div)
+  const row = { at_ms: line.at_ms || 0, text }
+  lines.push(row)
+  linesEl.appendChild(rowFor(row))
   refresh()
   applyFilter()
 
   if (stick) scrollEl.scrollTop = scrollEl.scrollHeight
 }
 
-function replaceAll(segments) {
-  lines = (segments || [])
-    .map((s) => ({ start_cs: s.start_cs, text: (s.text || '').trim() }))
-    .filter((s) => s.text)
+function replaceAll(incoming) {
+  lines = (incoming || [])
+    .map((l) => ({ at_ms: l.at_ms || 0, text: (l.text || '').trim() }))
+    .filter((l) => l.text)
   linesEl.innerHTML = ''
-  for (const s of lines) {
-    const div = document.createElement('div')
-    div.className = 'line'
-    div.innerHTML = `<time>${fmtCs(s.start_cs)}</time><span>${escapeHtml(s.text)}</span>`
-    linesEl.appendChild(div)
-  }
+  for (const l of lines) linesEl.appendChild(rowFor(l))
   refresh()
   applyFilter()
   scrollEl.scrollTop = scrollEl.scrollHeight
 }
 
-// ── backend events ───────────────────────────────────────────────────────────
+// ── events ───────────────────────────────────────────────────────────────────
 
-listen(EVENTS.segment, (e) => addLine(e.payload))
+listen(EVENTS.line, (e) => addLine(e.payload || {}))
 
 listen(EVENTS.state, (e) => {
   const { state, message } = e.payload || {}
-  if (state === 'listening') setNote('')
-  else setNote(message || '', state === 'error')
+  setNote(message || '', state === 'error')
 })
 
-listen(EVENTS.session, (e) => {
+listen(EVENTS.session, async (e) => {
   const { active } = e.payload || {}
   if (active && !recording) {
     // A fresh meeting starts with a clean sheet.
-    lines = []
-    linesEl.innerHTML = ''
-    refresh()
+    replaceAll([])
     setNote('')
   }
-  setRecordingUI(!!active)
-})
-
-listen(EVENTS.final, (e) => {
-  replaceAll(e.payload?.segments)
-  setNote('Final transcript saved.')
+  setRecordingUI(Boolean(active))
 })
 
 // ── controls ─────────────────────────────────────────────────────────────────
@@ -125,7 +117,7 @@ for (const id of ['minimize', 'collapse']) {
 }
 
 el('copy').addEventListener('click', async () => {
-  const text = lines.map((l) => `[${fmtCs(l.start_cs)}] ${l.text}`).join('\n')
+  const text = lines.map((l) => `[${fmtMs(l.at_ms)}] ${l.text}`).join('\n')
   if (!text) return setNote('Nothing to copy yet.')
   try {
     await navigator.clipboard.writeText(text)
@@ -136,7 +128,7 @@ el('copy').addEventListener('click', async () => {
 })
 
 el('settings').addEventListener('click', () => {
-  setNote(`Model: on-device Whisper · language: ${getLang() || 'auto-detect'}`)
+  setNote(`On-device Whisper · language: ${getLang() || 'auto-detect'}`)
 })
 
 el('learn').addEventListener('click', (e) => {
@@ -148,8 +140,9 @@ el('learn').addEventListener('click', (e) => {
 
 searchBtn.addEventListener('click', () => {
   searchEl.classList.toggle('open')
-  if (searchEl.classList.contains('open')) searchEl.focus()
-  else {
+  if (searchEl.classList.contains('open')) {
+    searchEl.focus()
+  } else {
     searchEl.value = ''
     applyFilter()
   }
@@ -157,11 +150,10 @@ searchBtn.addEventListener('click', () => {
 
 searchEl.addEventListener('input', applyFilter)
 searchEl.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape') {
-    searchEl.value = ''
-    searchEl.classList.remove('open')
-    applyFilter()
-  }
+  if (e.key !== 'Escape') return
+  searchEl.value = ''
+  searchEl.classList.remove('open')
+  applyFilter()
 })
 
 /// Hide non-matching lines and highlight the hits in the rest.
@@ -169,6 +161,7 @@ function applyFilter() {
   const q = searchEl.value.trim().toLowerCase()
   const nodes = linesEl.children
   let hits = 0
+
   for (let i = 0; i < nodes.length; i++) {
     const span = nodes[i].lastElementChild
     const text = lines[i]?.text ?? span.textContent
@@ -184,8 +177,9 @@ function applyFilter() {
       span.innerHTML = highlight(text, q)
     }
   }
+
   if (q) setNote(hits ? `${hits} matching line${hits === 1 ? '' : 's'}` : 'No matches')
-  else if (noteEl.textContent.endsWith('matches') || noteEl.textContent.includes('matching line')) setNote('')
+  else if (/matching line|No matches/.test(noteEl.textContent)) setNote('')
 }
 
 function highlight(text, q) {
@@ -222,7 +216,9 @@ async function boot() {
   setRecordingUI(false)
   try {
     setRecordingUI(await invoke('is_session_active'))
-  } catch (e) {
+    // Opened mid-meeting: catch up on everything decoded so far.
+    replaceAll(await invoke('live_lines'))
+  } catch {
     /* backend not ready */
   }
   refresh()

@@ -4,10 +4,10 @@
 // shared and Tauri events broadcast to both. Everything that has to line up
 // between them lives here.
 
-/// Events emitted by Rust (`live.rs`).
+/// Event emitted by Rust (`live.rs`) for each finished live transcript line:
+/// `{ at_ms, text }`.
 export const BACKEND = {
-  segment: 'oatmeal://live-segment',
-  state: 'oatmeal://live-state',
+  line: 'oatmeal://live-line',
 }
 
 /// Events the two windows use to talk to each other.
@@ -18,8 +18,8 @@ export const EVENTS = {
   toggleRecord: 'oatmeal://ui-toggle-record',
   /// Note window broadcasts session state `{ active, title }`.
   session: 'oatmeal://ui-session',
-  /// Note window broadcasts the finished batch transcript (a `MeetingResult`).
-  final: 'oatmeal://ui-final',
+  /// Note window broadcasts worker/session status for the panel to show.
+  state: 'oatmeal://ui-state',
   /// Transcript window asks to be dismissed.
   hideTranscript: 'oatmeal://ui-hide-transcript',
 }
@@ -36,9 +36,9 @@ export function setLang(code) {
   localStorage.setItem(LANG_KEY, code)
 }
 
-/// Format centiseconds as `M:SS`, matching the batch transcript's timestamps.
-export function fmtCs(cs) {
-  const total = Math.floor(cs / 100)
+/// Format milliseconds from the start of the meeting as `M:SS`.
+export function fmtMs(ms) {
+  const total = Math.floor(ms / 1000)
   return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, '0')}`
 }
 

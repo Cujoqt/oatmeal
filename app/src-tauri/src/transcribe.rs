@@ -52,14 +52,21 @@ pub fn resolve_model_path(explicit: &str) -> PathBuf {
     default_model_path()
 }
 
-/// Default on-disk location for the bundled/downloaded model.
-pub fn default_model_path() -> PathBuf {
-    // Kept alongside the user's data; the download step (later milestone) writes
-    // here. `dirs`-free to avoid a dependency: use HOME.
+/// Directory holding every downloaded model (Whisper and the chat model).
+pub fn model_dir() -> PathBuf {
+    // `dirs`-free to avoid a dependency: use HOME.
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    Path::new(&home)
-        .join("Library/Application Support/dev.oatmeal.app/models")
-        .join("ggml-base.en.bin")
+    Path::new(&home).join("Library/Application Support/dev.oatmeal.app/models")
+}
+
+/// Default Whisper model file. `small.en` transcribes technical speech markedly
+/// better than `base.en` while still running several times faster than realtime
+/// on Apple silicon, which live transcription depends on.
+pub const DEFAULT_WHISPER_FILE: &str = "ggml-small.en.bin";
+
+/// Default on-disk location for the downloaded Whisper model.
+pub fn default_model_path() -> PathBuf {
+    model_dir().join(DEFAULT_WHISPER_FILE)
 }
 
 /// Transcribe a WAV file. `language` is a Whisper language code ("en"), or `None`
@@ -91,62 +98,111 @@ pub fn transcribe_samples(
     samples: &[f32],
     language: Option<&str>,
 ) -> Result<Transcript, String> {
-    let model = resolve_model_path(model_path);
-    if !model.exists() {
-        return Err(format!(
-            "whisper model not found at {} — download a ggml model there first",
-            model.display()
-        ));
-    }
-    if samples.is_empty() {
-        return Err("no audio samples to transcribe".into());
-    }
+    Transcriber::load(model_path)?.run(samples, language, Quality::Accurate)
+}
 
-    let ctx = WhisperContext::new_with_params(&model, WhisperContextParameters::default())
-        .map_err(|e| format!("load whisper model: {e}"))?;
-    let mut state = ctx
-        .create_state()
-        .map_err(|e| format!("create whisper state: {e}"))?;
+/// How hard Whisper should work. Loading the model dominates either way; this
+/// only changes decoding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Quality {
+    /// Beam search — the final pass over a finished recording, where a few extra
+    /// seconds buy noticeably fewer errors on names and technical vocabulary.
+    Accurate,
+    /// Greedy — the live pass, which has to keep ahead of the speaker.
+    Fast,
+}
 
-    let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
-    if let Some(lang) = language {
-        params.set_language(Some(lang));
-    } else {
-        params.set_detect_language(true);
-    }
-    let threads = std::thread::available_parallelism()
-        .map(|n| n.get() as i32)
-        .unwrap_or(4);
-    params.set_n_threads(threads);
-    // whisper.cpp is noisy on stdout; silence what we can.
-    params.set_print_special(false);
-    params.set_print_progress(false);
-    params.set_print_realtime(false);
-    params.set_print_timestamps(false);
+/// A loaded Whisper model, reusable across many calls.
+///
+/// Loading the model costs hundreds of milliseconds and half a gigabyte, so live
+/// transcription holds one of these for the length of a meeting rather than
+/// paying that per chunk.
+pub struct Transcriber {
+    ctx: WhisperContext,
+}
 
-    state
-        .full(params, samples)
-        .map_err(|e| format!("whisper inference failed: {e}"))?;
-
-    let mut segments = Vec::new();
-    let mut text = String::new();
-    for seg in state.as_iter() {
-        let s = seg.to_str_lossy().map(|c| c.into_owned()).unwrap_or_default();
-        let trimmed = s.trim();
-        if !trimmed.is_empty() {
-            if !text.is_empty() {
-                text.push(' ');
-            }
-            text.push_str(trimmed);
+impl Transcriber {
+    /// Load the model at `model_path` (empty for the resolution fallback).
+    pub fn load(model_path: &str) -> Result<Self, String> {
+        let model = resolve_model_path(model_path);
+        if !model.exists() {
+            return Err(format!(
+                "whisper model not found at {} — download a ggml model there first",
+                model.display()
+            ));
         }
-        segments.push(Segment {
-            start_cs: seg.start_timestamp(),
-            end_cs: seg.end_timestamp(),
-            text: s,
-        });
+        let ctx = WhisperContext::new_with_params(&model, WhisperContextParameters::default())
+            .map_err(|e| format!("load whisper model: {e}"))?;
+        Ok(Self { ctx })
     }
 
-    Ok(Transcript { segments, text })
+    /// Transcribe 16 kHz mono samples.
+    pub fn run(
+        &self,
+        samples: &[f32],
+        language: Option<&str>,
+        quality: Quality,
+    ) -> Result<Transcript, String> {
+        if samples.is_empty() {
+            return Err("no audio samples to transcribe".into());
+        }
+
+        let mut state = self
+            .ctx
+            .create_state()
+            .map_err(|e| format!("create whisper state: {e}"))?;
+
+        let strategy = match quality {
+            Quality::Accurate => SamplingStrategy::BeamSearch {
+                beam_size: 5,
+                patience: 0.0,
+            },
+            Quality::Fast => SamplingStrategy::Greedy { best_of: 1 },
+        };
+        let mut params = FullParams::new(strategy);
+        if let Some(lang) = language {
+            params.set_language(Some(lang));
+        } else {
+            params.set_detect_language(true);
+        }
+        let threads = std::thread::available_parallelism()
+            .map(|n| n.get() as i32)
+            .unwrap_or(4);
+        params.set_n_threads(threads);
+        // Whisper loves to emit "[BLANK_AUDIO]" and hallucinate stock phrases over
+        // silence. Suppressing non-speech tokens cuts most of that.
+        params.set_suppress_blank(true);
+        params.set_suppress_nst(true);
+        // whisper.cpp is noisy on stdout; silence what we can.
+        params.set_print_special(false);
+        params.set_print_progress(false);
+        params.set_print_realtime(false);
+        params.set_print_timestamps(false);
+
+        state
+            .full(params, samples)
+            .map_err(|e| format!("whisper inference failed: {e}"))?;
+
+        let mut segments = Vec::new();
+        let mut text = String::new();
+        for seg in state.as_iter() {
+            let s = seg.to_str_lossy().map(|c| c.into_owned()).unwrap_or_default();
+            let trimmed = s.trim();
+            if !trimmed.is_empty() {
+                if !text.is_empty() {
+                    text.push(' ');
+                }
+                text.push_str(trimmed);
+            }
+            segments.push(Segment {
+                start_cs: seg.start_timestamp(),
+                end_cs: seg.end_timestamp(),
+                text: s,
+            });
+        }
+
+        Ok(Transcript { segments, text })
+    }
 }
 
 /// Read a WAV (i16 or f32, any channel count / sample rate) and return 16 kHz

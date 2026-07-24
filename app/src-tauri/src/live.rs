@@ -1,201 +1,140 @@
-// M7 — live transcription.
+// Live transcription — text while the meeting is still happening.
 //
-// The batch path (M4/M6) transcribes the finished mix when the meeting stops.
-// That is still the authoritative transcript. This module adds the *preview*
-// that makes the app feel alive: while the lanes record, a worker thread keeps a
-// Whisper context warm and transcribes the audio in chunks as it arrives,
-// emitting each finished chunk to the UI as a Tauri event.
+// The recording lanes (mic, system audio) already write WAVs. Reading those back
+// mid-write is unreliable: the header's length field isn't correct until the file
+// is finalized. So instead each lane pushes a copy of its samples into a `Tap`,
+// downmixed to mono and resampled to Whisper's 16 kHz on the way in. A worker
+// thread drains the tap, decodes finished windows, and emits them as Tauri events.
 //
-// Shape of the pipeline:
-//
-//   mic lane    ─┐
-//                ├─►  LiveTap (16 kHz mono, per-lane queues)
-//   sysaudio    ─┘         │
-//                          │  drained + mixed every 250 ms
-//                          ▼
-//                    LiveTranscriber worker
-//                      • buffers until it has >= MIN_CHUNK_SECS
-//                      • cuts at the quietest point near the tail so we
-//                        almost never split a word
-//                      • runs whisper.cpp on that chunk
-//                      • emits `oatmeal://live-segment` per line
-//
-// Chunks are transcribed independently and never rewritten, so the UI can append
-// and nothing ever flickers. The cost is slightly less context than a full-file
-// pass — which is exactly why the final transcript is still produced from the
-// whole mix at stop.
+// Chunking is the interesting part. Cutting every N seconds slices words in half.
+// Instead the worker waits until it has at least MIN_WINDOW of audio, then looks
+// for the quietest short frame in the back half of the window and cuts there — a
+// crude but effective "cut on a pause". The final, accurate transcript is still
+// produced from the WAVs at stop; this lane is for the live panel only.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, Runtime};
-use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
-use crate::transcribe::{resample_linear, resolve_model_path, WHISPER_RATE};
+use crate::transcribe::{Quality, Transcriber, WHISPER_RATE};
 
-/// Event carrying one finished live transcript line.
-pub const EVENT_SEGMENT: &str = "oatmeal://live-segment";
-/// Event carrying worker status changes (`loading`, `listening`, `error`).
-pub const EVENT_STATE: &str = "oatmeal://live-state";
+/// Don't decode until at least this much audio has accumulated.
+const MIN_WINDOW_SECS: f32 = 6.0;
+/// Force a cut once the window reaches this length, pause or not.
+const MAX_WINDOW_SECS: f32 = 12.0;
+/// Frame size used when hunting for the quietest moment to cut on.
+const PAUSE_FRAME_SECS: f32 = 0.02;
+/// How often the worker checks whether a window is ready.
+const POLL_MS: u64 = 400;
 
-/// How often the worker drains the tap.
-const POLL_MS: u64 = 250;
-/// Don't transcribe until we have at least this much audio — shorter chunks give
-/// Whisper too little context and produce noise.
-const MIN_CHUNK_SECS: f32 = 5.0;
-/// Cut unconditionally once a chunk gets this long, even mid-word.
-const MAX_CHUNK_SECS: f32 = 14.0;
-/// Window used when hunting for a quiet split point.
-const SPLIT_WINDOW_MS: usize = 120;
-/// Chunks quieter than this RMS are treated as silence and skipped — no point
-/// burning a Whisper pass on room tone (and it stops "you" / "thanks" hallucinations).
-const SILENCE_RMS: f32 = 0.0025;
-
-fn secs_to_samples(secs: f32) -> usize {
-    (secs * WHISPER_RATE as f32) as usize
-}
-
-/// One live transcript line. Times are centiseconds from the start of the
-/// meeting, matching the batch `transcribe::Segment` units.
+/// One line of live transcript, as emitted to the UI.
 #[derive(Debug, Clone, Serialize)]
-pub struct LiveSegment {
-    pub start_cs: i64,
-    pub end_cs: i64,
+pub struct LiveLine {
+    /// Milliseconds from the start of the meeting.
+    pub at_ms: u64,
     pub text: String,
 }
 
-/// Worker status pushed to the UI so it can show "starting", "listening", or an
-/// error without guessing.
-#[derive(Debug, Clone, Serialize)]
-pub struct LiveState {
-    pub state: &'static str,
-    pub message: String,
-}
-
-// ── the tap ─────────────────────────────────────────────────────────────────
-
-/// Shared sink the capture lanes push 16 kHz mono audio into.
-///
-/// Each lane gets its own queue: they run on independent realtime threads and a
-/// lane may be missing entirely (denied permission, no mic). The worker drains
-/// both and mixes them the same way `session::mix` does for the final file —
-/// sum, zero-pad the shorter, clamp.
+/// Shared sink the capture lanes push into. Cheap to clone; the audio callback
+/// only takes the lock long enough to append.
 #[derive(Default)]
-pub struct LiveTap {
-    mic: Mutex<Vec<f32>>,
-    sys: Mutex<Vec<f32>>,
+pub struct Tap {
+    samples: Mutex<Vec<f32>>,
 }
 
-impl LiveTap {
-    pub fn new() -> Arc<Self> {
-        Arc::new(Self::default())
+impl Tap {
+    /// Append interleaved samples from a capture callback, downmixing to mono and
+    /// resampling to 16 kHz. Runs on the realtime audio thread, so it stays
+    /// allocation-light and never blocks on anything but this lock.
+    pub fn push(&self, data: &[f32], channels: u16, rate: u32) {
+        if data.is_empty() || channels == 0 || rate == 0 {
+            return;
+        }
+        let ch = channels as usize;
+        let frames = data.len() / ch;
+        if frames == 0 {
+            return;
+        }
+
+        // Downmix, then take every (rate / 16000)th frame with linear
+        // interpolation — the same approach as the offline path.
+        let ratio = rate as f32 / WHISPER_RATE as f32;
+        let out_len = (frames as f32 / ratio) as usize;
+        let mut out = Vec::with_capacity(out_len);
+        for i in 0..out_len {
+            let src = i as f32 * ratio;
+            let a = src.floor() as usize;
+            let b = (a + 1).min(frames - 1);
+            let t = src - a as f32;
+            let mono = |f: usize| {
+                let base = f * ch;
+                data[base..base + ch].iter().sum::<f32>() / ch as f32
+            };
+            out.push(mono(a) * (1.0 - t) + mono(b) * t);
+        }
+
+        if let Ok(mut buf) = self.samples.lock() {
+            buf.extend_from_slice(&out);
+        }
     }
 
-    /// Append 16 kHz mono samples from the microphone lane.
-    pub fn push_mic(&self, samples: &[f32]) {
-        if let Ok(mut q) = self.mic.lock() {
-            q.extend_from_slice(samples);
+    /// Take everything buffered so far.
+    fn drain(&self) -> Vec<f32> {
+        match self.samples.lock() {
+            Ok(mut buf) => std::mem::take(&mut *buf),
+            Err(_) => Vec::new(),
         }
-    }
-
-    /// Append 16 kHz mono samples from the system-audio lane.
-    pub fn push_sys(&self, samples: &[f32]) {
-        if let Ok(mut q) = self.sys.lock() {
-            q.extend_from_slice(samples);
-        }
-    }
-
-    /// Take everything queued so far, mixed to a single mono track.
-    pub fn drain_mixed(&self) -> Vec<f32> {
-        let mic = self
-            .mic
-            .lock()
-            .map(|mut q| std::mem::take(&mut *q))
-            .unwrap_or_default();
-        let sys = self
-            .sys
-            .lock()
-            .map(|mut q| std::mem::take(&mut *q))
-            .unwrap_or_default();
-
-        if sys.is_empty() {
-            return mic;
-        }
-        if mic.is_empty() {
-            return sys;
-        }
-        let n = mic.len().max(sys.len());
-        let mut out = Vec::with_capacity(n);
-        for i in 0..n {
-            let s = mic.get(i).copied().unwrap_or(0.0) + sys.get(i).copied().unwrap_or(0.0);
-            out.push(s.clamp(-1.0, 1.0));
-        }
-        out
     }
 }
 
-/// Convert one interleaved capture callback into 16 kHz mono, ready for the tap.
-///
-/// Called from realtime audio threads, so it does exactly one pass to mono and
-/// one linear resample — no DSP crate, no filtering. Good enough for a preview;
-/// the final transcript resamples the same way from the on-disk WAV.
-pub fn interleaved_to_mono_16k<I: Iterator<Item = f32>>(
-    samples: I,
-    channels: u16,
-    sample_rate: u32,
-) -> Vec<f32> {
-    let ch = channels.max(1) as usize;
-    let mono: Vec<f32> = if ch == 1 {
-        samples.collect()
-    } else {
-        let mut out = Vec::new();
-        let mut acc = 0.0f32;
-        let mut n = 0usize;
-        for s in samples {
-            acc += s;
-            n += 1;
-            if n == ch {
-                out.push(acc / ch as f32);
-                acc = 0.0;
-                n = 0;
-            }
-        }
-        out
-    };
-    resample_linear(&mono, sample_rate, WHISPER_RATE)
-}
-
-// ── the worker ──────────────────────────────────────────────────────────────
-
-/// A running live-transcription worker. Dropping it (or calling `stop`) ends the
-/// thread after the in-flight chunk finishes.
-pub struct LiveTranscriber {
+/// A running live-transcription worker. Dropping it stops the worker.
+pub struct LiveSession {
     stop: Arc<AtomicBool>,
     handle: Option<JoinHandle<()>>,
+    /// Every line emitted so far, so a recap can be asked for mid-meeting.
+    lines: Arc<Mutex<Vec<LiveLine>>>,
 }
 
-impl LiveTranscriber {
-    /// Spawn the worker. Never fails loudly: a missing/unloadable model is
-    /// reported to the UI as an `error` state and the meeting keeps recording,
-    /// because losing the live preview must not lose the recording.
-    pub fn start<R: Runtime>(
-        app: AppHandle<R>,
-        tap: Arc<LiveTap>,
+impl LiveSession {
+    /// Start decoding whatever `tap` receives. `emit` is called for each finished
+    /// line; it runs on the worker thread.
+    pub fn start(
+        tap: Arc<Tap>,
         model_path: String,
         language: Option<String>,
-    ) -> Self {
+        emit: impl Fn(LiveLine) + Send + 'static,
+    ) -> Result<Self, String> {
+        // Load the model up front so a missing/corrupt model fails the start call
+        // rather than silently producing no live text.
+        let transcriber = Transcriber::load(&model_path)?;
+
         let stop = Arc::new(AtomicBool::new(false));
-        let thread_stop = stop.clone();
+        let lines: Arc<Mutex<Vec<LiveLine>>> = Arc::new(Mutex::new(Vec::new()));
+
+        let worker_stop = stop.clone();
+        let worker_lines = lines.clone();
         let handle = std::thread::Builder::new()
             .name("oatmeal-live".into())
-            .spawn(move || run_worker(app, tap, thread_stop, model_path, language))
-            .ok();
-        Self { stop, handle }
+            .spawn(move || {
+                run(tap, transcriber, language, worker_stop, worker_lines, emit);
+            })
+            .map_err(|e| format!("spawn live thread: {e}"))?;
+
+        Ok(Self {
+            stop,
+            handle: Some(handle),
+            lines,
+        })
     }
 
-    /// Signal the worker to finish and wait for it.
+    /// Every line emitted so far.
+    pub fn lines(&self) -> Vec<LiveLine> {
+        self.lines.lock().map(|l| l.clone()).unwrap_or_default()
+    }
+
+    /// Stop the worker and join it.
     pub fn stop(mut self) {
         self.signal_and_join();
     }
@@ -208,186 +147,124 @@ impl LiveTranscriber {
     }
 }
 
-impl Drop for LiveTranscriber {
+impl Drop for LiveSession {
     fn drop(&mut self) {
         self.signal_and_join();
     }
 }
 
-fn emit_state<R: Runtime>(app: &AppHandle<R>, state: &'static str, message: impl Into<String>) {
-    let _ = app.emit(
-        EVENT_STATE,
-        LiveState {
-            state,
-            message: message.into(),
-        },
-    );
-}
-
-fn run_worker<R: Runtime>(
-    app: AppHandle<R>,
-    tap: Arc<LiveTap>,
-    stop: Arc<AtomicBool>,
-    model_path: String,
+fn run(
+    tap: Arc<Tap>,
+    transcriber: Transcriber,
     language: Option<String>,
+    stop: Arc<AtomicBool>,
+    lines: Arc<Mutex<Vec<LiveLine>>>,
+    emit: impl Fn(LiveLine),
 ) {
-    emit_state(&app, "loading", "Warming up the transcription model…");
-
-    let model = resolve_model_path(&model_path);
-    let ctx = match WhisperContext::new_with_params(&model, WhisperContextParameters::default()) {
-        Ok(c) => c,
-        Err(e) => {
-            emit_state(&app, "error", format!("live transcription unavailable: {e}"));
-            return;
-        }
-    };
-    let mut state = match ctx.create_state() {
-        Ok(s) => s,
-        Err(e) => {
-            emit_state(&app, "error", format!("live transcription unavailable: {e}"));
-            return;
-        }
-    };
-
-    let threads = std::thread::available_parallelism()
-        .map(|n| n.get() as i32)
-        .unwrap_or(4);
-
-    emit_state(&app, "listening", "Listening…");
-
-    let min_chunk = secs_to_samples(MIN_CHUNK_SECS);
-    let max_chunk = secs_to_samples(MAX_CHUNK_SECS);
+    let rate = WHISPER_RATE as f32;
+    let min_window = (MIN_WINDOW_SECS * rate) as usize;
+    let max_window = (MAX_WINDOW_SECS * rate) as usize;
 
     let mut pending: Vec<f32> = Vec::new();
-    // Samples already emitted — the time offset for the next chunk.
-    let mut consumed: usize = 0;
+    let mut elapsed_samples: usize = 0;
 
     loop {
         let stopping = stop.load(Ordering::SeqCst);
-        pending.extend_from_slice(&tap.drain_mixed());
+        pending.extend_from_slice(&tap.drain());
 
-        // While recording, wait for a full chunk. On stop, flush whatever is left
-        // so the last few seconds still show up before the batch pass replaces it.
-        let cut = if pending.len() >= min_chunk {
-            Some(choose_cut(&pending, min_chunk, max_chunk))
-        } else if stopping && !pending.is_empty() {
-            Some(pending.len())
+        let ready = pending.len() >= min_window;
+        if !ready && !stopping {
+            std::thread::sleep(std::time::Duration::from_millis(POLL_MS));
+            continue;
+        }
+        if pending.is_empty() {
+            // Nothing left and we're shutting down.
+            if stopping {
+                break;
+            }
+            continue;
+        }
+
+        // On the final pass, decode whatever is left rather than waiting for a
+        // full window — otherwise the last few seconds never appear.
+        let cut = if stopping && pending.len() < min_window {
+            pending.len()
         } else {
-            None
+            find_cut(&pending, min_window, max_window)
         };
 
-        if let Some(cut) = cut {
-            let chunk: Vec<f32> = pending.drain(..cut).collect();
-            let offset_cs = (consumed as i64 * 100) / WHISPER_RATE as i64;
-            consumed += chunk.len();
+        let window: Vec<f32> = pending.drain(..cut).collect();
+        let at_ms = (elapsed_samples as f64 / rate as f64 * 1000.0) as u64;
+        elapsed_samples += window.len();
 
-            if rms(&chunk) >= SILENCE_RMS {
-                match transcribe_chunk(&mut state, &chunk, language.as_deref(), threads) {
-                    Ok(segments) => {
-                        for mut seg in segments {
-                            seg.start_cs += offset_cs;
-                            seg.end_cs += offset_cs;
-                            let _ = app.emit(EVENT_SEGMENT, seg);
+        if !is_silent(&window) {
+            match transcriber.run(&window, language.as_deref(), Quality::Fast) {
+                Ok(t) => {
+                    let text = t.text.trim().to_string();
+                    if !text.is_empty() && !is_noise(&text) {
+                        let line = LiveLine { at_ms, text };
+                        if let Ok(mut l) = lines.lock() {
+                            l.push(line.clone());
                         }
+                        emit(line);
                     }
-                    Err(e) => eprintln!("[oatmeal] live chunk failed: {e}"),
                 }
+                Err(e) => eprintln!("[oatmeal] live decode: {e}"),
             }
-            // Loop again immediately rather than sleeping: transcription may have
-            // taken longer than a poll interval, so more audio is likely already
-            // waiting — and on stop this drains the backlog chunk by chunk until
-            // `pending` is empty and the `cut == None` path breaks us out.
-            continue;
         }
 
-        if stopping {
+        if stopping && pending.is_empty() {
             break;
         }
-        std::thread::sleep(std::time::Duration::from_millis(POLL_MS));
     }
 }
 
-/// Run one chunk through the warm Whisper state.
-fn transcribe_chunk(
-    state: &mut whisper_rs::WhisperState,
-    samples: &[f32],
-    language: Option<&str>,
-    threads: i32,
-) -> Result<Vec<LiveSegment>, String> {
-    let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
-    match language {
-        Some(lang) => params.set_language(Some(lang)),
-        None => params.set_detect_language(true),
+/// Choose where to end the next window: the quietest frame in the back half of
+/// the candidate range, so cuts land on pauses rather than mid-word. Falls back
+/// to the hard maximum when the audio never dips.
+fn find_cut(samples: &[f32], min_window: usize, max_window: usize) -> usize {
+    let end = samples.len().min(max_window);
+    if end <= min_window {
+        return end;
     }
-    params.set_n_threads(threads);
-    params.set_print_special(false);
-    params.set_print_progress(false);
-    params.set_print_realtime(false);
-    params.set_print_timestamps(false);
-    // A live chunk is a fragment, not a document — don't let Whisper carry a bad
-    // guess forward, and don't let it invent text for near-silence.
-    params.set_no_context(true);
-    params.set_single_segment(false);
-    params.set_suppress_blank(true);
-
-    state
-        .full(params, samples)
-        .map_err(|e| format!("whisper inference failed: {e}"))?;
-
-    let mut out = Vec::new();
-    for seg in state.as_iter() {
-        let text = seg
-            .to_str_lossy()
-            .map(|c| c.into_owned())
-            .unwrap_or_default();
-        if text.trim().is_empty() {
-            continue;
-        }
-        out.push(LiveSegment {
-            start_cs: seg.start_timestamp(),
-            end_cs: seg.end_timestamp(),
-            text,
-        });
-    }
-    Ok(out)
-}
-
-/// Pick where to end the next chunk.
-///
-/// Anywhere in `[min, min(len, max)]` is legal; we take the quietest short window
-/// in that range so the cut lands in a pause rather than mid-syllable. If the
-/// buffer already exceeds `max` we cut at `max` regardless.
-fn choose_cut(buf: &[f32], min: usize, max: usize) -> usize {
-    let hard = buf.len().min(max);
-    if hard <= min {
-        return hard;
-    }
-    let win = (WHISPER_RATE as usize * SPLIT_WINDOW_MS) / 1000;
-    if hard - min <= win {
-        return hard;
+    let frame = (PAUSE_FRAME_SECS * WHISPER_RATE as f32) as usize;
+    if frame == 0 {
+        return end;
     }
 
-    let mut best = hard;
+    let mut best = end;
     let mut best_energy = f32::MAX;
-    let mut start = min;
-    while start + win <= hard {
-        let energy: f32 = buf[start..start + win].iter().map(|s| s * s).sum();
+    let mut i = min_window;
+    while i + frame <= end {
+        let energy: f32 = samples[i..i + frame].iter().map(|s| s.abs()).sum();
         if energy < best_energy {
             best_energy = energy;
-            best = start + win / 2;
+            best = i + frame;
         }
-        start += win / 2;
+        i += frame;
     }
     best
 }
 
-/// Root-mean-square level of a chunk, used as the silence gate.
-fn rms(buf: &[f32]) -> f32 {
-    if buf.is_empty() {
-        return 0.0;
+/// Whether a window is quiet enough that decoding it would only produce
+/// hallucinated filler.
+fn is_silent(samples: &[f32]) -> bool {
+    if samples.is_empty() {
+        return true;
     }
-    let sum: f32 = buf.iter().map(|s| s * s).sum();
-    (sum / buf.len() as f32).sqrt()
+    let peak = samples.iter().fold(0.0f32, |m, s| m.max(s.abs()));
+    peak < 0.006
+}
+
+/// Whisper's stock output over near-silence. Worth dropping before it reaches
+/// the live panel.
+fn is_noise(text: &str) -> bool {
+    let t = text.trim().trim_matches(|c: char| !c.is_alphanumeric());
+    let lower = t.to_ascii_lowercase();
+    matches!(
+        lower.as_str(),
+        "" | "you" | "thank you" | "thanks for watching" | "blank_audio" | "silence" | "music"
+    )
 }
 
 #[cfg(test)]
@@ -395,101 +272,47 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tap_mixes_both_lanes_and_pads_the_shorter() {
-        let tap = LiveTap::new();
-        tap.push_mic(&[0.5, 0.5, 0.5]);
-        tap.push_sys(&[0.2]);
-        let mixed = tap.drain_mixed();
-        assert_eq!(mixed.len(), 3);
-        assert!((mixed[0] - 0.7).abs() < 1e-6);
-        assert!((mixed[1] - 0.5).abs() < 1e-6);
-        // Draining is destructive.
-        assert!(tap.drain_mixed().is_empty());
-    }
+    fn tap_downmixes_and_resamples_to_16k() {
+        let tap = Tap::default();
+        // 1 second of 48 kHz stereo: left 1.0, right -1.0 → mono 0.0.
+        let frames = 48_000;
+        let data: Vec<f32> = (0..frames).flat_map(|_| [1.0f32, -1.0f32]).collect();
+        tap.push(&data, 2, 48_000);
 
-    #[test]
-    fn tap_passes_a_lone_lane_through_untouched() {
-        let tap = LiveTap::new();
-        tap.push_sys(&[0.1, -0.1]);
-        assert_eq!(tap.drain_mixed(), vec![0.1, -0.1]);
-    }
-
-    #[test]
-    fn tap_clamps_when_both_lanes_are_loud() {
-        let tap = LiveTap::new();
-        tap.push_mic(&[0.9, -0.9]);
-        tap.push_sys(&[0.9, -0.9]);
-        assert_eq!(tap.drain_mixed(), vec![1.0, -1.0]);
-    }
-
-    #[test]
-    fn interleaved_downmixes_channels_and_resamples() {
-        // 0.1s of 48 kHz stereo where the channels cancel.
-        let frames = 4_800;
-        let data: Vec<f32> = (0..frames).flat_map(|_| [0.5f32, -0.5f32]).collect();
-        let mono = interleaved_to_mono_16k(data.into_iter(), 2, 48_000);
-        assert!((mono.len() as i64 - 1_600).abs() <= 2, "len {}", mono.len());
-        let peak = mono.iter().fold(0.0f32, |m, &s| m.max(s.abs()));
-        assert!(peak < 0.05, "expected cancellation, peak {peak}");
-    }
-
-    #[test]
-    fn interleaved_mono_at_target_rate_is_a_passthrough() {
-        let x = vec![0.1, -0.2, 0.3];
-        assert_eq!(
-            interleaved_to_mono_16k(x.clone().into_iter(), 1, WHISPER_RATE),
-            x
+        let out = tap.drain();
+        // A second of 16 kHz mono, give or take the interpolation tail.
+        assert!(
+            (out.len() as i64 - 16_000).abs() <= 2,
+            "got {} samples",
+            out.len()
         );
+        assert!(out.iter().all(|s| s.abs() < 1e-6), "channels should cancel");
     }
 
     #[test]
-    fn cut_lands_in_the_quiet_gap() {
-        // Realistic sizes: 5 s minimum, 14 s maximum, 12 s of audio that is loud
-        // everywhere except a one-second pause centred on 9 s.
-        let min = secs_to_samples(5.0);
-        let max = secs_to_samples(14.0);
-        let mut buf = vec![0.8f32; secs_to_samples(12.0)];
-        let gap = secs_to_samples(8.5)..secs_to_samples(9.5);
-        for s in &mut buf[gap] {
+    fn cut_lands_on_the_quiet_frame() {
+        let rate = WHISPER_RATE as usize;
+        // 10s of tone with a silent gap at 8s.
+        let mut samples = vec![0.5f32; 10 * rate];
+        let gap = 8 * rate;
+        for s in &mut samples[gap..gap + rate / 10] {
             *s = 0.0;
         }
 
-        let cut = choose_cut(&buf, min, max);
-        // The cut must land inside the pause, not in the surrounding speech.
+        let cut = find_cut(&samples, 6 * rate, 12 * rate);
+        // Within a frame or two of the gap, not at the hard maximum.
         assert!(
-            cut >= secs_to_samples(8.5) && cut <= secs_to_samples(9.5),
-            "cut at {:.2}s, expected inside the 8.5–9.5s pause",
-            cut as f32 / WHISPER_RATE as f32
+            cut > gap && cut < gap + rate / 5,
+            "cut at {cut}, gap at {gap}"
         );
     }
 
     #[test]
-    fn cut_falls_back_to_the_hard_limit_when_audio_is_uniformly_loud() {
-        // No pause anywhere: we still have to cut, and never past `max`.
-        let min = secs_to_samples(5.0);
-        let max = secs_to_samples(14.0);
-        let buf = vec![0.8f32; secs_to_samples(30.0)];
-        let cut = choose_cut(&buf, min, max);
-        assert!(cut >= min && cut <= max, "cut {cut} out of range");
-    }
-
-    #[test]
-    fn cut_never_exceeds_the_hard_maximum() {
-        let buf = vec![0.5f32; 50_000];
-        let cut = choose_cut(&buf, 1_000, 10_000);
-        assert!(cut <= 10_000, "cut {cut}");
-    }
-
-    #[test]
-    fn cut_returns_buffer_length_when_short() {
-        let buf = vec![0.5f32; 500];
-        assert_eq!(choose_cut(&buf, 1_000, 10_000), 500);
-    }
-
-    #[test]
-    fn rms_gate_separates_silence_from_speech() {
-        assert!(rms(&vec![0.0; 1_000]) < SILENCE_RMS);
-        assert!(rms(&vec![0.2; 1_000]) > SILENCE_RMS);
-        assert_eq!(rms(&[]), 0.0);
+    fn silence_and_filler_are_dropped() {
+        assert!(is_silent(&[0.0; 1000]));
+        assert!(!is_silent(&[0.5; 1000]));
+        assert!(is_noise("[BLANK_AUDIO]"));
+        assert!(is_noise("Thank you."));
+        assert!(!is_noise("So the midterm covers chapters four through six."));
     }
 }
