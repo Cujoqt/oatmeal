@@ -21,6 +21,30 @@ fn main() {
         // Emit for every linked artifact (bin, test, example) so `cargo test`
         // binaries also find the Swift runtime, not just the app binary.
         println!("cargo:rustc-link-arg=-Wl,-rpath,/usr/lib/swift");
+
+        // ggml's Metal backend is Objective-C and uses `@available(...)`, which
+        // clang lowers to `___isPlatformVersionAtLeast` — a compiler-rt builtin.
+        // rustc links with `-nodefaultlibs`, so clang's runtime library is never
+        // pulled in and the symbol is undefined at link time. Link it explicitly.
+        if let Some(dir) = clang_runtime_dir() {
+            if std::path::Path::new(&dir).join("libclang_rt.osx.a").exists() {
+                println!("cargo:rustc-link-search=native={dir}");
+                println!("cargo:rustc-link-lib=static=clang_rt.osx");
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn clang_runtime_dir() -> Option<String> {
+        let out = std::process::Command::new("clang")
+            .arg("-print-runtime-dir")
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let dir = String::from_utf8(out.stdout).ok()?.trim().to_string();
+        (!dir.is_empty()).then_some(dir)
     }
 
     tauri_build::build()
