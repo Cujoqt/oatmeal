@@ -276,6 +276,20 @@ fn list_meetings() -> Vec<library::Meeting> {
     library::list_meetings()
 }
 
+/// Retitle a past meeting. Writes `meta.json` and rewrites the transcript
+/// heading; the folder name (and so the recording's timestamp) is untouched.
+#[tauri::command]
+fn rename_meeting(id: String, title: String) -> Result<(), String> {
+    library::rename_meeting(&id, &title)
+}
+
+/// Move a past meeting to the Trash, returning where it landed. Recoverable
+/// from Finder — audio can't be re-recorded, so this is never a hard delete.
+#[tauri::command]
+fn delete_meeting(id: String) -> Result<String, String> {
+    library::delete_meeting(&id)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -295,7 +309,9 @@ pub fn run() {
             start_session,
             stop_session,
             is_session_active,
-            list_meetings
+            list_meetings,
+            rename_meeting,
+            delete_meeting
         ])
         .setup(|app| {
             // Apply the hide flag as soon as the window exists.

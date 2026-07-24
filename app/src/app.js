@@ -197,6 +197,23 @@ function fmtWhen(date) {
   return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
 }
 
+const PENCIL_ICON =
+  '<path d="M4 20h4L20 8a2.4 2.4 0 0 0-3.4-3.4L4.6 16.6 4 20Z" />'
+const TRASH_ICON =
+  '<path d="M4 7h16M9.5 7V5.2A1.2 1.2 0 0 1 10.7 4h2.6a1.2 1.2 0 0 1 1.2 1.2V7M6.5 7l.8 12a1.6 1.6 0 0 0 1.6 1.5h6.2a1.6 1.6 0 0 0 1.6-1.5l.8-12" />'
+
+function iconButton(path, label, className = '') {
+  const b = document.createElement('button')
+  b.className = className
+  b.title = label
+  b.setAttribute('aria-label', label)
+  b.innerHTML =
+    '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">' +
+    path +
+    '</svg>'
+  return b
+}
+
 function meetingRow(m) {
   const row = document.createElement('div')
   row.className = 'mrow'
@@ -224,9 +241,106 @@ function meetingRow(m) {
   tag.className = m.transcribed ? 'tag done' : 'tag audio'
   tag.textContent = m.transcribed ? 'Summarized' : 'Audio only'
 
-  row.append(ico, meta, tag)
+  const acts = document.createElement('div')
+  acts.className = 'acts'
+  const renameBtn = iconButton(PENCIL_ICON, 'Rename')
+  const deleteBtn = iconButton(TRASH_ICON, 'Move to Trash', 'danger')
+  acts.append(renameBtn, deleteBtn)
+
+  renameBtn.addEventListener('click', () => beginRename(row, m, name))
+  deleteBtn.addEventListener('click', () => confirmDelete(row, m, tag, acts))
+
+  row.append(ico, meta, tag, acts)
   row.title = m.dir
   return row
+}
+
+// ── rename ───────────────────────────────────────────────────────────────────
+
+function beginRename(row, m, nameEl) {
+  const input = document.createElement('input')
+  input.className = 'rename'
+  input.value = m.title
+  nameEl.replaceWith(input)
+  input.focus()
+  input.select()
+
+  let settled = false
+  const revert = () => {
+    if (settled) return
+    settled = true
+    input.replaceWith(nameEl)
+  }
+
+  const commit = async () => {
+    if (settled) return
+    const title = input.value.trim()
+    if (!title || title === m.title) return revert()
+    settled = true
+    input.disabled = true
+    try {
+      await invoke('rename_meeting', { id: m.id, title })
+      m.title = title
+      nameEl.textContent = title
+      input.replaceWith(nameEl)
+    } catch (e) {
+      settled = false
+      input.disabled = false
+      setStatus(String(e), true)
+    }
+  }
+
+  input.addEventListener('keydown', (e) => {
+    e.stopPropagation() // don't let Space reach the record shortcut
+    if (e.key === 'Enter') commit()
+    else if (e.key === 'Escape') revert()
+  })
+  input.addEventListener('blur', commit)
+}
+
+// ── delete ───────────────────────────────────────────────────────────────────
+//
+// Two steps, in the row itself: the tag and actions are swapped for an explicit
+// "Move to Trash?" prompt. The recording goes to the Trash rather than being
+// unlinked, so a wrong click is recoverable from Finder.
+
+function confirmDelete(row, m, tag, acts) {
+  const prompt = document.createElement('div')
+  prompt.className = 'confirm'
+
+  const q = document.createElement('span')
+  q.className = 'q'
+  q.textContent = 'Move to Trash?'
+
+  const cancel = document.createElement('button')
+  cancel.textContent = 'Cancel'
+  const yes = document.createElement('button')
+  yes.className = 'yes'
+  yes.textContent = 'Move'
+
+  prompt.append(q, cancel, yes)
+  tag.style.display = 'none'
+  acts.replaceWith(prompt)
+  yes.focus()
+
+  const dismiss = () => {
+    tag.style.display = ''
+    prompt.replaceWith(acts)
+  }
+  cancel.addEventListener('click', dismiss)
+
+  yes.addEventListener('click', async () => {
+    yes.disabled = true
+    cancel.disabled = true
+    try {
+      await invoke('delete_meeting', { id: m.id })
+      setStatus(`Moved “${m.title}” to the Trash.`)
+      loadMeetings()
+    } catch (e) {
+      setStatus(String(e), true)
+      dismiss()
+    }
+  })
 }
 
 function renderMeetings() {

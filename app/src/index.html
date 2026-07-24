@@ -192,9 +192,40 @@
     .mrow .meta { flex: 1; min-width: 0; }
     .mrow .name { font: 600 13px var(--sans); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .mrow .sub { font: 400 11px var(--sans); color: var(--muted); }
+    .mrow:hover { background: color-mix(in srgb, var(--ink) 4%, transparent); }
     .tag { font: 600 10px var(--sans); padding: 3px 9px; border-radius: 20px; flex: none; }
     .tag.done { background: var(--good-bg); color: var(--good-ink); }
     .tag.audio { background: var(--key-bg); color: var(--ink-soft); }
+
+    /* Row actions — revealed on hover so the list stays calm at rest. */
+    .acts { display: flex; gap: 2px; flex: none; opacity: 0; transition: opacity .12s; }
+    .mrow:hover .acts, .mrow:focus-within .acts { opacity: 1; }
+    .acts button {
+      display: flex; align-items: center; justify-content: center;
+      width: 26px; height: 26px; border-radius: 7px; cursor: pointer;
+      background: transparent; border: 0; color: var(--muted); transition: background .12s, color .12s;
+    }
+    .acts button:hover { background: var(--key-bg); color: var(--ink); }
+    .acts button.danger:hover { background: color-mix(in srgb, #c0392b 15%, transparent); color: #c0392b; }
+    @media (prefers-color-scheme: dark) { .acts button.danger:hover { color: #ef8a7d; } }
+    :root[data-theme="dark"] .acts button.danger:hover { color: #ef8a7d; }
+
+    /* Inline rename — same metrics as the row's title so nothing shifts. */
+    .mrow input.rename {
+      font: 600 13px var(--sans); color: var(--ink); background: var(--bg);
+      border: 1px solid var(--accent); border-radius: 6px; padding: 3px 6px;
+      width: 100%; outline: none;
+    }
+
+    /* Delete confirmation replaces the row's controls in place. */
+    .confirm { display: flex; align-items: center; gap: 8px; flex: none; }
+    .confirm .q { font: 500 11.5px var(--sans); color: var(--muted); }
+    .confirm button {
+      font: 600 11.5px var(--sans); border-radius: 7px; padding: 4px 10px;
+      cursor: pointer; border: 1px solid var(--line-2); background: transparent; color: var(--ink-soft);
+    }
+    .confirm button.yes { background: #c0392b; border-color: #c0392b; color: #fff; }
+    .confirm button.yes:hover { background: #a93226; }
     .empty { font-size: 12.5px; color: var(--faint); font-style: italic; padding: 10px 8px 14px; }
 
     /* ── transcript result ─────────────────────────────────────────────────*/

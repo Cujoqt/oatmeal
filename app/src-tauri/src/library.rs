@@ -57,7 +57,10 @@ fn read_meeting(dir: &Path, name: &str) -> Meeting {
     let transcript = dir.join("transcript.md");
     let transcribed = transcript.exists();
 
-    let title = transcript_title(&transcript)
+    // A rename writes meta.json, so it outranks the recorded-at-the-time
+    // heading and the folder slug.
+    let title = meta_title(&dir.join("meta.json"))
+        .or_else(|| transcript_title(&transcript))
         .or_else(|| title_from_slug(name))
         .unwrap_or_else(|| "Untitled meeting".into());
 
@@ -117,6 +120,82 @@ fn transcript_title(path: &Path) -> Option<String> {
     (!heading.is_empty() && heading != "Untitled meeting").then(|| heading.to_string())
 }
 
+/// Title from a rename, if the meeting has been renamed.
+fn meta_title(path: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let meta: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let title = meta.get("title")?.as_str()?.trim();
+    (!title.is_empty()).then(|| title.to_string())
+}
+
+/// Resolve a meeting id (a folder name) to its directory, refusing anything
+/// that isn't a plain name directly under the recordings root. The id crosses
+/// the boundary from the UI, so `..` or an absolute path must not be able to
+/// point the rename/delete commands at arbitrary files.
+fn meeting_dir(id: &str) -> Result<std::path::PathBuf, String> {
+    if id.is_empty()
+        || id.contains('/')
+        || id.contains('\\')
+        || id.contains("..")
+        || Path::new(id).components().count() != 1
+    {
+        return Err(format!("invalid meeting id: {id}"));
+    }
+    let dir = recordings_root().join(id);
+    if !dir.is_dir() {
+        return Err(format!("no such meeting: {id}"));
+    }
+    Ok(dir)
+}
+
+/// Rename a meeting. The new title is recorded in `meta.json`; the transcript's
+/// own heading is rewritten too so the exported markdown doesn't disagree with
+/// the app. The folder name is deliberately left alone — it encodes the
+/// recording time and is what every other path is derived from.
+pub fn rename_meeting(id: &str, title: &str) -> Result<(), String> {
+    let dir = meeting_dir(id)?;
+    let title = title.trim();
+    if title.is_empty() {
+        return Err("a meeting needs a title".into());
+    }
+
+    let meta = serde_json::json!({ "title": title });
+    let meta_path = dir.join("meta.json");
+    std::fs::write(&meta_path, meta.to_string())
+        .map_err(|e| format!("write {}: {e}", meta_path.display()))?;
+
+    let transcript = dir.join("transcript.md");
+    if let Ok(text) = std::fs::read_to_string(&transcript) {
+        let rest = text.split_once('\n').map(|(_, r)| r).unwrap_or("");
+        let updated = format!("# {title}\n{rest}");
+        std::fs::write(&transcript, updated)
+            .map_err(|e| format!("write {}: {e}", transcript.display()))?;
+    }
+    Ok(())
+}
+
+/// Move a meeting to the Trash. Deliberately not a hard delete: a recording
+/// can't be re-made, so a misclick has to stay recoverable from Finder.
+pub fn delete_meeting(id: &str) -> Result<String, String> {
+    let dir = meeting_dir(id)?;
+    let home = std::env::var("HOME").map_err(|_| "no HOME set".to_string())?;
+    let trash = Path::new(&home).join(".Trash");
+    std::fs::create_dir_all(&trash).map_err(|e| format!("open Trash: {e}"))?;
+
+    // Finder's own collision behaviour: keep the name, add a counter.
+    let mut dest = trash.join(id);
+    let mut n = 2;
+    while dest.exists() {
+        dest = trash.join(format!("{id} {n}"));
+        n += 1;
+    }
+
+    std::fs::rename(&dir, &dest).map_err(|e| {
+        format!("move {} to Trash: {e}", dir.display())
+    })?;
+    Ok(dest.display().to_string())
+}
+
 /// Duration of a WAV in whole seconds, or 0 if it's missing or unreadable.
 fn wav_secs(path: &Path) -> u64 {
     let Ok(reader) = hound::WavReader::open(path) else {
@@ -151,6 +230,100 @@ mod tests {
         assert_eq!(parse_stamp("models"), None);
         assert_eq!(parse_stamp("not-a-stamp-here"), None);
         assert_eq!(parse_stamp("2026072-103300"), None);
+    }
+
+    /// Point `$HOME` at a scratch dir for the duration of the closure, so the
+    /// tests exercise the real path logic (recordings root *and* Trash) without
+    /// touching the developer's own recordings.
+    /// `$HOME` is process-global, so these tests can't overlap.
+    static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn with_temp_home<T>(f: impl FnOnce(&Path) -> T) -> T {
+        let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = std::env::temp_dir().join(format!(
+            "oatmeal-test-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&home).unwrap();
+        let prev = std::env::var("HOME").ok();
+        std::env::set_var("HOME", &home);
+
+        let out = f(&home);
+
+        match prev {
+            Some(p) => std::env::set_var("HOME", p),
+            None => std::env::remove_var("HOME"),
+        }
+        let _ = std::fs::remove_dir_all(&home);
+        out
+    }
+
+    /// Create a meeting folder with a transcript, as `session.rs` would.
+    fn seed_meeting(id: &str) -> std::path::PathBuf {
+        let dir = recordings_root().join(id);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("transcript.md"), "# Standup\n\n## Transcript\n\nhi\n").unwrap();
+        dir
+    }
+
+    #[test]
+    fn rename_updates_both_the_listing_and_the_transcript() {
+        with_temp_home(|_| {
+            let id = "20260724-103300-standup";
+            let dir = seed_meeting(id);
+
+            rename_meeting(id, "  Weekly sync  ").unwrap();
+
+            // The listing reflects the new title...
+            let listed = list_meetings();
+            assert_eq!(listed.len(), 1);
+            assert_eq!(listed[0].title, "Weekly sync");
+            // ...and so does the exported markdown, body intact.
+            let md = std::fs::read_to_string(dir.join("transcript.md")).unwrap();
+            assert!(md.starts_with("# Weekly sync\n"), "got: {md:?}");
+            assert!(md.contains("hi"));
+            // The folder name is untouched — it encodes the recording time.
+            assert!(dir.exists());
+
+            assert!(rename_meeting(id, "   ").is_err(), "blank title must fail");
+        });
+    }
+
+    #[test]
+    fn delete_moves_the_meeting_to_the_trash() {
+        with_temp_home(|home| {
+            let id = "20260724-090000-acme";
+            let dir = seed_meeting(id);
+
+            let dest = delete_meeting(id).unwrap();
+
+            assert!(!dir.exists(), "meeting should have left the recordings root");
+            assert!(list_meetings().is_empty());
+            // Recoverable: the audio and transcript still exist under ~/.Trash.
+            let trashed = home.join(".Trash").join(id);
+            assert_eq!(dest, trashed.display().to_string());
+            assert!(trashed.join("transcript.md").exists());
+
+            // A second meeting with the same name lands beside it, not on top.
+            seed_meeting(id);
+            let second = delete_meeting(id).unwrap();
+            assert!(second.ends_with(&format!("{id} 2")), "got: {second}");
+            assert!(trashed.join("transcript.md").exists());
+
+            assert!(delete_meeting(id).is_err(), "already gone");
+        });
+    }
+
+    #[test]
+    fn meeting_dir_rejects_ids_that_escape_the_root() {
+        // These must fail on the id check, before any filesystem lookup.
+        for bad in ["", "..", "../../etc", "a/b", "/etc/passwd", "x\\y"] {
+            assert!(
+                meeting_dir(bad).is_err(),
+                "expected {bad:?} to be rejected"
+            );
+        }
     }
 
     #[test]
