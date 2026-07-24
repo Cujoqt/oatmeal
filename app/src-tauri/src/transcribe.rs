@@ -20,7 +20,7 @@ use whisper_rs::{
 };
 
 /// Target sample rate for Whisper.
-const WHISPER_RATE: u32 = 16_000;
+pub const WHISPER_RATE: u32 = 16_000;
 
 /// One transcript line with its time span (centiseconds, as Whisper reports).
 #[derive(Debug, Clone, Serialize)]
@@ -187,7 +187,7 @@ pub fn load_wav_mono_16k(path: &Path) -> Result<Vec<f32>, String> {
 
 /// Linear-interpolation resampler. Good enough for speech going into Whisper;
 /// avoids pulling in a DSP crate for an integer-ish downsample.
-fn resample_linear(input: &[f32], src_rate: u32, dst_rate: u32) -> Vec<f32> {
+pub fn resample_linear(input: &[f32], src_rate: u32, dst_rate: u32) -> Vec<f32> {
     if src_rate == dst_rate || input.is_empty() {
         return input.to_vec();
     }

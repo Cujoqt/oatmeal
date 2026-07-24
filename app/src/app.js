@@ -1,87 +1,113 @@
-// Oatmeal — native recorder UI (M5).
+// Oatmeal — the note window.
 //
-// Talks to the Rust commands: session start/stop (which drive the mic + system
-// audio lanes and on-device Whisper), and the screen-share hide toggle.
+// This is the surface you look at during a meeting: a title, your own notes, and
+// the recording dock. The live transcript lives in its own floating window
+// (transcript.html) so it can sit over a call without covering your notes.
+//
+// Rust owns everything real — capture, streaming transcription, files. This file
+// only drives those commands and keeps the two windows in sync via Tauri events.
+
+import { EVENTS, LANG_KEY, getLang } from '/shared.js'
 
 const { invoke } = window.__TAURI__.core
+const { listen, emit } = window.__TAURI__.event
 
-const btn = document.getElementById('btn')
-const titleEl = document.getElementById('title')
-const timerEl = document.getElementById('timer')
-const statusEl = document.getElementById('status')
-const resultEl = document.getElementById('result')
-const savedEl = document.getElementById('saved')
-const transcriptEl = document.getElementById('transcript')
-const hideEl = document.getElementById('hide')
-const hideLabel = document.getElementById('hideLabel')
+const el = (id) => document.getElementById(id)
+const titleEl = el('title')
+const notesEl = el('notes')
+const saveHintEl = el('saveHint')
+const statusEl = el('status')
+const clusterEl = el('cluster')
+const recBtn = el('rec')
+const expandBtn = el('expand')
+const revealBtn = el('reveal')
+const introEl = el('intro')
+const okayBtn = el('okay')
+const askEl = el('ask')
+const hideEl = el('hide')
+const hideLabel = el('hideLabel')
+
+const DRAFT_KEY = 'oatmeal.draft'
+const INTRO_KEY = 'oatmeal.introSeen'
 
 let recording = false
 let busy = false
-let tick = null
-let startedAt = 0
+let sessionDir = ''
+let saveTimer = null
+
+// ── status + chrome ──────────────────────────────────────────────────────────
 
 function setStatus(msg, isErr = false) {
   statusEl.textContent = msg
   statusEl.classList.toggle('err', isErr)
 }
 
-function fmtElapsed(ms) {
-  const s = Math.floor(ms / 1000)
-  const m = Math.floor(s / 60)
-  return `${String(m).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`
+function setRecordingUI(on) {
+  recording = on
+  clusterEl.classList.toggle('live', on)
+  recBtn.title = on ? 'Stop recording' : 'Start recording'
+  titleEl.setAttribute('data-placeholder', on ? 'Untitled meeting' : 'New note')
 }
 
-function startTimer() {
-  startedAt = Date.now()
-  timerEl.classList.add('on')
-  timerEl.textContent = '00:00'
-  tick = setInterval(() => {
-    timerEl.textContent = fmtElapsed(Date.now() - startedAt)
-  }, 500)
+// ── notes: debounced autosave to notes.md ────────────────────────────────────
+
+function draft() {
+  return { title: titleEl.textContent.trim(), body: notesEl.textContent }
 }
 
-function stopTimer() {
-  clearInterval(tick)
-  tick = null
-  timerEl.classList.remove('on')
+function queueSave() {
+  const d = draft()
+  // Keep a local copy immediately so a crash or restart never loses typing.
+  localStorage.setItem(DRAFT_KEY, JSON.stringify(d))
+
+  clearTimeout(saveTimer)
+  saveTimer = setTimeout(async () => {
+    try {
+      const path = await invoke('save_notes', d)
+      // Before a meeting exists the backend holds the notes in memory and
+      // returns null; there is nothing on disk to report yet.
+      if (path) flashHint('Saved to notes.md')
+    } catch (e) {
+      flashHint(String(e))
+    }
+  }, 800)
 }
 
-function toRecordButton() {
-  btn.classList.remove('stop')
-  btn.innerHTML = '<span class="dot"></span>Record'
-  btn.disabled = false
+let hintTimer = null
+function flashHint(msg) {
+  saveHintEl.textContent = msg
+  saveHintEl.classList.add('show')
+  clearTimeout(hintTimer)
+  hintTimer = setTimeout(() => saveHintEl.classList.remove('show'), 1800)
 }
 
-function toStopButton() {
-  btn.classList.add('stop')
-  btn.innerHTML = '<span class="dot"></span>Stop'
-  btn.disabled = false
-}
+titleEl.addEventListener('input', queueSave)
+notesEl.addEventListener('input', queueSave)
 
-// ── recording flow ───────────────────────────────────────────────────────────
+// ── recording ────────────────────────────────────────────────────────────────
 
 async function startRecording() {
   busy = true
-  btn.disabled = true
-  resultEl.classList.remove('open')
-  transcriptEl.innerHTML = ''
-  savedEl.textContent = ''
-
   try {
     setStatus('Preparing the transcription model (first run downloads it once)…')
     await invoke('ensure_model')
 
     setStatus('Starting capture…')
-    await invoke('start_session', { title: titleEl.value.trim() })
+    const paths = await invoke('start_session', {
+      title: draft().title,
+      language: getLang(),
+    })
+    sessionDir = paths.dir
 
-    recording = true
-    startTimer()
-    toStopButton()
-    titleEl.disabled = true
-    setStatus('Recording — your mic and the other side of the call, locally.')
+    setRecordingUI(true)
+    // Flush whatever was typed before the folder existed.
+    await invoke('save_notes', draft()).catch(() => {})
+    await showTranscript(true)
+    emit(EVENTS.session, { active: true, title: draft().title })
+    setStatus('Recording — mic and the other side of the call, transcribing live.')
   } catch (e) {
     setStatus(String(e), true)
-    toRecordButton()
+    setRecordingUI(false)
   } finally {
     busy = false
   }
@@ -89,67 +115,70 @@ async function startRecording() {
 
 async function stopRecording() {
   busy = true
-  btn.disabled = true
-  stopTimer()
-  setStatus('Transcribing on-device — this can take a moment…')
+  setStatus('Finishing the transcript on-device — this can take a moment…')
+  emit(EVENTS.state, { state: 'finishing', message: 'Writing the final transcript…' })
 
   try {
-    const res = await invoke('stop_session', { modelPath: '', language: 'en' })
-    renderResult(res)
-    setStatus('Done. Notes saved locally.')
+    // Save one last time before the folder stops being the active session.
+    await invoke('save_notes', draft()).catch(() => {})
+    const res = await invoke('stop_session', { modelPath: '', language: getLang() })
+    emit(EVENTS.final, res)
+    setStatus(`Saved to ${res.dir}`)
   } catch (e) {
     setStatus(String(e), true)
+    emit(EVENTS.state, { state: 'error', message: String(e) })
   } finally {
-    recording = false
-    titleEl.disabled = false
-    toRecordButton()
+    setRecordingUI(false)
+    emit(EVENTS.session, { active: false, title: draft().title })
     busy = false
   }
 }
 
-function renderResult(res) {
-  savedEl.innerHTML = `saved → <b>${escapeHtml(res.transcript_path)}</b>`
-  transcriptEl.innerHTML = ''
-  const segs = (res.segments || []).filter((s) => s.text.trim())
-  if (!segs.length) {
-    transcriptEl.innerHTML = '<div class="seg">(no speech detected)</div>'
-  } else {
-    for (const s of segs) {
-      const div = document.createElement('div')
-      div.className = 'seg'
-      div.innerHTML = `<b>[${fmtCs(s.start_cs)}]</b> ${escapeHtml(s.text.trim())}`
-      transcriptEl.appendChild(div)
-    }
-  }
-  resultEl.classList.add('open')
-}
-
-function fmtCs(cs) {
-  const total = Math.floor(cs / 100)
-  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, '0')}`
-}
-
-function escapeHtml(s) {
-  return String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]))
-}
-
-btn.addEventListener('click', () => {
+function toggleRecording() {
   if (busy) return
   if (recording) stopRecording()
   else startRecording()
-})
+}
 
-// ── hide-from-capture toggle ─────────────────────────────────────────────────
+recBtn.addEventListener('click', toggleRecording)
+// The transcript window has the same stop button; it asks us to run the flow so
+// there is only ever one owner of the session state.
+listen(EVENTS.toggleRecord, toggleRecording)
 
-async function refreshHide() {
+// ── transcript window ────────────────────────────────────────────────────────
+
+async function showTranscript(visible) {
   try {
-    const hidden = await invoke('is_hidden_from_capture')
-    hideEl.classList.toggle('on', hidden)
-    hideLabel.textContent = hidden ? 'hidden from shares' : 'visible to shares'
+    await invoke('set_transcript_window_visible', { visible })
   } catch (e) {
-    /* non-macOS / not ready */
+    setStatus(String(e), true)
   }
 }
+
+expandBtn.addEventListener('click', async () => {
+  const visible = await invoke('is_transcript_window_visible').catch(() => false)
+  showTranscript(!visible)
+})
+listen(EVENTS.hideTranscript, () => showTranscript(false))
+
+// ── odds and ends ────────────────────────────────────────────────────────────
+
+revealBtn.addEventListener('click', () => {
+  setStatus(sessionDir ? `Recording folder: ${sessionDir}` : 'The folder is created when you start recording.')
+})
+
+okayBtn.addEventListener('click', () => {
+  introEl.hidden = true
+  localStorage.setItem(INTRO_KEY, '1')
+  notesEl.focus()
+})
+
+askEl.addEventListener('keydown', (e) => {
+  if (e.key !== 'Enter') return
+  e.preventDefault()
+  // Not wired to a model yet — say so rather than silently swallowing input.
+  setStatus('Ask is not connected yet — your notes and transcript are saved locally.')
+})
 
 hideEl.addEventListener('click', async () => {
   try {
@@ -161,21 +190,49 @@ hideEl.addEventListener('click', async () => {
   }
 })
 
-// ── boot: sync with any in-progress session ──────────────────────────────────
+async function refreshHide() {
+  try {
+    const hidden = await invoke('is_hidden_from_capture')
+    hideEl.classList.toggle('on', hidden)
+    hideLabel.textContent = hidden ? 'hidden from shares' : 'visible to shares'
+  } catch (e) {
+    /* non-macOS / not ready */
+  }
+}
+
+// ── boot ─────────────────────────────────────────────────────────────────────
+
+function today() {
+  return new Date().toLocaleDateString(undefined, { weekday: 'long', month: 'short', day: 'numeric' })
+}
 
 async function boot() {
+  el('day').textContent = 'Today'
+  el('day').title = today()
+  if (!localStorage.getItem(LANG_KEY)) localStorage.setItem(LANG_KEY, 'en')
+
+  try {
+    const saved = JSON.parse(localStorage.getItem(DRAFT_KEY) || '{}')
+    if (saved.title) titleEl.textContent = saved.title
+    if (saved.body) notesEl.textContent = saved.body
+  } catch (e) {
+    /* corrupt draft — start clean */
+  }
+
+  introEl.hidden = !!localStorage.getItem(INTRO_KEY)
   refreshHide()
+
   try {
     if (await invoke('is_session_active')) {
-      recording = true
-      startTimer()
-      toStopButton()
-      titleEl.disabled = true
+      setRecordingUI(true)
       setStatus('Recording in progress…')
+      showTranscript(true)
     }
   } catch (e) {
-    /* ignore */
+    /* backend not ready */
   }
+
+  if (introEl.hidden) titleEl.focus()
 }
 
 boot()

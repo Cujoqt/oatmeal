@@ -1,0 +1,108 @@
+/* Shared design tokens and primitives for both Oatmeal windows.
+ *
+ * The look is Granola's: near-black canvas, one raised card surface, a serif for
+ * anything that reads as "the document" and the system sans for chrome. Two
+ * accents only — green for anything the app does automatically (transcribe,
+ * write notes), orange for anything the user creates. */
+
+:root {
+  color-scheme: dark;
+
+  --bg: #1c1c1c;
+  --surface: #2e2e2e;
+  --surface-2: #363636;
+  --surface-hover: #3d3d3d;
+
+  --ink: #ececea;
+  --ink-soft: #b6b6b1;
+  --ink-muted: #8b8b86;
+  --ink-faint: #6d6d68;
+
+  --line: #3c3c3c;
+  --line-soft: #333333;
+
+  --green: #b9d454;
+  --orange: #e8952f;
+  --red: #e0574c;
+
+  --serif: "Tiempos Text", "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+  --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", system-ui, sans-serif;
+
+  --r-sm: 8px;
+  --r-md: 14px;
+  --r-lg: 20px;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: var(--sans);
+  color: var(--ink);
+  -webkit-font-smoothing: antialiased;
+}
+
+::selection { background: color-mix(in srgb, var(--green) 30%, transparent); }
+::-webkit-scrollbar { width: 9px; height: 9px; }
+::-webkit-scrollbar-thumb { background: #444; border-radius: 5px; }
+::-webkit-scrollbar-thumb:hover { background: #555; }
+::-webkit-scrollbar-track { background: transparent; }
+
+/* Icon buttons — the round, low-contrast chrome buttons in both windows. */
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--ink-muted);
+  cursor: pointer;
+  transition: background .14s, color .14s;
+}
+.icon-btn:hover { background: var(--surface-hover); color: var(--ink); }
+.icon-btn:active { transform: scale(.94); }
+.icon-btn svg { width: 17px; height: 17px; display: block; }
+
+/* The recording cluster shared by both windows: three green dots that pulse
+ * while audio is flowing, a chevron, and the stop/record square. */
+.cluster {
+  display: inline-flex;
+  align-items: center;
+  gap: .25rem;
+  background: var(--surface-2);
+  border-radius: 999px;
+  padding: .45rem .7rem;
+}
+.dots { display: inline-flex; gap: 3px; padding: 0 .25rem; }
+.dots i {
+  width: 4px; height: 4px; border-radius: 50%;
+  background: var(--ink-faint);
+  transition: background .2s;
+}
+.live .dots i { background: var(--green); animation: dotpulse 1.4s ease-in-out infinite; }
+.live .dots i:nth-child(2) { animation-delay: .18s; }
+.live .dots i:nth-child(3) { animation-delay: .36s; }
+@keyframes dotpulse { 0%, 100% { opacity: .35; } 50% { opacity: 1; } }
+
+.square {
+  width: 13px; height: 13px; border-radius: 3px;
+  background: var(--ink-soft);
+  border: 0; padding: 0; cursor: pointer;
+  transition: background .14s, transform .08s;
+}
+.square:hover { background: var(--ink); }
+.square:active { transform: scale(.9); }
+.live .square { background: var(--red); }
+.cluster .icon-btn { width: 24px; height: 24px; }
+.cluster .icon-btn svg { width: 14px; height: 14px; }
+
+@keyframes rise { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+@keyframes fade { from { opacity: 0; } to { opacity: 1; } }
+
+@media (prefers-reduced-motion: reduce) {
+  * { animation-duration: .01ms !important; transition-duration: .01ms !important; }
+}

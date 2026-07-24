@@ -26,6 +26,8 @@ use screencapturekit::prelude::{
     SCStreamConfiguration, SCStreamOutputType,
 };
 
+use crate::live::{self, LiveTap};
+
 /// Sample rate we ask ScreenCaptureKit to deliver. 48 kHz is SCK's native rate;
 /// M4 will downsample to 16 kHz for Whisper.
 const SAMPLE_RATE: u32 = 48_000;
@@ -44,6 +46,12 @@ impl SysAudioRecorder {
     /// Begin capturing system audio into `path` (a `.wav`). Returns once the
     /// stream is live, or an error (no display, capture permission denied, …).
     pub fn start(path: PathBuf) -> Result<Self, String> {
+        Self::start_with_tap(path, None)
+    }
+
+    /// Same as `start`, but also mirrors the audio into `tap` as 16 kHz mono so
+    /// the live-transcription worker (M7) can read it while recording continues.
+    pub fn start_with_tap(path: PathBuf, tap: Option<Arc<LiveTap>>) -> Result<Self, String> {
         let stop = Arc::new(AtomicBool::new(false));
         let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<(), String>>();
 
@@ -51,7 +59,7 @@ impl SysAudioRecorder {
         let thread_path = path.clone();
         let handle = std::thread::Builder::new()
             .name("oatmeal-sysaudio".into())
-            .spawn(move || run_capture(thread_path, thread_stop, ready_tx))
+            .spawn(move || run_capture(thread_path, thread_stop, ready_tx, tap))
             .map_err(|e| format!("spawn sysaudio thread: {e}"))?;
 
         match ready_rx.recv() {
@@ -106,6 +114,7 @@ fn run_capture(
     path: PathBuf,
     stop: Arc<AtomicBool>,
     ready: std::sync::mpsc::Sender<Result<(), String>>,
+    tap: Option<Arc<LiveTap>>,
 ) -> Result<(), String> {
     macro_rules! bail {
         ($e:expr) => {{
@@ -156,11 +165,12 @@ fn run_capture(
     let writer: SharedWriter = Arc::new(Mutex::new(Some(writer)));
 
     let cb_writer = writer.clone();
+    let cb_tap = tap.clone();
     let mut stream = SCStream::new(&filter, &config);
     stream.add_output_handler(
         move |sample: CMSampleBuffer, of_type: SCStreamOutputType| {
             if of_type == SCStreamOutputType::Audio {
-                write_audio_sample(&cb_writer, &sample);
+                write_audio_sample(&cb_writer, &cb_tap, &sample);
             }
         },
         SCStreamOutputType::Audio,
@@ -191,7 +201,11 @@ fn run_capture(
 /// dispatch queue. SCK delivers Float32 non-interleaved: one `AudioBuffer` per
 /// channel, each holding the same number of frames. Averaging the channels gives
 /// a mono track; if only one buffer is present it passes through unchanged.
-fn write_audio_sample(writer: &SharedWriter, sample: &CMSampleBuffer) {
+fn write_audio_sample(
+    writer: &SharedWriter,
+    tap: &Option<Arc<LiveTap>>,
+    sample: &CMSampleBuffer,
+) {
     let list = match sample.audio_buffer_list() {
         Some(l) => l,
         None => return,
@@ -222,22 +236,31 @@ fn write_audio_sample(writer: &SharedWriter, sample: &CMSampleBuffer) {
         return;
     }
 
-    let mut guard = match writer.lock() {
-        Ok(g) => g,
-        Err(_) => return,
-    };
-    let w = match guard.as_mut() {
-        Some(w) => w,
-        None => return,
-    };
-
+    // Down-mix once, then fan out to the WAV and (if attached) the live tap.
     let inv = 1.0 / num_buffers as f32;
+    let mut mono = Vec::with_capacity(frames);
     for frame in 0..frames {
         let mut acc = 0.0f32;
         for ch in &channels {
             acc += ch[frame];
         }
-        let mono = (acc * inv).clamp(-1.0, 1.0);
-        let _ = w.write_sample((mono * i16::MAX as f32) as i16);
+        mono.push((acc * inv).clamp(-1.0, 1.0));
+    }
+
+    if let Ok(mut guard) = writer.lock() {
+        if let Some(w) = guard.as_mut() {
+            for &s in &mono {
+                let _ = w.write_sample((s * i16::MAX as f32) as i16);
+            }
+        }
+    }
+
+    if let Some(tap) = tap {
+        // SCK already hands us mono at SAMPLE_RATE; this only resamples to 16 kHz.
+        tap.push_sys(&live::interleaved_to_mono_16k(
+            mono.into_iter(),
+            1,
+            SAMPLE_RATE,
+        ));
     }
 }

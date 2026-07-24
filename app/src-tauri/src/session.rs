@@ -117,6 +117,21 @@ fn mix(a: &[f32], b: &[f32]) -> Vec<f32> {
     out
 }
 
+/// Write the notes the user typed during the meeting to `notes.md`, next to the
+/// audio and the transcript. Called repeatedly while they type (the UI debounces),
+/// so it is a plain overwrite — cheap, and the last write wins.
+pub fn write_notes(dir: &Path, title: &str, body: &str) -> Result<PathBuf, String> {
+    let heading = if title.trim().is_empty() {
+        "Untitled note"
+    } else {
+        title.trim()
+    };
+    let md = format!("# {heading}\n\n_Written {}_\n\n{}\n", human_now(), body.trim_end());
+    let path = dir.join("notes.md");
+    std::fs::write(&path, md).map_err(|e| format!("write notes {}: {e}", path.display()))?;
+    Ok(path)
+}
+
 /// Write a human-readable transcript markdown with timestamped lines.
 fn write_transcript_md(dir: &Path, title: &str, t: &Transcript) -> Result<PathBuf, String> {
     let mut md = String::new();
@@ -242,6 +257,23 @@ mod tests {
         assert_eq!(slugify("  weird__name  "), "weird-name");
         assert_eq!(slugify(""), "");
         assert!(slugify("a".repeat(100).as_str()).len() <= 48);
+    }
+
+    #[test]
+    fn write_notes_creates_titled_markdown() {
+        let dir = std::env::temp_dir().join(format!("oatmeal-notes-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = write_notes(&dir, "Acme call", "- ship the thing\n").unwrap();
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(body.starts_with("# Acme call"), "{body}");
+        assert!(body.contains("- ship the thing"), "{body}");
+
+        // Untitled notes still get a heading, and a second write overwrites.
+        write_notes(&dir, "   ", "second").unwrap();
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(body.starts_with("# Untitled note"), "{body}");
+        assert!(!body.contains("ship the thing"), "{body}");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

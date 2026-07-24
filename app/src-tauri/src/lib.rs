@@ -1,3 +1,4 @@
+pub mod live;
 mod mic;
 pub mod model;
 pub mod session;
@@ -10,8 +11,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use tauri::Manager;
 
+use live::{LiveTap, LiveTranscriber};
 use mic::MicRecorder;
 use sysaudio::SysAudioRecorder;
+
+/// Label of the floating live-transcript window declared in `tauri.conf.json`.
+const TRANSCRIPT_WINDOW: &str = "transcript";
 
 /// Global app state. M1 added the hide flag; M2 the microphone lane; M3 the
 /// system-audio lane. Later milestones add the transcription worker handles.
@@ -24,16 +29,33 @@ pub struct AppState {
     pub sysaudio: Mutex<Option<SysAudioRecorder>>,
     /// Paths for the in-progress meeting, if a session is running.
     pub session: Mutex<Option<session::SessionPaths>>,
+    /// The live-transcription worker, if a session is running.
+    pub live: Mutex<Option<LiveTranscriber>>,
+    /// Notes typed before any session existed, flushed to disk once one does.
+    pub pending_notes: Mutex<Option<(String, String)>>,
+    /// Folder of the most recent meeting, so notes typed *after* it stopped keep
+    /// landing next to that meeting's audio instead of vanishing.
+    pub last_dir: Mutex<Option<String>>,
 }
 
 impl Default for AppState {
     fn default() -> Self {
+        // Default ON — the whole point of the app is to be invisible by default.
+        // `OATMEAL_VISIBLE=1` starts it visible instead, which is the only way to
+        // screenshot or screen-record the UI (for docs, bug reports, or dev): a
+        // window with `sharingType = none` captures as blank, including to our own
+        // tooling. The in-app toggle can flip it back at any time.
+        let hidden = std::env::var("OATMEAL_VISIBLE")
+            .map(|v| v.trim().is_empty() || v == "0")
+            .unwrap_or(true);
         Self {
-            // Default ON — the whole point of the app is to be invisible by default.
-            hidden_from_capture: AtomicBool::new(true),
+            hidden_from_capture: AtomicBool::new(hidden),
             mic: Mutex::new(None),
             sysaudio: Mutex::new(None),
             session: Mutex::new(None),
+            live: Mutex::new(None),
+            pending_notes: Mutex::new(None),
+            last_dir: Mutex::new(None),
         }
     }
 }
@@ -46,6 +68,9 @@ fn set_hidden_from_capture(
     hidden: bool,
 ) -> Result<(), String> {
     window::apply_on_main(&app, "main", hidden)?;
+    // The floating transcript window shows the same meeting content, so it has to
+    // follow the same rule — hiding one and not the other would leak everything.
+    let _ = window::apply_on_main(&app, TRANSCRIPT_WINDOW, hidden);
     state.hidden_from_capture.store(hidden, Ordering::SeqCst);
     Ok(())
 }
@@ -167,8 +192,10 @@ fn ensure_model() -> Result<String, String> {
 /// failing the whole meeting — but if *neither* starts, that's an error.
 #[tauri::command]
 fn start_session(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     title: String,
+    language: String,
 ) -> Result<session::SessionPaths, String> {
     let mut sess = state.session.lock().map_err(|_| "session state poisoned")?;
     if sess.is_some() {
@@ -176,11 +203,15 @@ fn start_session(
     }
     let paths = session::new_session(&title)?;
 
+    // Both lanes mirror into this tap so the live worker can transcribe while
+    // they keep writing their WAVs for the final, higher-quality pass.
+    let tap = LiveTap::new();
+
     let mut any = false;
     {
         let mut m = state.mic.lock().map_err(|_| "mic state poisoned")?;
         if m.is_none() {
-            match MicRecorder::start(PathBuf::from(&paths.mic_wav)) {
+            match MicRecorder::start_with_tap(PathBuf::from(&paths.mic_wav), Some(tap.clone())) {
                 Ok(r) => {
                     *m = Some(r);
                     any = true;
@@ -192,7 +223,10 @@ fn start_session(
     {
         let mut s = state.sysaudio.lock().map_err(|_| "sysaudio state poisoned")?;
         if s.is_none() {
-            match SysAudioRecorder::start(PathBuf::from(&paths.sys_wav)) {
+            match SysAudioRecorder::start_with_tap(
+                PathBuf::from(&paths.sys_wav),
+                Some(tap.clone()),
+            ) {
                 Ok(r) => {
                     *s = Some(r);
                     any = true;
@@ -205,8 +239,84 @@ fn start_session(
     if !any {
         return Err("neither the microphone nor system-audio lane could start — check permissions".into());
     }
+
+    let lang = {
+        let l = language.trim();
+        if l.is_empty() { None } else { Some(l.to_string()) }
+    };
+    *state.live.lock().map_err(|_| "live state poisoned")? =
+        Some(LiveTranscriber::start(app, tap, String::new(), lang));
+
+    // Any notes typed before the meeting existed now have a home.
+    if let Ok(mut pending) = state.pending_notes.lock() {
+        if let Some((t, body)) = pending.take() {
+            if let Err(e) = session::write_notes(Path::new(&paths.dir), &t, &body) {
+                eprintln!("[oatmeal] flush pending notes: {e}");
+            }
+        }
+    }
+
+    *state.last_dir.lock().map_err(|_| "notes state poisoned")? = Some(paths.dir.clone());
     *sess = Some(paths.clone());
     Ok(paths)
+}
+
+/// Save the freeform notes the user is typing.
+///
+/// Notes go to the active meeting's folder; once it stops they keep going to that
+/// same folder, so writing up straight after a call is not lost. Before any
+/// meeting has happened there is nowhere to put them, so they are held in memory
+/// and flushed when `start_session` creates the first folder.
+#[tauri::command]
+fn save_notes(
+    state: tauri::State<'_, AppState>,
+    title: String,
+    body: String,
+) -> Result<Option<String>, String> {
+    let dir = state
+        .session
+        .lock()
+        .map_err(|_| "session state poisoned")?
+        .as_ref()
+        .map(|p| p.dir.clone())
+        .or_else(|| state.last_dir.lock().ok().and_then(|d| d.clone()));
+
+    match dir {
+        Some(dir) => {
+            let path = session::write_notes(Path::new(&dir), &title, &body)?;
+            Ok(Some(path.display().to_string()))
+        }
+        None => {
+            *state
+                .pending_notes
+                .lock()
+                .map_err(|_| "notes state poisoned")? = Some((title, body));
+            Ok(None)
+        }
+    }
+}
+
+/// Show or hide the floating live-transcript window.
+#[tauri::command]
+fn set_transcript_window_visible(app: tauri::AppHandle, visible: bool) -> Result<(), String> {
+    let win = app
+        .get_webview_window(TRANSCRIPT_WINDOW)
+        .ok_or("transcript window not found")?;
+    if visible {
+        win.show().map_err(|e| e.to_string())?;
+        win.set_focus().map_err(|e| e.to_string())?;
+    } else {
+        win.hide().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Whether the floating transcript window is currently on screen.
+#[tauri::command]
+fn is_transcript_window_visible(app: tauri::AppHandle) -> bool {
+    app.get_webview_window(TRANSCRIPT_WINDOW)
+        .and_then(|w| w.is_visible().ok())
+        .unwrap_or(false)
 }
 
 /// Whether a meeting is currently being recorded.
@@ -231,6 +341,12 @@ fn stop_session(
         let mut sess = state.session.lock().map_err(|_| "session state poisoned")?;
         sess.take().ok_or("no meeting is being recorded")?
     };
+
+    // Stop the live worker first: it flushes its last partial chunk, and we don't
+    // want it competing with the batch pass for CPU.
+    if let Some(live) = state.live.lock().map_err(|_| "live state poisoned")?.take() {
+        live.stop();
+    }
 
     if let Some(r) = state
         .mic
@@ -286,17 +402,22 @@ pub fn run() {
             ensure_model,
             start_session,
             stop_session,
-            is_session_active
+            is_session_active,
+            save_notes,
+            set_transcript_window_visible,
+            is_transcript_window_visible
         ])
         .setup(|app| {
-            // Apply the hide flag as soon as the window exists.
+            // Apply the hide flag as soon as the windows exist.
             let hidden = app
                 .state::<AppState>()
                 .hidden_from_capture
                 .load(Ordering::SeqCst);
-            if let Some(win) = app.get_webview_window("main") {
-                if let Err(e) = window::set_hidden_from_capture(&win, hidden) {
-                    eprintln!("[oatmeal] initial hide failed: {e}");
+            for label in ["main", TRANSCRIPT_WINDOW] {
+                if let Some(win) = app.get_webview_window(label) {
+                    if let Err(e) = window::set_hidden_from_capture(&win, hidden) {
+                        eprintln!("[oatmeal] initial hide of {label} failed: {e}");
+                    }
                 }
             }
             Ok(())

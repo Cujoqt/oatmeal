@@ -16,15 +16,18 @@ download.
 | **Microphone** | `cpal` default input device → 16-bit WAV. |
 | **System audio** | `ScreenCaptureKit` audio tap → mono WAV. No BlackHole / virtual driver. Excludes Oatmeal's own output. |
 | **Transcription** | `whisper-rs` (whisper.cpp, Metal GPU) — mixes both lanes, resamples to 16 kHz mono, runs `ggml-base.en` locally. |
-| **Notes** | Writes `transcript.md` with timestamped lines next to the audio. |
+| **Live transcript** | A warm Whisper context transcribes 5–14 s chunks *while* you record, cut at the quietest point so words survive the boundary. Lines stream into a floating, always-on-top window. |
+| **Notes** | You type into the note window; it autosaves to `notes.md`. On stop, `transcript.md` is written with timestamped lines next to the audio. |
 
 ## Layout
 
 ```
 app/
-├── src/                    frontend (vanilla, editorial UI)
-│   ├── index.html
-│   └── app.js              drives the Tauri commands
+├── src/                    frontend (vanilla, two windows)
+│   ├── base.css            shared design tokens
+│   ├── shared.js           event names + formatting shared by both windows
+│   ├── index.html/app.js   note window: title, notes, recording dock
+│   └── transcript.html/.js floating live-transcript window
 └── src-tauri/
     ├── src/
     │   ├── lib.rs          command surface + AppState
@@ -33,7 +36,8 @@ app/
     │   ├── sysaudio.rs     M3 — ScreenCaptureKit system-audio lane
     │   ├── transcribe.rs   M4 — whisper-rs + resampling
     │   ├── model.rs        first-run ggml model download (curl)
-    │   └── session.rs      M6 — record → mix → transcribe → transcript.md
+    │   ├── session.rs      M6 — record → mix → transcribe → transcript.md
+    │   └── live.rs         M7 — streaming chunk transcription + Tauri events
     ├── Info.plist          mic + screen-capture usage strings
     └── entitlements.plist  hardened-runtime audio entitlements
 ```
@@ -55,8 +59,15 @@ point at a different ggml model.
 ## Command surface (Tauri `invoke`)
 
 - `set_hidden_from_capture(hidden)` / `is_hidden_from_capture()`
-- `start_session(title)` / `stop_session(modelPath, language)` / `is_session_active()`
+- `start_session(title, language)` / `stop_session(modelPath, language)` / `is_session_active()`
+- `save_notes(title, body)` — writes `notes.md`; buffered in memory until a session exists
+- `set_transcript_window_visible(visible)` / `is_transcript_window_visible()`
 - `ensure_model()` / `default_model_path()`
+
+Events emitted by the backend while recording:
+
+- `oatmeal://live-segment` — one finished transcript line `{ start_cs, end_cs, text }`
+- `oatmeal://live-state` — worker status `{ state: loading|listening|error, message }`
 - lane-level: `start_mic_recording` / `start_sysaudio_recording` / `transcribe_wav` (dev/testing)
 
 ## Tests
@@ -82,6 +93,14 @@ Produces `Oatmeal.app` / `Oatmeal.dmg` under
 `app/src-tauri/target/release/bundle/`. The bundle is ad-hoc signed
 (`signingIdentity: "-"`); a real Developer ID + notarization are needed for
 distribution outside your own machine.
+
+## Two windows
+
+The note window (`main`) owns the session: it starts and stops recording, saves
+notes, and broadcasts state. The transcript window (`transcript`) is a
+transparent, undecorated, always-on-top panel that only renders — its stop button
+asks `main` to act, so there is exactly one owner of the session state. Both
+windows carry the same `sharingType` flag, so hiding one hides both.
 
 ## Permissions
 
