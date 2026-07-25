@@ -24,6 +24,17 @@ use crate::transcribe::{Quality, Transcriber, WHISPER_RATE};
 const MIN_WINDOW_SECS: f32 = 6.0;
 /// Force a cut once the window reaches this length, pause or not.
 const MAX_WINDOW_SECS: f32 = 12.0;
+
+/// Hard ceiling on the tap's backlog, in samples at 16 kHz (five minutes). The
+/// audio callback can outrun the decoder on a slow machine; without a cap that
+/// backlog is unbounded growth for as long as the meeting runs. Dropping the
+/// oldest audio loses transcript, which is recoverable — the offline pass over
+/// the full recording still sees everything.
+const MAX_TAP_SAMPLES: usize = 16_000 * 300;
+
+/// Ceiling on retained live lines. The UI only ever shows the tail, and the
+/// authoritative transcript is written from the offline pass.
+const MAX_LIVE_LINES: usize = 4_000;
 /// Frame size used when hunting for the quietest moment to cut on.
 const PAUSE_FRAME_SECS: f32 = 0.02;
 /// How often the worker checks whether a window is ready.
@@ -77,6 +88,10 @@ impl Tap {
 
         if let Ok(mut buf) = self.samples.lock() {
             buf.extend_from_slice(&out);
+            if buf.len() > MAX_TAP_SAMPLES {
+                let overflow = buf.len() - MAX_TAP_SAMPLES;
+                buf.drain(..overflow);
+            }
         }
     }
 
@@ -205,6 +220,10 @@ fn run(
                         let line = LiveLine { at_ms, text };
                         if let Ok(mut l) = lines.lock() {
                             l.push(line.clone());
+                            if l.len() > MAX_LIVE_LINES {
+                                let overflow = l.len() - MAX_LIVE_LINES;
+                                l.drain(..overflow);
+                            }
                         }
                         emit(line);
                     }

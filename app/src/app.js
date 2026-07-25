@@ -9,7 +9,7 @@ const { listen, emit } = window.__TAURI__.event
 
 const $ = (id) => document.getElementById(id)
 
-import { EVENTS, getLang } from '/shared.js'
+import { EVENTS, getLang, setLang } from '/shared.js'
 
 const btn = $('btn')
 const titleEl = $('title')
@@ -30,6 +30,21 @@ const searchEl = $('search')
 const sideList = $('sideList')
 const sideCount = $('sideCount')
 const navHome = $('navHome')
+const navSettings = $('navSettings')
+const railToggle = $('railToggle')
+const viewDash = $('viewDash')
+const viewSettings = $('viewSettings')
+const agendaEl = $('agenda')
+const notesListEl = $('notesList')
+const newNoteBtn = $('newNote')
+const setupEl = $('setup')
+const pasteCredsEl = $('pasteCreds')
+const languageEl = $('language')
+const modelPathEl = $('modelPath')
+const settingsNote = $('settingsNote')
+const googleNote = $('googleNote')
+const acctEl = $('acct')
+const acctLabel = $('acctLabel')
 const modelChip = $('modelChip')
 const modelTxt = $('modelTxt')
 const viewHome = $('viewHome')
@@ -396,18 +411,52 @@ async function loadMeetings() {
     meetings = []
   }
   renderSidebar()
+  renderNotesList()
 }
 
-searchEl.addEventListener('input', () => { filter = searchEl.value.trim(); renderSidebar() })
+searchEl.addEventListener('input', () => { filter = searchEl.value.trim(); renderSidebar(); renderNotesList() })
 navHome.addEventListener('click', showHome)
+navSettings.addEventListener('click', showSettings)
+newNoteBtn.addEventListener('click', showDraft)
 
 // ── views ────────────────────────────────────────────────────────────────────
 
+/// Four surfaces share the content pane: the Coming-up dashboard, the blank
+/// note you type into, a recorded meeting, and Settings. One function owns which
+/// is lit so the nav highlight can never drift from the view.
+function showView(view) {
+  viewDash.classList.toggle('on', view === 'dash')
+  viewHome.classList.toggle('on', view === 'draft')
+  viewNote.classList.toggle('on', view === 'note')
+  viewSettings.classList.toggle('on', view === 'settings')
+  navHome.classList.toggle('on', view === 'dash')
+  navSettings.classList.toggle('on', view === 'settings')
+  for (const [el, active] of [[navHome, view === 'dash'], [navSettings, view === 'settings']]) {
+    active ? el.setAttribute('aria-current', 'page') : el.removeAttribute('aria-current')
+  }
+}
+
+/// Home: what's coming up, and everything already recorded.
 function showHome() {
   openId = null
-  viewNote.classList.remove('on')
-  viewHome.classList.add('on')
-  navHome.classList.add('on')
+  showView('dash')
+  renderAgenda()
+  renderNotesList()
+  renderSidebar()
+}
+
+/// The blank note — "+ New note", or the sidebar's own entry into a draft.
+function showDraft() {
+  openId = null
+  showView('draft')
+  renderSidebar()
+  if (!recording) titleEl.focus()
+}
+
+function showSettings() {
+  openId = null
+  showView('settings')
+  loadSettings()
   renderSidebar()
 }
 
@@ -418,9 +467,7 @@ function currentMeeting() {
 async function openNote(id) {
   openId = id
   noteTab = 'notes'
-  viewHome.classList.remove('on')
-  viewNote.classList.add('on')
-  navHome.classList.remove('on')
+  showView('note')
   answersEl.innerHTML = ''
   renderSidebar()
   renderSuggestions()
@@ -698,14 +745,304 @@ hideEl.addEventListener('click', async () => {
   }
 })
 
+// ── coming up ────────────────────────────────────────────────────────────────
+//
+// The agenda is a Google Calendar read (`list_events`). Without an account it
+// says so and offers the one action that fixes it, rather than faking a day.
+
+const AGENDA_DAYS = 14
+const AGENDA_REFRESH_MS = 5 * 60 * 1000
+
+let agenda = { connected: false, events: [] }
+let agendaLoading = true
+
+function el(tag, cls, text) {
+  const node = document.createElement(tag)
+  if (cls) node.className = cls
+  if (text != null) node.textContent = text
+  return node
+}
+
+function startOfDay(d) {
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate())
+}
+
+/// Timed events carry an offset; all-day events are bare dates, which need the
+/// explicit midnight or Safari reads them as UTC.
+function eventStart(ev) {
+  return new Date(ev.all_day ? `${ev.start}T00:00:00` : ev.start)
+}
+
+function fmtClock(date) {
+  return date.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' }).toLowerCase()
+}
+
+function renderAgenda() {
+  const today = startOfDay(new Date())
+  agendaEl.innerHTML = ''
+  if (agendaLoading) {
+    const row = el('div', 'ag-row')
+    row.appendChild(el('div', 'ag-what', 'Checking your calendar…'))
+    agendaEl.appendChild(row)
+    return
+  }
+
+  const row = el('div', 'ag-row')
+  const when = el('div', 'ag-when')
+  when.append(el('span', 'd', String(today.getDate())))
+  const month = el('span', 'm', today.toLocaleDateString(undefined, { month: 'long' }))
+  month.appendChild(el('span', null, today.toLocaleDateString(undefined, { weekday: 'short' })))
+  when.append(month, el('span', 'today'))
+
+  const what = el('div', 'ag-what')
+  const todays = agenda.events
+    .map((ev) => ({ ...ev, at: eventStart(ev) }))
+    .filter((ev) => !Number.isNaN(ev.at.getTime()) && startOfDay(ev.at).getTime() === today.getTime())
+    .sort((a, b) => a.at - b.at)
+
+  if (!agenda.connected) {
+    what.appendChild(el('div', 'quiet', 'No calendar connected — start a note whenever you\'re ready.'))
+    const setup = el('button', 'ag-setup', 'Connect Google Calendar')
+    setup.addEventListener('click', showSettings)
+    what.appendChild(setup)
+  } else if (!todays.length) {
+    what.appendChild(el('div', 'quiet', 'No events today — start a note whenever you\'re ready.'))
+  } else {
+    const list = el('div', 'ag-events')
+    for (const ev of todays) {
+      const item = el('button', 'ag-event')
+      item.append(el('span', 't', ev.summary), el('span', 'at', ev.all_day ? 'all day' : fmtClock(ev.at)))
+      // Clicking an event only titles a draft; recording stays deliberate.
+      item.addEventListener('click', () => {
+        showDraft()
+        titleEl.textContent = ev.summary
+        queueSave()
+      })
+      list.appendChild(item)
+    }
+    what.appendChild(list)
+  }
+
+  row.append(when, what)
+  agendaEl.appendChild(row)
+}
+
+async function loadAgenda() {
+  try {
+    agenda = await invoke('list_events', { days: AGENDA_DAYS })
+  } catch (e) {
+    agenda = { connected: false, events: [] }
+  }
+  agendaLoading = false
+  if (viewDash.classList.contains('on')) renderAgenda()
+}
+
+const PAGE_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3h7l5 5v13H6z" /><path d="M13 3v5h5" /></svg>'
+
+function renderNotesList() {
+  const list = visibleMeetings()
+  notesListEl.innerHTML = ''
+  if (!list.length) {
+    notesListEl.appendChild(
+      el('div', 'notes-empty', filter ? 'No notes match that search.' : 'Your meeting notes will appear here')
+    )
+    return
+  }
+  for (const m of list) {
+    const row = el('button', 'note-row' + (m.has_notes ? ' done' : ''))
+    const ic = el('span', 'ic')
+    ic.innerHTML = PAGE_ICON
+    const txt = el('span')
+    txt.append(
+      el('div', 't', m.title),
+      el('div', 's', [fmtWhen(new Date(m.started_at)), fmtDuration(m.duration_secs)].filter(Boolean).join(' · '))
+    )
+    row.append(ic, txt)
+    row.addEventListener('click', () => openNote(m.id))
+    notesListEl.appendChild(row)
+  }
+}
+
+// ── sidebar collapse ─────────────────────────────────────────────────────────
+
+const RAIL_KEY = 'oatmeal.railCollapsed'
+
+function setRail(collapsed) {
+  document.body.classList.toggle('rail-collapsed', collapsed)
+  localStorage.setItem(RAIL_KEY, collapsed ? '1' : '0')
+  railToggle.title = collapsed ? 'Show sidebar (⌘\\)' : 'Hide sidebar (⌘\\)'
+}
+
+railToggle.addEventListener('click', () => setRail(!document.body.classList.contains('rail-collapsed')))
+
+document.addEventListener('keydown', (e) => {
+  if (!(e.metaKey || e.ctrlKey)) return
+  if (e.key === '\\') {
+    e.preventDefault()
+    setRail(!document.body.classList.contains('rail-collapsed'))
+  } else if (e.key === 'k') {
+    e.preventDefault()
+    setRail(false)
+    searchEl.focus()
+    searchEl.select()
+  }
+})
+
+// ── settings ─────────────────────────────────────────────────────────────────
+
+function note(el, msg, tone = '') {
+  el.textContent = msg
+  el.classList.remove('err', 'ok')
+  if (tone) el.classList.add(tone)
+}
+
+async function loadSettings() {
+  try {
+    const s = await invoke('get_settings')
+    // The recorder reads the language from localStorage (both windows do); the
+    // copy in the config is what survives a reinstall.
+    languageEl.value = getLang() || s.language || ''
+  } catch (e) {
+    note(settingsNote, String(e), 'err')
+  }
+  try {
+    modelPathEl.textContent = await invoke('default_model_path')
+  } catch { /* the path is informational */ }
+  refreshGoogle()
+}
+
+$('saveSettings').addEventListener('click', async () => {
+  note(settingsNote, 'Saving…')
+  try {
+    await invoke('save_settings', {
+      googleClientId: '',
+      googleClientSecret: '',
+      language: languageEl.value.trim(),
+    })
+    setLang(languageEl.value.trim())
+    note(settingsNote, 'Saved.', 'ok')
+  } catch (e) {
+    note(settingsNote, String(e), 'err')
+  }
+})
+
+let setupRevealed = false
+
+function renderGoogle(status) {
+  acctEl.classList.toggle('linked', status.connected)
+  acctLabel.textContent = status.connected
+    ? `Signed in${status.email ? ` as ${status.email}` : ''}`
+    : 'Not signed in'
+  $('googleConnectLabel').textContent = status.connected ? 'Switch account' : 'Sign in with Google'
+  $('googleDisconnect').disabled = !status.connected
+  // The key setup stays out of sight until pressing the button proves it's the
+  // thing standing in the way — a first-timer should meet one control, not five.
+  setupEl.hidden = status.client_configured || status.connected || !setupRevealed
+}
+
+async function refreshGoogle() {
+  try {
+    renderGoogle(await invoke('google_status'))
+  } catch (e) {
+    note(googleNote, String(e), 'err')
+  }
+}
+
+/// Sign in. Without a key of their own there is nothing to sign in *with*, so the
+/// button reveals the one-time setup instead of failing at them.
+async function signIn() {
+  const button = $('googleConnect')
+  button.disabled = true
+  note(googleNote, 'Waiting for Google in your browser…')
+  try {
+    renderGoogle(await invoke('google_connect'))
+    note(googleNote, 'Signed in. Your calendar is live.', 'ok')
+    await loadAgenda()
+  } catch (e) {
+    note(googleNote, String(e), 'err')
+    refreshGoogle()
+  } finally {
+    button.disabled = false
+  }
+}
+
+$('googleConnect').addEventListener('click', async () => {
+  let status
+  try {
+    status = await invoke('google_status')
+  } catch (e) {
+    note(googleNote, String(e), 'err')
+    return
+  }
+  if (!status.client_configured) {
+    setupRevealed = true
+    setupEl.hidden = false
+    note(googleNote, 'Google needs a key of your own first — two steps, below.')
+    $('openConsole').focus()
+    return
+  }
+  signIn()
+})
+
+$('openConsole').addEventListener('click', async () => {
+  try {
+    await invoke('google_open_console')
+    note(googleNote, 'Create a Desktop app client, download the JSON, then come back.')
+  } catch (e) {
+    note(googleNote, String(e), 'err')
+  }
+})
+
+/// The happy path: read the file Google just put in ~/Downloads and go straight
+/// into the consent screen, so the key never has to be seen at all.
+$('useDownload').addEventListener('click', async () => {
+  const button = $('useDownload')
+  button.disabled = true
+  note(googleNote, 'Looking in your Downloads…')
+  try {
+    renderGoogle(await invoke('google_import_downloaded'))
+    note(googleNote, 'Key saved. Opening Google…', 'ok')
+    await signIn()
+  } catch (e) {
+    note(googleNote, String(e), 'err')
+  } finally {
+    button.disabled = false
+  }
+})
+
+$('savePaste').addEventListener('click', async () => {
+  try {
+    renderGoogle(await invoke('google_import_credentials', { text: pasteCredsEl.value }))
+    pasteCredsEl.value = ''
+    note(googleNote, 'Key saved. Opening Google…', 'ok')
+    await signIn()
+  } catch (e) {
+    note(googleNote, String(e), 'err')
+  }
+})
+
+$('googleDisconnect').addEventListener('click', async () => {
+  try {
+    renderGoogle(await invoke('google_disconnect'))
+    note(googleNote, 'Signed out. The tokens are gone from this machine.', 'ok')
+    await loadAgenda()
+  } catch (e) {
+    note(googleNote, String(e), 'err')
+  }
+})
+
 // ── boot ─────────────────────────────────────────────────────────────────────
 
 async function boot() {
   applyTheme()
+  setRail(localStorage.getItem(RAIL_KEY) === '1')
   renderSuggestions()
   refreshHide()
   refreshModelChip()
   await loadMeetings()
+  showHome()
+  loadAgenda()
+  setInterval(loadAgenda, AGENDA_REFRESH_MS)
 
   introEl.hidden = Boolean(localStorage.getItem(INTRO_KEY))
   try {
@@ -726,7 +1063,7 @@ async function boot() {
     }
   } catch { /* ignore */ }
 
-  if (introEl.hidden && !recording) titleEl.focus()
+  if (recording) showDraft()
 }
 
 boot()

@@ -1,12 +1,35 @@
+# ── dependencies ─────────────────────────────────────────────────────────────
 node_modules/
-*.log
 
-# Rust / Tauri build output
+# ── build output ─────────────────────────────────────────────────────────────
 target/
 app/src-tauri/target/
 app/src-tauri/gen/
-.DS_Store
+dist/
+*.dmg
+
+# ── local data: recordings, notes, config, logs ───────────────────────────────
+# Meetings are the user's own audio and transcripts. They never belong in git.
 meetings/*
 !meetings/.gitkeep
 oatmeal.config.json
 .oatmeal-notified.json
+*.log
+
+# ── agent + tooling scratch, not part of the product ─────────────────────────
+memory.md
+docs/superpowers/
+.gstack/
+.gstack-*
+.impeccable/
+.claude/skills/gstack/
+.claude/worktrees/
+graphify-out/
+*.vsix
+
+# ── macOS + editor noise ─────────────────────────────────────────────────────
+.DS_Store
+Screenshot*.png
+*.swp
+.idea/
+.vscode/

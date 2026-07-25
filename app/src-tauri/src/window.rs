@@ -20,6 +20,10 @@ mod imp {
     const NS_WINDOW_SHARING_READ_ONLY: u64 = 1;
 
     /// Set whether `window` is hidden from screen capture.
+    ///
+    /// `cocoa` deprecates its `id` alias in favour of objc2. Migrating is separate
+    /// work; this module is the only place the app touches AppKit directly.
+    #[allow(deprecated)]
     pub fn set_hidden_from_capture<R: Runtime>(
         window: &WebviewWindow<R>,
         hidden: bool,

@@ -1,9 +1,11 @@
 pub mod chat;
+pub mod google;
 pub mod library;
 pub mod live;
 mod mic;
 pub mod model;
 pub mod session;
+pub mod settings;
 mod sysaudio;
 pub mod transcribe;
 mod window;
@@ -507,6 +509,71 @@ fn delete_meeting(id: String) -> Result<String, String> {
     library::delete_meeting(&id)
 }
 
+// ── settings + Google account ────────────────────────────────────────────────
+
+/// The editable settings (the client secret is never sent to the webview).
+#[tauri::command]
+fn get_settings() -> settings::Settings {
+    settings::load()
+}
+
+/// Save the Settings tab. A blank `google_client_secret` keeps the stored one;
+/// `"-"` clears it.
+#[tauri::command]
+fn save_settings(
+    google_client_id: String,
+    google_client_secret: String,
+    language: String,
+) -> Result<settings::Settings, String> {
+    settings::save(&google_client_id, &google_client_secret, &language)
+}
+
+/// Whether a Google account is connected, and which one.
+#[tauri::command]
+fn google_status() -> google::GoogleStatus {
+    google::status()
+}
+
+/// Run the OAuth consent flow: opens the browser and blocks until the redirect
+/// comes back (or it times out).
+#[tauri::command]
+fn google_connect() -> Result<google::GoogleStatus, String> {
+    google::connect()
+}
+
+/// Forget the stored Google tokens.
+#[tauri::command]
+fn google_disconnect() -> Result<google::GoogleStatus, String> {
+    google::disconnect()?;
+    Ok(google::status())
+}
+
+/// Upcoming calendar events for "Coming up". Empty, with `connected: false`,
+/// when no Google account is linked yet.
+#[tauri::command]
+fn list_events(days: u32) -> Result<google::CalendarFeed, String> {
+    google::list_events(days)
+}
+
+/// Save an OAuth client from pasted text — Google's credentials JSON, or the ID
+/// and secret together. The guided sign-in uses this instead of two fields.
+#[tauri::command]
+fn google_import_credentials(text: String) -> Result<google::GoogleStatus, String> {
+    google::import_credentials(&text)
+}
+
+/// Import the newest `client_secret….json` from ~/Downloads.
+#[tauri::command]
+fn google_import_downloaded() -> Result<google::GoogleStatus, String> {
+    google::import_downloaded()
+}
+
+/// Open the Google Cloud page where the OAuth client is created.
+#[tauri::command]
+fn google_open_console() -> Result<(), String> {
+    google::open_url(google::CONSOLE_URL)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -538,7 +605,16 @@ pub fn run() {
             ask_meeting,
             unload_chat_model,
             rename_meeting,
-            delete_meeting
+            delete_meeting,
+            get_settings,
+            save_settings,
+            google_status,
+            google_connect,
+            google_disconnect,
+            google_import_credentials,
+            google_import_downloaded,
+            google_open_console,
+            list_events
         ])
         .setup(|app| {
             // Apply the hide flag as soon as the window exists.
