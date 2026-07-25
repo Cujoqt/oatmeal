@@ -35,6 +35,9 @@ const railToggle = $('railToggle')
 const viewDash = $('viewDash')
 const viewSettings = $('viewSettings')
 const agendaEl = $('agenda')
+const rangeEl = $('agRange')
+const agPrev = $('agPrev')
+const agNext = $('agNext')
 const notesListEl = $('notesList')
 const newNoteBtn = $('newNote')
 const displayNameEl = $('displayName')
@@ -752,7 +755,7 @@ hideEl.addEventListener('click', async () => {
 // calendars this Mac already has. Without permission it says so and offers the one
 // action that fixes it, rather than faking a day.
 
-const AGENDA_DAYS = 14
+const AGENDA_DAYS = 60
 const AGENDA_REFRESH_MS = 5 * 60 * 1000
 
 let agenda = { authorized: false, denied: false, events: [] }
@@ -789,8 +792,39 @@ function fmtClock(date) {
   return date.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' }).toLowerCase()
 }
 
+/// How many days one page of the agenda covers.
+const AGENDA_PAGE_DAYS = 7
+
+/// Which page is showing: 0 is the week starting today, 1 the next, and so on.
+let agendaPage = 0
+
+function dayKey(date) {
+  return startOfDay(date).getTime()
+}
+
+function fmtDayRange(from, to) {
+  const opts = { month: 'short', day: 'numeric' }
+  return `${from.toLocaleDateString(undefined, opts)} – ${to.toLocaleDateString(undefined, opts)}`
+}
+
+/// `9:00 – 10:00 AM` for a timed event, `All day` otherwise. The meridiem is only
+/// spelled out once when both ends share it, which is how a calendar reads.
+function fmtSpan(ev) {
+  if (ev.all_day) return 'All day'
+  const start = ev.at
+  const end = ev.end ? new Date(ev.end) : null
+  const time = (d) => d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })
+  if (!end || Number.isNaN(end.getTime())) return time(start).toUpperCase()
+  const [a, b] = [time(start), time(end)]
+  const meridiem = (t) => t.slice(-2).toUpperCase()
+  return meridiem(a) === meridiem(b)
+    ? `${a.replace(/\s?[AP]M$/i, '')} – ${b.replace(/\s?[AP]M$/i, '')} ${meridiem(b)}`
+    : `${a.toUpperCase()} – ${b.toUpperCase()}`
+}
+
+/// One row per day across the page, today first, whether or not it has events —
+/// an empty day is information too.
 function renderAgenda() {
-  const today = startOfDay(new Date())
   agendaEl.innerHTML = ''
   if (agendaLoading) {
     const row = el('div', 'ag-row')
@@ -799,61 +833,115 @@ function renderAgenda() {
     return
   }
 
-  const row = el('div', 'ag-row')
-  const when = el('div', 'ag-when')
-  when.append(el('span', 'd', String(today.getDate())))
-  const month = el('span', 'm', today.toLocaleDateString(undefined, { month: 'long' }))
-  month.appendChild(el('span', null, today.toLocaleDateString(undefined, { weekday: 'short' })))
-  when.append(month, el('span', 'today'))
+  const today = startOfDay(new Date())
+  const from = new Date(today)
+  from.setDate(from.getDate() + agendaPage * AGENDA_PAGE_DAYS)
+  const to = new Date(from)
+  to.setDate(to.getDate() + AGENDA_PAGE_DAYS - 1)
 
-  const what = el('div', 'ag-what')
-  const todays = agenda.events
-    .map((ev) => ({ ...ev, at: eventStart(ev) }))
-    .filter((ev) => !Number.isNaN(ev.at.getTime()) && startOfDay(ev.at).getTime() === today.getTime())
-    .sort((a, b) => a.at - b.at)
+  rangeEl.textContent = agendaPage === 0 ? '' : fmtDayRange(from, to)
+  agPrev.disabled = agendaPage === 0
+
+  // Group this page's events by local day.
+  const byDay = new Map()
+  for (const raw of agenda.events) {
+    const at = eventStart(raw)
+    if (Number.isNaN(at.getTime())) continue
+    const key = dayKey(at)
+    if (key < dayKey(from) || key > dayKey(to)) continue
+    if (!byDay.has(key)) byDay.set(key, [])
+    byDay.get(key).push({ ...raw, at })
+  }
 
   if (!agenda.authorized) {
-    what.appendChild(
-      el('div', 'quiet', agenda.denied
-        ? 'Calendar access is off, so Oatmeal can\'t see your day.'
-        : 'Let Oatmeal read this Mac\'s calendar to see your day.')
-    )
-    const action = el('button', 'ag-setup', agenda.denied ? 'Open System Settings' : 'Allow calendar access')
-    action.addEventListener('click', async () => {
-      if (agenda.denied) {
-        invoke('open_calendar_settings').catch(() => {})
-        return
-      }
-      try {
-        await invoke('calendar_request_access')
-        await loadAgenda()
-        renderAgenda()
-      } catch { /* the settings tab reports the detail */ }
-    })
-    what.appendChild(action)
-  } else if (!todays.length) {
-    what.appendChild(el('div', 'quiet', 'No events today — start a note whenever you\'re ready.'))
+    agendaEl.appendChild(permissionRow(today))
+    return
+  }
+
+  for (let i = 0; i < AGENDA_PAGE_DAYS; i++) {
+    const day = new Date(from)
+    day.setDate(day.getDate() + i)
+    const events = (byDay.get(dayKey(day)) || []).sort((a, b) => a.at - b.at)
+    // Days beyond today with nothing on them would pad the card with blanks.
+    if (!events.length && dayKey(day) !== dayKey(today)) continue
+    agendaEl.appendChild(dayRow(day, events, dayKey(day) === dayKey(today)))
+  }
+
+  if (!agendaEl.children.length) {
+    const row = el('div', 'ag-row')
+    row.appendChild(el('div', 'ag-what', el('div', 'quiet', 'Nothing scheduled this week.')))
+    agendaEl.appendChild(row)
+  }
+}
+
+function dayRow(day, events, isToday) {
+  const row = el('div', 'ag-row' + (isToday ? ' today' : ''))
+
+  const when = el('div', 'ag-when')
+  when.appendChild(el('span', 'd', String(day.getDate())))
+  const stack = el('span', 'm', day.toLocaleDateString(undefined, { month: 'long' }))
+  stack.appendChild(el('span', 'wd', day.toLocaleDateString(undefined, { weekday: 'short' })))
+  when.appendChild(stack)
+  if (isToday) when.appendChild(el('span', 'dot'))
+  row.appendChild(when)
+
+  const what = el('div', 'ag-what')
+  if (!events.length) {
+    what.appendChild(el('div', 'quiet', "No events today — start a note whenever you're ready."))
   } else {
-    const list = el('div', 'ag-events')
-    for (const ev of todays) {
+    for (const ev of events) {
       const item = el('button', 'ag-event')
-      item.append(el('span', 't', ev.summary), el('span', 'at', ev.all_day ? 'all day' : fmtClock(ev.at)))
+      item.append(el('span', 't', ev.summary), el('span', 'at', fmtSpan(ev)))
       if (ev.calendar) item.title = ev.calendar
-      // Clicking an event only titles a draft; recording stays deliberate.
+      // Clicking an event titles a draft; recording stays a deliberate act.
       item.addEventListener('click', () => {
         showDraft()
         titleEl.textContent = ev.summary
         queueSave()
       })
-      list.appendChild(item)
+      what.appendChild(item)
     }
-    what.appendChild(list)
   }
-
-  row.append(when, what)
-  agendaEl.appendChild(row)
+  row.appendChild(what)
+  return row
 }
 
+/// The row that stands in for the whole card when macOS hasn't granted access.
+function permissionRow(today) {
+  const row = el('div', 'ag-row today')
+
+  const when = el('div', 'ag-when')
+  when.appendChild(el('span', 'd', String(today.getDate())))
+  const stack = el('span', 'm', today.toLocaleDateString(undefined, { month: 'long' }))
+  stack.appendChild(el('span', 'wd', today.toLocaleDateString(undefined, { weekday: 'short' })))
+  when.append(stack, el('span', 'dot'))
+
+  const what = el('div', 'ag-what')
+  what.appendChild(
+    el('div', 'quiet', agenda.denied
+      ? "Calendar access is off, so Oatmeal can't see your day."
+      : "Let Oatmeal read this Mac's calendar to see your day.")
+  )
+  const action = el('button', 'ag-setup', agenda.denied ? 'Open System Settings' : 'Allow calendar access')
+  action.addEventListener('click', async () => {
+    if (agenda.denied) {
+      invoke('open_calendar_settings').catch(() => {})
+      return
+    }
+    try {
+      await invoke('calendar_request_access')
+      await loadAgenda()
+      renderAgenda()
+    } catch { /* the Settings tab reports the detail */ }
+  })
+  what.appendChild(action)
+
+  row.append(when, what)
+  return row
+}
+
+/// Pull the window EventKit can give us. Permission state rides along, so the
+/// card can offer the prompt itself.
 async function loadAgenda() {
   try {
     agenda = await invoke('list_events', { days: AGENDA_DAYS })
@@ -863,6 +951,17 @@ async function loadAgenda() {
   agendaLoading = false
   if (viewDash.classList.contains('on')) renderAgenda()
 }
+
+agPrev.addEventListener('click', () => {
+  if (agendaPage === 0) return
+  agendaPage -= 1
+  renderAgenda()
+})
+
+agNext.addEventListener('click', () => {
+  agendaPage += 1
+  renderAgenda()
+})
 
 const PAGE_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3h7l5 5v13H6z" /><path d="M13 3v5h5" /></svg>'
 
@@ -968,8 +1067,10 @@ function renderCalendar(state) {
     : denied
       ? 'Calendar access is turned off for Oatmeal'
       : 'Not allowed yet'
-  $('calAllow').hidden = authorized || denied
-  $('calSettings').hidden = !denied
+  $('calAllow').hidden = authorized
+  $('calAllow').textContent = denied ? 'Try again' : 'Allow calendar access'
+  $('calSettings').hidden = authorized
+  $('calRecheck').hidden = !authorized
   if (authorized) note(calNote, '')
   else if (denied) note(calNote, 'Turn Oatmeal on under Privacy & Security → Calendars, then come back.')
 }
@@ -1000,6 +1101,15 @@ $('calAllow').addEventListener('click', async () => {
 
 $('calSettings').addEventListener('click', () => {
   invoke('open_calendar_settings').catch((e) => note(calNote, String(e), 'err'))
+})
+
+/// Coming back from System Settings, the app has to look again — macOS doesn't
+/// tell it the switch moved.
+$('calRecheck').addEventListener('click', async () => {
+  note(calNote, 'Checking…')
+  await loadAgenda()
+  renderCalendar({ authorized: agenda.authorized, denied: agenda.denied })
+  if (agenda.authorized) note(calNote, 'Reading your calendars now.', 'ok')
 })
 
 // ── boot ─────────────────────────────────────────────────────────────────────

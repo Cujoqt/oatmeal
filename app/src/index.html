@@ -399,6 +399,7 @@
     #viewDash { padding: 0; }
     .dash { width: 100%; max-width: 860px; margin: 0 auto; padding: 30px 34px 40px; }
     .dash-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 22px; }
+    .dash-actions { display: flex; align-items: center; gap: 10px; flex: none; }
     .hello { font: 400 13px var(--sans); color: var(--hint); margin-bottom: 4px; }
     .hello:empty { display: none; }
     .dash-head h1 {
@@ -418,29 +419,59 @@
       background: var(--card); border: 1px solid var(--line); border-radius: var(--r-md, 14px);
       overflow: hidden;
     }
-    .ag-row { display: flex; align-items: center; gap: 22px; padding: 16px 22px; }
-    .ag-row + .ag-row { border-top: 1px solid var(--line); }
-    .ag-when { display: flex; align-items: baseline; gap: 10px; min-width: 118px; flex: none; }
-    .ag-when .d { font-family: var(--display); font-size: 29px; line-height: 1; }
+    /* Six rows before it scrolls: enough to read a week at a glance without the
+       card pushing the notes list off the screen. */
+    .agenda-scroll { max-height: 336px; overflow-y: auto; overscroll-behavior: contain; }
+    .ag-row { display: flex; align-items: center; gap: 20px; padding: 14px 22px; min-height: 56px; }
+    .ag-row + .ag-row { border-top: 1px dashed var(--line-2); }
+    .ag-row.today { background: color-mix(in srgb, var(--create) 5%, transparent); }
+
+    /* The number and the month/weekday stack share a baseline; the dot marks today. */
+    .ag-when { display: flex; align-items: baseline; gap: 9px; min-width: 104px; flex: none; }
+    .ag-when .d {
+      font-family: var(--display); font-size: 30px; line-height: 1;
+      font-variant-numeric: tabular-nums; min-width: 2ch; text-align: right;
+    }
     .ag-when .m { font: 500 12.5px var(--sans); color: var(--ink-soft); line-height: 1.3; }
-    .ag-when .m span { display: block; color: var(--hint); font-weight: 400; }
-    .ag-when .today { width: 6px; height: 6px; border-radius: 50%; background: var(--create); align-self: center; }
-    .ag-what { min-width: 0; padding-left: 20px; border-left: 1px solid var(--line-2); }
-    .ag-what .quiet { color: var(--hint); font-size: 14px; }
-    .ag-events { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+    .ag-when .m .wd { display: block; color: var(--hint); font-weight: 400; }
+    .ag-when .dot {
+      width: 6px; height: 6px; border-radius: 50%; background: var(--create); flex: none;
+      align-self: flex-start; margin-top: 4px;
+    }
+
+    .ag-what { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 8px; }
+    .ag-what .quiet {
+      color: var(--hint); font-size: 14px; padding-left: 20px;
+      border-left: 1px solid var(--line-2);
+    }
     .ag-event {
-      display: flex; align-items: baseline; gap: 12px; width: 100%; text-align: left;
-      background: none; border: 0; cursor: pointer; padding: 5px 8px; border-radius: 8px;
-      color: var(--ink); transition: background .14s;
+      display: block; width: 100%; text-align: left; background: none; border: 0;
+      cursor: pointer; padding: 2px 8px 2px 19px; border-radius: 0 8px 8px 0;
+      border-left: 2px solid var(--accent); color: var(--ink); transition: background .14s;
     }
     .ag-event:hover { background: var(--hover); }
-    .ag-event .t { font: 500 14px var(--sans); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .ag-event .at { font: 400 12.5px var(--sans); color: var(--hint); flex: none; }
+    .ag-event .t {
+      display: block; font: 500 14px var(--sans);
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .ag-event .at { display: block; font: 400 12.5px var(--sans); color: var(--hint); margin-top: 1px; }
     .ag-setup {
-      display: inline-flex; align-items: center; gap: 6px; margin-top: 6px; padding: 0;
-      background: none; border: 0; cursor: pointer; color: var(--accent); font: 500 13px var(--sans);
+      align-self: flex-start; margin-left: 20px; padding: 0; background: none; border: 0;
+      cursor: pointer; color: var(--accent); font: 500 13px var(--sans);
     }
     .ag-setup:hover { text-decoration: underline; }
+
+    /* Week paging, mirroring the arrows in the mockup. */
+    .ag-nav { display: flex; align-items: center; gap: 2px; }
+    .ag-nav button {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 28px; height: 28px; border: 0; border-radius: 8px; background: none;
+      color: var(--muted); cursor: pointer; transition: background .14s, color .14s;
+    }
+    .ag-nav button:hover:not(:disabled) { background: var(--hover); color: var(--ink); }
+    .ag-nav button:disabled { opacity: .35; cursor: default; }
+    .ag-nav svg { width: 16px; height: 16px; }
+    .ag-range { font: 400 12.5px var(--sans); color: var(--hint); margin-right: 6px; }
 
     .dash-label {
       font: 600 10.5px var(--sans); text-transform: uppercase; letter-spacing: .8px;
@@ -579,13 +610,24 @@
               <div class="hello" id="greeting"></div>
               <h1>Coming up</h1>
             </div>
+            <div class="dash-actions">
+              <span class="ag-range" id="agRange"></span>
+              <div class="ag-nav">
+                <button id="agPrev" title="Previous week" aria-label="Previous week">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 6l-6 6 6 6" /></svg>
+                </button>
+                <button id="agNext" title="Next week" aria-label="Next week">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10 6l6 6-6 6" /></svg>
+                </button>
+              </div>
             <button class="newnote" id="newNote">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14" /></svg>
               New note
             </button>
+            </div>
           </div>
 
-          <div class="agenda" id="agenda"></div>
+          <div class="agenda"><div class="agenda-scroll" id="agenda"></div></div>
 
           <div class="dash-label">Notes</div>
           <div class="notes-list" id="notesList"></div>
@@ -706,6 +748,7 @@
             <div class="btn-row">
               <button class="btn primary" id="calAllow">Allow calendar access</button>
               <button class="btn quiet" id="calSettings" hidden>Open System Settings</button>
+              <button class="btn quiet" id="calRecheck" hidden>Check again</button>
             </div>
             <div class="note-line" id="calNote" style="margin-top:12px" role="status" aria-live="polite"></div>
           </div>

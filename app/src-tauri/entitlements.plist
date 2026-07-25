@@ -9,5 +9,10 @@
   <true/>
   <key>com.apple.security.device.microphone</key>
   <true/>
+  <!-- EventKit reads the Mac's calendars for the "Coming up" list. Without this
+       the hardened runtime refuses the read and reports the permission as denied
+       without ever showing a prompt. -->
+  <key>com.apple.security.personal-information.calendars</key>
+  <true/>
 </dict>
 </plist>
