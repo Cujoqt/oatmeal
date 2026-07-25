@@ -18,7 +18,10 @@ permissions:
 jobs:
   macos:
     # Apple silicon runner: the bundle is aarch64, matching what most Macs run.
-    runs-on: macos-14
+    # macOS 26 specifically: the apple-metal crate's Swift bridge calls Metal 4
+    # APIs (MTLResidencySet, MTLSamplerDescriptor.reductionMode) that the
+    # macos-14 SDK doesn't have, so its build script panics.
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@v4
 
@@ -34,8 +37,10 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             app/src-tauri/target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('app/src-tauri/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
+          # Keyed on the image, not just the OS: artifacts built against an older
+          # macOS SDK can't be reused here.
+          key: macos26-cargo-${{ hashFiles('app/src-tauri/Cargo.lock') }}
+          restore-keys: macos26-cargo-
 
       - name: Test
         working-directory: app/src-tauri
