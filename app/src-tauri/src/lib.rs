@@ -1,5 +1,5 @@
+pub mod apple_calendar;
 pub mod chat;
-pub mod google;
 pub mod library;
 pub mod live;
 mod mic;
@@ -509,69 +509,51 @@ fn delete_meeting(id: String) -> Result<String, String> {
     library::delete_meeting(&id)
 }
 
-// ── settings + Google account ────────────────────────────────────────────────
+// ── settings + calendar ──────────────────────────────────────────────────────
 
-/// The editable settings (the client secret is never sent to the webview).
+/// The editable settings: what the app should call you, and how transcription
+/// runs.
 #[tauri::command]
 fn get_settings() -> settings::Settings {
     settings::load()
 }
 
-/// Save the Settings tab. A blank `google_client_secret` keeps the stored one;
-/// `"-"` clears it.
 #[tauri::command]
 fn save_settings(
-    google_client_id: String,
-    google_client_secret: String,
+    display_name: String,
     language: String,
 ) -> Result<settings::Settings, String> {
-    settings::save(&google_client_id, &google_client_secret, &language)
+    settings::save(&display_name, &language)
 }
 
-/// Whether a Google account is connected, and which one.
+/// Whether macOS has granted calendar access, without prompting.
 #[tauri::command]
-fn google_status() -> google::GoogleStatus {
-    google::status()
+fn calendar_authorized() -> bool {
+    apple_calendar::is_authorized()
 }
 
-/// Run the OAuth consent flow: opens the browser and blocks until the redirect
-/// comes back (or it times out).
+/// Ask macOS for calendar access. Blocks on the permission prompt.
 #[tauri::command]
-fn google_connect() -> Result<google::GoogleStatus, String> {
-    google::connect()
+fn calendar_request_access() -> Result<bool, String> {
+    apple_calendar::request_access()
 }
 
-/// Forget the stored Google tokens.
+/// Upcoming events straight from Apple Calendar — no account, no keys, no
+/// network. `authorized: false` means the permission hasn't been granted yet.
 #[tauri::command]
-fn google_disconnect() -> Result<google::GoogleStatus, String> {
-    google::disconnect()?;
-    Ok(google::status())
+fn list_events(days: u32) -> Result<apple_calendar::CalendarFeed, String> {
+    apple_calendar::list_events(days)
 }
 
-/// Upcoming calendar events for "Coming up". Empty, with `connected: false`,
-/// when no Google account is linked yet.
+/// Open System Settings on the Calendars privacy pane — where a denied
+/// permission has to be undone, since macOS won't prompt twice.
 #[tauri::command]
-fn list_events(days: u32) -> Result<google::CalendarFeed, String> {
-    google::list_events(days)
-}
-
-/// Save an OAuth client from pasted text — Google's credentials JSON, or the ID
-/// and secret together. The guided sign-in uses this instead of two fields.
-#[tauri::command]
-fn google_import_credentials(text: String) -> Result<google::GoogleStatus, String> {
-    google::import_credentials(&text)
-}
-
-/// Import the newest `client_secret….json` from ~/Downloads.
-#[tauri::command]
-fn google_import_downloaded() -> Result<google::GoogleStatus, String> {
-    google::import_downloaded()
-}
-
-/// Open the Google Cloud page where the OAuth client is created.
-#[tauri::command]
-fn google_open_console() -> Result<(), String> {
-    google::open_url(google::CONSOLE_URL)
+fn open_calendar_settings() -> Result<(), String> {
+    std::process::Command::new("open")
+        .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Calendars")
+        .status()
+        .map(|_| ())
+        .map_err(|e| format!("open System Settings: {e}"))
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -608,12 +590,9 @@ pub fn run() {
             delete_meeting,
             get_settings,
             save_settings,
-            google_status,
-            google_connect,
-            google_disconnect,
-            google_import_credentials,
-            google_import_downloaded,
-            google_open_console,
+            calendar_authorized,
+            calendar_request_access,
+            open_calendar_settings,
             list_events
         ])
         .setup(|app| {

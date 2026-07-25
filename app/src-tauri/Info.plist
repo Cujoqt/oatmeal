@@ -10,5 +10,11 @@
        gates that behind the screen-recording permission (M3). -->
   <key>NSScreenCaptureUsageDescription</key>
   <string>Oatmeal captures system audio locally to transcribe what other participants say. Nothing is streamed off your machine.</string>
+  <!-- EventKit reads the Mac's own calendars for the "Coming up" list. Read-only,
+       and macOS 14+ looks for the FullAccess key specifically. -->
+  <key>NSCalendarsUsageDescription</key>
+  <string>Oatmeal reads your calendar to show what's coming up and to title your meeting notes. Nothing is written back and nothing leaves your machine.</string>
+  <key>NSCalendarsFullAccessUsageDescription</key>
+  <string>Oatmeal reads your calendar to show what's coming up and to title your meeting notes. Nothing is written back and nothing leaves your machine.</string>
 </dict>
 </plist>

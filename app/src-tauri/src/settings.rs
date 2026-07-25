@@ -1,4 +1,4 @@
-//! On-disk settings shared by the UI and the Google module.
+//! On-disk settings.
 //!
 //! One JSON file under the app-support root. Unknown keys are preserved on save,
 //! so a hand-edited config (or a key an older build wrote) survives a round-trip
@@ -37,13 +37,12 @@ fn str_field(doc: &serde_json::Value, key: &str) -> String {
         .to_string()
 }
 
-/// The settings the UI edits. The client secret never reaches the webview — the
-/// UI only learns whether one is stored.
+/// The settings the UI edits.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct Settings {
-    pub google_client_id: String,
-    pub google_client_secret_set: bool,
+    /// What the app calls you — used in the greeting and on your own notes.
+    pub display_name: String,
     /// Whisper language code; empty means auto-detect.
     pub language: String,
 }
@@ -51,64 +50,19 @@ pub struct Settings {
 pub fn load() -> Settings {
     let doc = read_raw();
     Settings {
-        google_client_id: str_field(&doc, "googleClientId"),
-        google_client_secret_set: !str_field(&doc, "googleClientSecret").is_empty(),
+        display_name: str_field(&doc, "displayName"),
         language: str_field(&doc, "language"),
     }
 }
 
-pub fn client_id() -> Option<String> {
-    let id = str_field(&read_raw(), "googleClientId");
-    (!id.is_empty()).then_some(id)
-}
-
-pub fn client_secret() -> Option<String> {
-    let secret = str_field(&read_raw(), "googleClientSecret");
-    (!secret.is_empty()).then_some(secret)
-}
-
-/// Save the editable fields. A blank `google_client_secret` leaves whatever is
-/// already stored alone; the UI sends a literal `"-"` to clear it.
-pub fn save(
-    google_client_id: &str,
-    google_client_secret: &str,
-    language: &str,
-) -> Result<Settings, String> {
+/// Save the editable fields.
+pub fn save(display_name: &str, language: &str) -> Result<Settings, String> {
     let mut doc = read_raw();
     let obj = doc
         .as_object_mut()
         .ok_or("config file is not a JSON object")?;
-
-    obj.insert("googleClientId".into(), google_client_id.trim().into());
+    obj.insert("displayName".into(), display_name.trim().into());
     obj.insert("language".into(), language.trim().into());
-    match google_client_secret.trim() {
-        "" => {}
-        "-" => {
-            obj.remove("googleClientSecret");
-        }
-        secret => {
-            obj.insert("googleClientSecret".into(), secret.into());
-        }
-    }
-
-    write(&doc)?;
-    Ok(load())
-}
-
-/// Store just the OAuth client pair, leaving every other setting alone. The
-/// guided sign-in path uses this: the user never sees the two fields.
-pub fn save_client(client_id: &str, client_secret: &str) -> Result<Settings, String> {
-    let client_id = client_id.trim();
-    let client_secret = client_secret.trim();
-    if client_id.is_empty() || client_secret.is_empty() {
-        return Err("that file didn't contain a client ID and secret".into());
-    }
-    let mut doc = read_raw();
-    let obj = doc
-        .as_object_mut()
-        .ok_or("config file is not a JSON object")?;
-    obj.insert("googleClientId".into(), client_id.into());
-    obj.insert("googleClientSecret".into(), client_secret.into());
     write(&doc)?;
     Ok(load())
 }
@@ -143,15 +97,5 @@ pub fn restrict_dir(path: &Path) {
     {
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700));
-    }
-}
-
-/// A secret that is overwritten when it goes out of scope.
-pub struct Secret(pub String);
-
-impl Drop for Secret {
-    fn drop(&mut self) {
-        use zeroize::Zeroize;
-        self.0.zeroize();
     }
 }

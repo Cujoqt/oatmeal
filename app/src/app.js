@@ -37,12 +37,13 @@ const viewSettings = $('viewSettings')
 const agendaEl = $('agenda')
 const notesListEl = $('notesList')
 const newNoteBtn = $('newNote')
-const setupEl = $('setup')
-const pasteCredsEl = $('pasteCreds')
+const displayNameEl = $('displayName')
+const greetingEl = $('greeting')
+const chipWhoEl = $('chipWho')
+const calNote = $('calNote')
 const languageEl = $('language')
 const modelPathEl = $('modelPath')
 const settingsNote = $('settingsNote')
-const googleNote = $('googleNote')
 const acctEl = $('acct')
 const acctLabel = $('acctLabel')
 const modelChip = $('modelChip')
@@ -747,14 +748,25 @@ hideEl.addEventListener('click', async () => {
 
 // ── coming up ────────────────────────────────────────────────────────────────
 //
-// The agenda is a Google Calendar read (`list_events`). Without an account it
-// says so and offers the one action that fixes it, rather than faking a day.
+// The agenda comes from Apple Calendar via EventKit (`list_events`) — whatever
+// calendars this Mac already has. Without permission it says so and offers the one
+// action that fixes it, rather than faking a day.
 
 const AGENDA_DAYS = 14
 const AGENDA_REFRESH_MS = 5 * 60 * 1000
 
-let agenda = { connected: false, events: [] }
+let agenda = { authorized: false, denied: false, events: [] }
 let agendaLoading = true
+let displayName = ''
+
+/// The name from Settings, used where the app addresses you. With no name set the
+/// greeting stays empty rather than guessing at "there".
+function renderGreeting() {
+  const hour = new Date().getHours()
+  const part = hour < 12 ? 'Good morning' : hour < 18 ? 'Good afternoon' : 'Good evening'
+  greetingEl.textContent = displayName ? `${part}, ${displayName}` : ''
+  chipWhoEl.textContent = displayName || 'Me'
+}
 
 function el(tag, cls, text) {
   const node = document.createElement(tag)
@@ -800,11 +812,25 @@ function renderAgenda() {
     .filter((ev) => !Number.isNaN(ev.at.getTime()) && startOfDay(ev.at).getTime() === today.getTime())
     .sort((a, b) => a.at - b.at)
 
-  if (!agenda.connected) {
-    what.appendChild(el('div', 'quiet', 'No calendar connected — start a note whenever you\'re ready.'))
-    const setup = el('button', 'ag-setup', 'Connect Google Calendar')
-    setup.addEventListener('click', showSettings)
-    what.appendChild(setup)
+  if (!agenda.authorized) {
+    what.appendChild(
+      el('div', 'quiet', agenda.denied
+        ? 'Calendar access is off, so Oatmeal can\'t see your day.'
+        : 'Let Oatmeal read this Mac\'s calendar to see your day.')
+    )
+    const action = el('button', 'ag-setup', agenda.denied ? 'Open System Settings' : 'Allow calendar access')
+    action.addEventListener('click', async () => {
+      if (agenda.denied) {
+        invoke('open_calendar_settings').catch(() => {})
+        return
+      }
+      try {
+        await invoke('calendar_request_access')
+        await loadAgenda()
+        renderAgenda()
+      } catch { /* the settings tab reports the detail */ }
+    })
+    what.appendChild(action)
   } else if (!todays.length) {
     what.appendChild(el('div', 'quiet', 'No events today — start a note whenever you\'re ready.'))
   } else {
@@ -812,6 +838,7 @@ function renderAgenda() {
     for (const ev of todays) {
       const item = el('button', 'ag-event')
       item.append(el('span', 't', ev.summary), el('span', 'at', ev.all_day ? 'all day' : fmtClock(ev.at)))
+      if (ev.calendar) item.title = ev.calendar
       // Clicking an event only titles a draft; recording stays deliberate.
       item.addEventListener('click', () => {
         showDraft()
@@ -831,7 +858,7 @@ async function loadAgenda() {
   try {
     agenda = await invoke('list_events', { days: AGENDA_DAYS })
   } catch (e) {
-    agenda = { connected: false, events: [] }
+    agenda = { authorized: false, denied: false, events: [] }
   }
   agendaLoading = false
   if (viewDash.classList.contains('on')) renderAgenda()
@@ -899,6 +926,9 @@ function note(el, msg, tone = '') {
 async function loadSettings() {
   try {
     const s = await invoke('get_settings')
+    displayNameEl.value = s.displayName || ''
+    displayName = s.displayName || ''
+    renderGreeting()
     // The recorder reads the language from localStorage (both windows do); the
     // copy in the config is what survives a reinstall.
     languageEl.value = getLang() || s.language || ''
@@ -908,133 +938,79 @@ async function loadSettings() {
   try {
     modelPathEl.textContent = await invoke('default_model_path')
   } catch { /* the path is informational */ }
-  refreshGoogle()
+  refreshCalendar()
 }
 
 $('saveSettings').addEventListener('click', async () => {
   note(settingsNote, 'Saving…')
   try {
-    await invoke('save_settings', {
-      googleClientId: '',
-      googleClientSecret: '',
+    const saved = await invoke('save_settings', {
+      displayName: displayNameEl.value.trim(),
       language: languageEl.value.trim(),
     })
     setLang(languageEl.value.trim())
+    displayName = saved.displayName || ''
+    renderGreeting()
     note(settingsNote, 'Saved.', 'ok')
   } catch (e) {
     note(settingsNote, String(e), 'err')
   }
 })
 
-let setupRevealed = false
-
-function renderGoogle(status) {
-  acctEl.classList.toggle('linked', status.connected)
-  acctLabel.textContent = status.connected
-    ? `Signed in${status.email ? ` as ${status.email}` : ''}`
-    : 'Not signed in'
-  $('googleConnectLabel').textContent = status.connected ? 'Switch account' : 'Sign in with Google'
-  $('googleDisconnect').disabled = !status.connected
-  // The key setup stays out of sight until pressing the button proves it's the
-  // thing standing in the way — a first-timer should meet one control, not five.
-  setupEl.hidden = status.client_configured || status.connected || !setupRevealed
+/// Calendar access is a macOS permission, not an account. Three states worth
+/// showing: granted, not asked yet, and refused — the last one has to send people
+/// to System Settings, because macOS will not prompt a second time.
+function renderCalendar(state) {
+  const { authorized, denied } = state
+  acctEl.classList.toggle('linked', authorized)
+  acctLabel.textContent = authorized
+    ? 'Reading this Mac’s calendars'
+    : denied
+      ? 'Calendar access is turned off for Oatmeal'
+      : 'Not allowed yet'
+  $('calAllow').hidden = authorized || denied
+  $('calSettings').hidden = !denied
+  if (authorized) note(calNote, '')
+  else if (denied) note(calNote, 'Turn Oatmeal on under Privacy & Security → Calendars, then come back.')
 }
 
-async function refreshGoogle() {
+async function refreshCalendar() {
   try {
-    renderGoogle(await invoke('google_status'))
+    renderCalendar({ authorized: await invoke('calendar_authorized'), denied: agenda.denied })
   } catch (e) {
-    note(googleNote, String(e), 'err')
+    note(calNote, String(e), 'err')
   }
 }
 
-/// Sign in. Without a key of their own there is nothing to sign in *with*, so the
-/// button reveals the one-time setup instead of failing at them.
-async function signIn() {
-  const button = $('googleConnect')
+$('calAllow').addEventListener('click', async () => {
+  const button = $('calAllow')
   button.disabled = true
-  note(googleNote, 'Waiting for Google in your browser…')
+  note(calNote, 'Waiting for the macOS prompt…')
   try {
-    renderGoogle(await invoke('google_connect'))
-    note(googleNote, 'Signed in. Your calendar is live.', 'ok')
+    const granted = await invoke('calendar_request_access')
     await loadAgenda()
+    renderCalendar({ authorized: granted, denied: !granted })
+    if (granted) note(calNote, 'Done — your schedule is on the Home tab.', 'ok')
   } catch (e) {
-    note(googleNote, String(e), 'err')
-    refreshGoogle()
-  } finally {
-    button.disabled = false
-  }
-}
-
-$('googleConnect').addEventListener('click', async () => {
-  let status
-  try {
-    status = await invoke('google_status')
-  } catch (e) {
-    note(googleNote, String(e), 'err')
-    return
-  }
-  if (!status.client_configured) {
-    setupRevealed = true
-    setupEl.hidden = false
-    note(googleNote, 'Google needs a key of your own first — two steps, below.')
-    $('openConsole').focus()
-    return
-  }
-  signIn()
-})
-
-$('openConsole').addEventListener('click', async () => {
-  try {
-    await invoke('google_open_console')
-    note(googleNote, 'Create a Desktop app client, download the JSON, then come back.')
-  } catch (e) {
-    note(googleNote, String(e), 'err')
-  }
-})
-
-/// The happy path: read the file Google just put in ~/Downloads and go straight
-/// into the consent screen, so the key never has to be seen at all.
-$('useDownload').addEventListener('click', async () => {
-  const button = $('useDownload')
-  button.disabled = true
-  note(googleNote, 'Looking in your Downloads…')
-  try {
-    renderGoogle(await invoke('google_import_downloaded'))
-    note(googleNote, 'Key saved. Opening Google…', 'ok')
-    await signIn()
-  } catch (e) {
-    note(googleNote, String(e), 'err')
+    note(calNote, String(e), 'err')
   } finally {
     button.disabled = false
   }
 })
 
-$('savePaste').addEventListener('click', async () => {
-  try {
-    renderGoogle(await invoke('google_import_credentials', { text: pasteCredsEl.value }))
-    pasteCredsEl.value = ''
-    note(googleNote, 'Key saved. Opening Google…', 'ok')
-    await signIn()
-  } catch (e) {
-    note(googleNote, String(e), 'err')
-  }
-})
-
-$('googleDisconnect').addEventListener('click', async () => {
-  try {
-    renderGoogle(await invoke('google_disconnect'))
-    note(googleNote, 'Signed out. The tokens are gone from this machine.', 'ok')
-    await loadAgenda()
-  } catch (e) {
-    note(googleNote, String(e), 'err')
-  }
+$('calSettings').addEventListener('click', () => {
+  invoke('open_calendar_settings').catch((e) => note(calNote, String(e), 'err'))
 })
 
 // ── boot ─────────────────────────────────────────────────────────────────────
 
 async function boot() {
   applyTheme()
+  try {
+    const saved = await invoke('get_settings')
+    displayName = saved.displayName || ''
+  } catch { /* first run, or no config yet */ }
+  renderGreeting()
   setRail(localStorage.getItem(RAIL_KEY) === '1')
   renderSuggestions()
   refreshHide()
