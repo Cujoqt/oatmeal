@@ -80,6 +80,8 @@ let liveLines = []
 let saveTimer = null
 let hintTimer = null
 let sessionDir = ''
+/// Element a streamed chat answer is being written into, or null between asks.
+let streamingAnswer = null
 
 function setStatus(msg, isErr = false) {
   statusEl.textContent = msg
@@ -147,9 +149,11 @@ function fmtElapsed(ms) {
   return `${String(m).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`
 }
 
-function startTimer() {
-  startedAt = Date.now()
-  timerEl.textContent = '00:00'
+/// `elapsedMs` seeds the clock for a meeting that was already running — after a
+/// relaunch, starting from zero would under-report it.
+function startTimer(elapsedMs = 0) {
+  startedAt = Date.now() - elapsedMs
+  timerEl.textContent = fmtElapsed(elapsedMs)
   tick = setInterval(() => { timerEl.textContent = fmtElapsed(Date.now() - startedAt) }, 500)
 }
 
@@ -215,7 +219,9 @@ async function showTranscriptWindow(visible) {
 async function startRecording() {
   busy = true
   btn.disabled = true
-  showHome()
+  // Stay on the note being written: the dashboard has neither the editor nor the
+  // dock, so switching there mid-record hides everything the meeting needs.
+  if (!viewHome.classList.contains('on')) showDraft()
   liveLines = []
 
   try {
@@ -261,6 +267,7 @@ async function stopRecording() {
     setStatus(String(e), true)
   } finally {
     recording = false
+    liveLines = []
     titleEl.textContent = ''
     notesEl.textContent = ''
     localStorage.removeItem(DRAFT_KEY)
@@ -327,11 +334,15 @@ async function askLive() {
   }
   homeAsk.value = ''
   setStatus('Thinking…')
+  // Stream into the status line so an answer mid-meeting starts appearing at once.
+  streamingAnswer = statusEl
   try {
     // An empty id means "the meeting happening right now".
     setStatus(await invoke('ask_meeting', { id: '', question }))
   } catch (e) {
     setStatus(String(e), true)
+  } finally {
+    streamingAnswer = null
   }
 }
 
@@ -500,8 +511,12 @@ async function renderTranscript() {
     noteBody.innerHTML = '<p class="placeholder">This recording has no transcript — it was stopped before Whisper ran, or no speech was detected.</p>'
     return
   }
+  const asked = m.id
   try {
     const segs = await invoke('meeting_segments', { id: m.id })
+    // Same race as the notes path: a big transcript can arrive after the user has
+    // moved on to another meeting or switched tabs.
+    if (openId !== asked || noteTab !== 'raw') return
     noteBody.innerHTML = ''
     if (!segs.length) {
       noteBody.innerHTML = '<p class="placeholder">(no speech detected)</p>'
@@ -556,11 +571,15 @@ async function renderNotes(force = false) {
 
   noteBody.innerHTML = '<p class="placeholder">Reading the transcript and writing it up… this takes a minute on first run.</p>'
   setModelChip('busy', 'Writing notes…')
+  const asked = m.id
   try {
     const md = await invoke('write_notes', { id: m.id, force: false })
-    renderMarkdown(md, noteBody)
     m.has_notes = true
     renderSidebar()
+    renderNotesList()
+    // The user may have opened a different meeting while this was generating.
+    if (openId !== asked || noteTab !== 'notes') return
+    renderMarkdown(md, noteBody)
   } catch (e) {
     noteBody.innerHTML = ''
     const p = document.createElement('p')
@@ -633,6 +652,18 @@ function renderSuggestions() {
 askSend.addEventListener('click', () => ask())
 askInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') ask() })
 
+// Tokens arrive from Rust as they're generated. Appending them beats waiting for
+// the whole paragraph, which reads as a hang on a laptop-sized model.
+listen(EVENTS.chatToken, ({ payload }) => {
+  if (!streamingAnswer || !payload || !payload.text) return
+  // First token replaces the placeholder, the rest append.
+  if (payload.seq === 1) {
+    streamingAnswer.classList.remove('thinking', 'err')
+    streamingAnswer.textContent = ''
+  }
+  streamingAnswer.textContent += payload.text
+})
+
 async function ask() {
   const m = currentMeeting()
   const question = askInput.value.trim()
@@ -652,15 +683,19 @@ async function ask() {
   answersEl.appendChild(qa)
   qa.scrollIntoView({ behavior: 'smooth', block: 'end' })
 
+  streamingAnswer = a
   setModelChip('busy', 'Thinking…')
   try {
     const answer = await invoke('ask_meeting', { id: m.id, question })
     a.classList.remove('thinking')
+    // The returned string is authoritative: it also covers any event that was
+    // dropped while the window was busy.
     a.textContent = answer
   } catch (e) {
     a.classList.remove('thinking')
     a.textContent = String(e)
   } finally {
+    streamingAnswer = null
     askSend.disabled = false
     refreshModelChip()
   }
@@ -1140,7 +1175,7 @@ async function boot() {
   try {
     if (await invoke('is_session_active')) {
       recording = true
-      startTimer()
+      startTimer(Number(await invoke('session_elapsed_ms').catch(() => 0)) || 0)
       toStopButton()
       setStatus('Recording in progress…')
       liveLines = await invoke('live_lines')

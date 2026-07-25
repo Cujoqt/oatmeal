@@ -8,6 +8,8 @@
 /// `{ at_ms, text }`.
 export const BACKEND = {
   line: 'oatmeal://live-line',
+  /// Each piece of a streamed chat answer: `{ seq, text }`.
+  chatToken: 'oatmeal://chat-token',
 }
 
 /// Events the two windows use to talk to each other.

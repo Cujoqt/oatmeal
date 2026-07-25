@@ -29,6 +29,16 @@ let recording = false
 /// Every line currently shown, so search can re-render without re-fetching.
 let lines = []
 
+/// Rows kept in the DOM. A long meeting produced thousands, and every one of them
+/// was re-examined on each new line — the panel got slower the longer you talked.
+/// The authoritative transcript is the file written at stop, so trimming the top
+/// of the panel costs nothing.
+const MAX_ROWS = 1200
+
+/// Whether a search is narrowing the list right now. Without this, every incoming
+/// line paid for a full pass over the DOM even with an empty search box.
+let filtering = false
+
 // ── rendering ────────────────────────────────────────────────────────────────
 
 function setNote(msg, isErr = false) {
@@ -71,8 +81,17 @@ function addLine(line) {
   const row = { at_ms: line.at_ms || 0, text }
   lines.push(row)
   linesEl.appendChild(rowFor(row))
+
+  // Drop the oldest rows past the ceiling, keeping `lines` and the DOM in step —
+  // applyFilter() pairs them up by index.
+  while (lines.length > MAX_ROWS) {
+    lines.shift()
+    if (linesEl.firstElementChild) linesEl.removeChild(linesEl.firstElementChild)
+  }
+
   refresh()
-  applyFilter()
+  // Only the new row needs a decision, and only when a search is actually on.
+  if (filtering) applyFilter()
 
   if (stick) scrollEl.scrollTop = scrollEl.scrollHeight
 }
@@ -81,6 +100,7 @@ function replaceAll(incoming) {
   lines = (incoming || [])
     .map((l) => ({ at_ms: l.at_ms || 0, text: (l.text || '').trim() }))
     .filter((l) => l.text)
+    .slice(-MAX_ROWS)
   linesEl.innerHTML = ''
   for (const l of lines) linesEl.appendChild(rowFor(l))
   refresh()
@@ -161,6 +181,7 @@ function applyFilter() {
   const q = searchEl.value.trim().toLowerCase()
   const nodes = linesEl.children
   let hits = 0
+  filtering = Boolean(q)
 
   for (let i = 0; i < nodes.length; i++) {
     const span = nodes[i].lastElementChild

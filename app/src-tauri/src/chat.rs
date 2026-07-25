@@ -91,6 +91,20 @@ pub fn unload() {
 
 /// Generate a reply to `user` under the guidance of `system`.
 pub fn complete(model_path: &Path, system: &str, user: &str) -> Result<String, String> {
+    complete_streaming(model_path, system, user, &mut |_| {})
+}
+
+/// Same generation, but each decoded piece is handed to `on_token` as it arrives.
+///
+/// A local model on a laptop produces a paragraph over several seconds. Waiting for
+/// the whole thing before showing anything reads as a hang, so the caller that a
+/// person is watching streams instead.
+pub fn complete_streaming(
+    model_path: &Path,
+    system: &str,
+    user: &str,
+    on_token: &mut dyn FnMut(&str),
+) -> Result<String, String> {
     with_model(model_path, |model| {
         let backend = backend()?;
 
@@ -162,6 +176,9 @@ pub fn complete(model_path: &Path, system: &str, user: &str) -> Result<String, S
                 .map_err(|e| format!("detokenize: {e}"))?;
             let mut piece = String::with_capacity(bytes.len());
             let _ = decoder.decode_to_string(&bytes, &mut piece, false);
+            if !piece.is_empty() {
+                on_token(&piece);
+            }
             out.push_str(&piece);
 
             batch.clear();
@@ -236,8 +253,13 @@ pub fn write_notes(model_path: &Path, transcript: &str) -> Result<String, String
     complete(model_path, NOTES_SYSTEM, condensed.trim())
 }
 
-/// Answer a question about a transcript.
-pub fn recap(model_path: &Path, transcript: &str, question: &str) -> Result<String, String> {
+/// Answer a question about a transcript, streaming the reply as it is generated.
+pub fn recap(
+    model_path: &Path,
+    transcript: &str,
+    question: &str,
+    on_token: &mut dyn FnMut(&str),
+) -> Result<String, String> {
     let transcript = transcript.trim();
     if transcript.is_empty() {
         return Err("nothing has been transcribed yet".into());
@@ -245,14 +267,25 @@ pub fn recap(model_path: &Path, transcript: &str, question: &str) -> Result<Stri
     let budget = (N_CTX as usize - 1000) * CHARS_PER_TOKEN;
     // Questions like "what did I miss" are about the recent past, so when the
     // transcript overflows, keep the end rather than the beginning.
-    let context = if transcript.len() > budget {
-        &transcript[transcript.len() - budget..]
-    } else {
-        transcript
-    };
+    let context = tail(transcript, budget);
 
     let user = format!("Transcript:\n{context}\n\nQuestion: {question}");
-    complete(model_path, RECAP_SYSTEM, &user)
+    complete_streaming(model_path, RECAP_SYSTEM, &user, on_token)
+}
+
+/// The last `budget` bytes of `text`, snapped forward to a character boundary.
+///
+/// Slicing a transcript by byte offset panics the moment the cut lands inside a
+/// multi-byte character — an em dash or an accent in someone's name is enough.
+fn tail(text: &str, budget: usize) -> &str {
+    if text.len() <= budget {
+        return text;
+    }
+    let mut cut = text.len() - budget;
+    while cut < text.len() && !text.is_char_boundary(cut) {
+        cut += 1;
+    }
+    &text[cut..]
 }
 
 /// Split on paragraph boundaries where possible, falling back to a hard cut so a
@@ -293,6 +326,17 @@ fn split_into_chunks(text: &str, budget: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tail_never_splits_a_character() {
+        // The cut lands mid-character on purpose: "…" is three bytes.
+        let text = "one … two … three";
+        for budget in 1..text.len() {
+            let got = tail(text, budget);
+            assert!(text.ends_with(got), "{got:?} is not a suffix of {text:?}");
+        }
+        assert_eq!(tail("short", 99), "short");
+    }
 
     #[test]
     fn chunks_respect_the_budget_and_lose_nothing() {

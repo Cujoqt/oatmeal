@@ -19,6 +19,9 @@ use live::{LiveSession, Tap};
 use mic::MicRecorder;
 use sysaudio::SysAudioRecorder;
 
+/// Event carrying each piece of a streamed chat answer: `{ seq, text }`.
+const CHAT_TOKEN_EVENT: &str = "oatmeal://chat-token";
+
 /// Label of the floating live-transcript window declared in `tauri.conf.json`.
 const TRANSCRIPT_WINDOW: &str = "transcript";
 
@@ -354,6 +357,26 @@ fn is_transcript_window_visible(app: tauri::AppHandle) -> bool {
         .unwrap_or(false)
 }
 
+/// Milliseconds since the in-progress meeting started, or `None` when idle.
+///
+/// After a relaunch mid-meeting the UI has no idea how long it has been running,
+/// so its timer used to restart from zero and under-report an hour-old meeting.
+/// The session folder's creation time is the start time.
+#[tauri::command]
+fn session_elapsed_ms(state: tauri::State<'_, AppState>) -> Option<u64> {
+    let dir = state
+        .session
+        .lock()
+        .ok()?
+        .as_ref()
+        .map(|paths| paths.dir.clone())?;
+    let created = std::fs::metadata(dir).ok()?.created().ok()?;
+    std::time::SystemTime::now()
+        .duration_since(created)
+        .ok()
+        .map(|since| since.as_millis() as u64)
+}
+
 /// Whether a meeting is currently being recorded.
 #[tauri::command]
 fn is_session_active(state: tauri::State<'_, AppState>) -> bool {
@@ -465,6 +488,7 @@ fn write_notes(id: String, force: bool) -> Result<String, String> {
 /// being recorded, answered from the live transcript so far.
 #[tauri::command]
 fn ask_meeting(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     id: String,
     question: String,
@@ -486,7 +510,17 @@ fn ask_meeting(
     };
 
     let path = model::ensure_chat_model()?;
-    chat::recap(&path, &transcript, &question)
+    // Stream the answer as it is generated: a local model takes seconds to write a
+    // paragraph, and a silent wait reads as a hang.
+    use tauri::Emitter;
+    let mut seq = 0u32;
+    chat::recap(&path, &transcript, &question, &mut |piece| {
+        seq += 1;
+        let _ = app.emit(
+            CHAT_TOKEN_EVENT,
+            serde_json::json!({ "seq": seq, "text": piece }),
+        );
+    })
 }
 
 /// Free the chat model's memory.
@@ -575,6 +609,7 @@ pub fn run() {
             start_session,
             stop_session,
             is_session_active,
+            session_elapsed_ms,
             list_meetings,
             live_lines,
             save_notes,

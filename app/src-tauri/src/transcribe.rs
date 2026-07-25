@@ -121,6 +121,23 @@ pub struct Transcriber {
     ctx: WhisperContext,
 }
 
+/// How many CPU threads a decode may use.
+///
+/// The live lane runs *while* the meeting is being recorded: audio callbacks have
+/// to hit their deadlines and the window has to stay responsive. Handing whisper
+/// every core starves both, which shows up as a stuttering UI and dropped audio.
+/// The offline pass runs after the meeting, with nothing else competing, but still
+/// leaves one core so the app can redraw.
+fn thread_budget(quality: Quality) -> i32 {
+    let cores = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4) as i32;
+    match quality {
+        Quality::Fast => (cores - 2).max(2),
+        Quality::Accurate => (cores - 1).max(2),
+    }
+}
+
 impl Transcriber {
     /// Load the model at `model_path` (empty for the resolution fallback).
     pub fn load(model_path: &str) -> Result<Self, String> {
@@ -165,10 +182,7 @@ impl Transcriber {
         } else {
             params.set_detect_language(true);
         }
-        let threads = std::thread::available_parallelism()
-            .map(|n| n.get() as i32)
-            .unwrap_or(4);
-        params.set_n_threads(threads);
+        params.set_n_threads(thread_budget(quality));
         // Whisper loves to emit "[BLANK_AUDIO]" and hallucinate stock phrases over
         // silence. Suppressing non-speech tokens cuts most of that.
         params.set_suppress_blank(true);
@@ -264,6 +278,21 @@ pub fn resample_linear(input: &[f32], src_rate: u32, dst_rate: u32) -> Vec<f32> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn live_decoding_leaves_cores_for_audio_and_ui() {
+        let cores = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4) as i32;
+        let fast = thread_budget(Quality::Fast);
+        let accurate = thread_budget(Quality::Accurate);
+
+        // Never all of them, never fewer than two, and the live lane is the more
+        // frugal of the pair.
+        assert!(fast >= 2 && fast < cores.max(3), "fast budget {fast} of {cores}");
+        assert!(accurate >= 2 && accurate < cores.max(3), "accurate budget {accurate}");
+        assert!(fast <= accurate);
+    }
 
     #[test]
     fn resample_passthrough_when_rates_match() {
