@@ -504,6 +504,22 @@ function setTab(tab) {
 tabNotes.addEventListener('click', () => setTab('notes'))
 tabRaw.addEventListener('click', () => setTab('raw'))
 
+/// Show what the user typed during the meeting under the model's write-up. The
+/// two used to share one file, which is why typing during a meeting appeared in
+/// the Enhanced tab; they are separate now, so the view fetches both.
+async function appendTypedNotes(id) {
+  let typed = ''
+  try {
+    typed = await invoke('meeting_typed_notes', { id })
+  } catch { /* an unreadable notes.md shouldn't blank the summary */ }
+  if (!typed.trim() || openId !== id || noteTab !== 'notes') return
+
+  const heading = document.createElement('h2')
+  heading.textContent = 'Your notes'
+  noteBody.appendChild(heading)
+  renderMarkdown(typed, noteBody.appendChild(document.createElement('div')))
+}
+
 async function renderTranscript() {
   const m = currentMeeting()
   noteBody.innerHTML = '<p class="placeholder">Loading transcript…</p>'
@@ -566,6 +582,8 @@ async function renderNotes(force = false) {
     go.addEventListener('click', () => renderNotes(true))
     wrap.append(p, go)
     noteBody.appendChild(wrap)
+    // No summary yet doesn't mean nothing was written: show what was typed.
+    await appendTypedNotes(m.id)
     return
   }
 
@@ -580,6 +598,7 @@ async function renderNotes(force = false) {
     // The user may have opened a different meeting while this was generating.
     if (openId !== asked || noteTab !== 'notes') return
     renderMarkdown(md, noteBody)
+    await appendTypedNotes(asked)
   } catch (e) {
     noteBody.innerHTML = ''
     const p = document.createElement('p')

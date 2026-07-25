@@ -590,6 +590,13 @@ fn open_calendar_settings() -> Result<(), String> {
         .map_err(|e| format!("open System Settings: {e}"))
 }
 
+/// The notes the user typed during a meeting, for the note view. Empty when they
+/// typed nothing — `notes.md` and the model's `summary.md` are separate files.
+#[tauri::command]
+fn meeting_typed_notes(id: String) -> Result<String, String> {
+    library::typed_notes(&id)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -619,6 +626,7 @@ pub fn run() {
             chat_model_status,
             write_notes,
             meeting_segments,
+            meeting_typed_notes,
             ask_meeting,
             unload_chat_model,
             rename_meeting,

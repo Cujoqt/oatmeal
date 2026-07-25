@@ -55,6 +55,48 @@ pub fn list_meetings() -> Vec<Meeting> {
         .collect()
 }
 
+/// What the person typed during the meeting. Written continuously by
+/// `session::write_notes`.
+const TYPED_NOTES: &str = "notes.md";
+
+/// The model's write-up of the transcript. Separate from `TYPED_NOTES` because
+/// both used to land in the same file: whatever you typed made the app believe
+/// notes had been generated, the Enhanced tab showed your own typing back to you,
+/// and generating for real would have overwritten it.
+const SUMMARY: &str = "summary.md";
+
+/// Whether `notes.md` holds typed notes rather than an older build's model output.
+/// `session::write_notes` stamps every file it writes with a `_Written …_` line.
+fn is_typed_notes(text: &str) -> bool {
+    text.lines().take(4).any(|line| line.starts_with("_Written "))
+}
+
+/// Older builds cached the model's write-up in `notes.md`. Move one aside the
+/// first time we see it, so a meeting summarized by an earlier version keeps its
+/// notes instead of silently regenerating them.
+fn migrate_legacy_summary(dir: &Path) -> Option<String> {
+    let legacy = dir.join(TYPED_NOTES);
+    let text = std::fs::read_to_string(&legacy).ok()?;
+    if text.trim().is_empty() || is_typed_notes(&text) {
+        return None;
+    }
+    let summary = dir.join(SUMMARY);
+    std::fs::rename(&legacy, &summary).ok()?;
+    Some(text)
+}
+
+/// Whether a meeting already has a model-written summary.
+fn has_summary(dir: &Path) -> bool {
+    if dir.join(SUMMARY).is_file() {
+        return true;
+    }
+    // A legacy notes.md that isn't typed notes still counts — it is a summary,
+    // it just hasn't been renamed yet.
+    std::fs::read_to_string(dir.join(TYPED_NOTES))
+        .map(|text| !text.trim().is_empty() && !is_typed_notes(&text))
+        .unwrap_or(false)
+}
+
 fn read_meeting(dir: &Path, name: &str) -> Meeting {
     let transcript = dir.join("transcript.md");
     let transcribed = transcript.exists();
@@ -74,7 +116,7 @@ fn read_meeting(dir: &Path, name: &str) -> Meeting {
         started_at: parse_stamp(name).unwrap_or_default(),
         duration_secs,
         transcribed,
-        has_notes: dir.join("notes.md").is_file(),
+        has_notes: has_summary(dir),
         dir: dir.display().to_string(),
     }
 }
@@ -268,17 +310,23 @@ pub fn transcript_lines(id: &str) -> Result<Vec<TranscriptLine>, String> {
     Ok(out)
 }
 
-/// Write structured notes for a meeting, caching them as `notes.md` beside the
+/// Write structured notes for a meeting, caching them as `summary.md` beside the
 /// transcript. Returns the cached copy unless `force` asks for a rewrite —
 /// generation takes real time and the result doesn't change on its own.
+///
+/// This never touches `notes.md`: that file belongs to whoever was typing during
+/// the meeting.
 pub fn write_notes(id: &str, force: bool) -> Result<String, String> {
     let dir = meeting_dir(id)?;
-    let notes_path = dir.join("notes.md");
+    let summary_path = dir.join(SUMMARY);
     if !force {
-        if let Ok(existing) = std::fs::read_to_string(&notes_path) {
+        if let Ok(existing) = std::fs::read_to_string(&summary_path) {
             if !existing.trim().is_empty() {
                 return Ok(existing);
             }
+        }
+        if let Some(migrated) = migrate_legacy_summary(&dir) {
+            return Ok(migrated);
         }
     }
 
@@ -286,9 +334,31 @@ pub fn write_notes(id: &str, force: bool) -> Result<String, String> {
     let model = crate::model::ensure_chat_model()?;
     let notes = crate::chat::write_notes(&model, &transcript)?;
 
-    std::fs::write(&notes_path, &notes)
-        .map_err(|e| format!("write {}: {e}", notes_path.display()))?;
+    std::fs::write(&summary_path, &notes)
+        .map_err(|e| format!("write {}: {e}", summary_path.display()))?;
     Ok(notes)
+}
+
+/// What the person typed during the meeting, if anything. The heading and the
+/// `_Written …_` stamp are dropped: the note view has its own title and date.
+pub fn typed_notes(id: &str) -> Result<String, String> {
+    let dir = meeting_dir(id)?;
+    let text = match std::fs::read_to_string(dir.join(TYPED_NOTES)) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(String::new()),
+        Err(e) => return Err(format!("read {}: {e}", dir.join(TYPED_NOTES).display())),
+    };
+    if !is_typed_notes(&text) {
+        return Ok(String::new());
+    }
+    let body: String = text
+        .lines()
+        .skip_while(|line| {
+            line.starts_with("# ") || line.starts_with("_Written ") || line.trim().is_empty()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    Ok(body.trim().to_string())
 }
 
 /// Duration of a WAV in whole seconds, or 0 if it's missing or unreadable.
@@ -362,6 +432,51 @@ mod tests {
         dir
     }
 
+
+    #[test]
+    fn typed_notes_are_not_mistaken_for_a_summary() {
+        let typed = "# Standup\n\n_Written 2026-07-24 22:37_\n\nmy own bullet points\n";
+        let model = "## Summary\n\nThe team agreed to ship on Friday.\n";
+        assert!(is_typed_notes(typed));
+        assert!(!is_typed_notes(model));
+    }
+
+    #[test]
+    fn a_typed_note_does_not_count_as_notes_written() {
+        with_temp_home(|_| {
+            let dir = seed_meeting("20260724-100000-standup");
+            std::fs::write(
+                dir.join("notes.md"),
+                "# Standup\n\n_Written 2026-07-24 22:37_\n\nmine\n",
+            )
+            .unwrap();
+
+            // Typing during a meeting used to light up the "notes written" dot and
+            // make the Enhanced tab show your own typing back to you.
+            assert!(!has_summary(&dir));
+            assert!(migrate_legacy_summary(&dir).is_none());
+            assert!(dir.join("notes.md").is_file(), "typed notes must survive");
+        });
+    }
+
+    #[test]
+    fn a_legacy_summary_moves_to_its_own_file() {
+        with_temp_home(|_| {
+            let dir = seed_meeting("20260724-110000-kickoff");
+            std::fs::write(
+                dir.join("notes.md"),
+                "## Summary\n\nwritten by an older build\n",
+            )
+            .unwrap();
+            assert!(has_summary(&dir), "a legacy notes.md is still a summary");
+
+            let migrated = migrate_legacy_summary(&dir).expect("migrated");
+            assert!(migrated.contains("older build"));
+            assert!(dir.join("summary.md").is_file());
+            assert!(!dir.join("notes.md").exists());
+        });
+    }
+
     #[test]
     fn rename_updates_both_the_listing_and_the_transcript() {
         with_temp_home(|_| {
@@ -424,7 +539,7 @@ mod tests {
         with_temp_home(|_| {
             let id = "20260724-110000-lecture";
             let dir = seed_meeting(id);
-            std::fs::write(dir.join("notes.md"), "## Summary\n\ncached").unwrap();
+            std::fs::write(dir.join("summary.md"), "## Summary\n\ncached").unwrap();
 
             // Returns the cache without touching the model, which isn't present.
             assert_eq!(write_notes(id, false).unwrap(), "## Summary\n\ncached");
