@@ -62,6 +62,16 @@ say so plainly instead of implying it works.
 - **Anything that blocks must not block the UI thread.** Whisper and the chat model
   are the two heavy paths; leave the UI a couple of cores and stream results where
   the user is waiting on them.
+- **Sign local builds with the Apple Development cert**, otherwise macOS forgets
+  the calendar permission on every rebuild: an ad-hoc signature is a new code
+  identity each time, and TCC keys its grants to that identity.
+
+  ```sh
+  cd app && APPLE_SIGNING_IDENTITY="Apple Development: dylanmo8025@icloud.com (W45G6BS8JA)" cargo tauri build
+  ```
+
+  `tauri.conf.json` keeps `signingIdentity: "-"` so CI, which has no certificate,
+  still builds. The env var overrides it locally.
 - **Tests:** `cd app/src-tauri && cargo test --lib`. The real-audio end-to-end test
   is `#[ignore]`d: `cargo test --test e2e_transcribe -- --ignored --nocapture`.
 - **To check UI without a full build:** copy `app/src` somewhere, inject a stub
