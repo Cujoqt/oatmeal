@@ -1,0 +1,74 @@
+name: Release
+
+# Push a tag like v0.1.0 and this builds the macOS bundle and attaches the DMG to
+# a GitHub release, so "download Oatmeal" is one click instead of a toolchain.
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build and release (e.g. v0.1.0)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  macos:
+    # Apple silicon runner: the bundle is aarch64, matching what most Macs run.
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install cmake (whisper.cpp build)
+        run: brew install cmake
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # Cargo's registry and the compiled deps dominate a cold build (~8 min).
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            app/src-tauri/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('app/src-tauri/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Test
+        working-directory: app/src-tauri
+        run: cargo test --lib
+
+      - name: Build bundle
+        working-directory: app
+        run: cargo install tauri-cli --version "^2" --locked && cargo tauri build
+
+      - name: Name the artifact for humans
+        id: artifact
+        run: |
+          src=$(ls app/src-tauri/target/release/bundle/dmg/*.dmg | head -1)
+          version=$(grep -m1 '"version"' app/src-tauri/tauri.conf.json | sed -E 's/.*"([0-9][^"]*)".*/\1/')
+          out="Oatmeal-${version}-apple-silicon.dmg"
+          cp "$src" "$out"
+          echo "path=$out" >> "$GITHUB_OUTPUT"
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          files: ${{ steps.artifact.outputs.path }}
+          generate_release_notes: true
+          body: |
+            ## Install
+
+            1. Download the DMG below and drag Oatmeal to Applications.
+            2. First launch: right-click the app and choose **Open** — the build is
+               ad-hoc signed, so Gatekeeper asks once.
+            3. macOS will ask for **Microphone** and **Screen Recording**. Screen
+               Recording is what ScreenCaptureKit uses to capture the other side of
+               a call; no video is ever recorded.
+
+            Apple silicon only. Everything runs on-device: the only network calls
+            are the one-time Whisper model download and, if you connect a calendar,
+            Google Calendar reads.
