@@ -56,7 +56,10 @@ const viewNote = $('viewNote')
 const noteTitle = $('noteTitle')
 const noteBody = $('noteBody')
 const chipWhen = $('chipWhen')
+const chipExport = $('chipExport')
+const chipFollowup = $('chipFollowup')
 const chipDelete = $('chipDelete')
+const tmplChips = $('tmplChips')
 const tabNotes = $('tabNotes')
 const tabRaw = $('tabRaw')
 const answersEl = $('answers')
@@ -67,6 +70,13 @@ const askSend = $('askSend')
 const DRAFT_KEY = 'oatmeal.draft'
 const INTRO_KEY = 'oatmeal.introSeen'
 const SUGGESTIONS = ['What did I miss?', 'What are the action items?', 'Summarize the decisions', 'What should I follow up on?']
+// Matches chat::Template on the Rust side, serialized snake_case.
+const TEMPLATES = [
+  { id: 'general', label: 'General' },
+  { id: 'standup', label: 'Standup' },
+  { id: 'one_on_one', label: '1:1' },
+  { id: 'interview', label: 'Interview' },
+]
 
 let recording = false
 let busy = false
@@ -74,6 +84,13 @@ let tick = null
 let startedAt = 0
 let meetings = []
 let filter = ''
+/// Content search results (title + transcript + notes) for the current
+/// `filter`, or null while none has come back yet — `visibleMeetings()` falls
+/// back to a title-only match until it does, so typing never shows an empty
+/// list while the backend scan is in flight.
+let searchResults = null
+let searchTimer = null
+let searchSeq = 0
 let openId = null
 let noteTab = 'notes'
 let liveLines = []
@@ -376,8 +393,29 @@ function fmtWhen(date) {
 
 function visibleMeetings() {
   if (!filter) return meetings
+  if (searchResults) {
+    const ids = new Set(searchResults.map((m) => m.id))
+    return meetings.filter((m) => ids.has(m.id))
+  }
   const q = filter.toLowerCase()
   return meetings.filter((m) => m.title.toLowerCase().includes(q))
+}
+
+/// Runs `filter` against transcript and notes content too, not just titles.
+/// Debounced so a full scan doesn't happen on every keystroke.
+async function runSearch() {
+  const q = filter
+  const seq = ++searchSeq
+  let results
+  try {
+    results = await invoke('search_meetings', { query: q })
+  } catch {
+    return
+  }
+  if (seq !== searchSeq || q !== filter) return
+  searchResults = results
+  renderSidebar()
+  renderNotesList()
 }
 
 function renderSidebar() {
@@ -429,7 +467,14 @@ async function loadMeetings() {
   renderNotesList()
 }
 
-searchEl.addEventListener('input', () => { filter = searchEl.value.trim(); renderSidebar(); renderNotesList() })
+searchEl.addEventListener('input', () => {
+  filter = searchEl.value.trim()
+  searchResults = null
+  renderSidebar()
+  renderNotesList()
+  clearTimeout(searchTimer)
+  if (filter) searchTimer = setTimeout(runSearch, 150)
+})
 navHome.addEventListener('click', showHome)
 navSettings.addEventListener('click', showSettings)
 newNoteBtn.addEventListener('click', showDraft)
@@ -491,7 +536,32 @@ async function openNote(id) {
   if (!m) return
   noteTitle.value = m.title
   chipWhen.textContent = [fmtWhen(new Date(m.started_at)), fmtDuration(m.duration_secs)].filter(Boolean).join(' · ')
+  renderTemplateChips()
   setTab('notes')
+}
+
+/// Which shape of notes to write, remembered per meeting in `meta.json` once
+/// generated. Picking a different template on a meeting that already has notes
+/// regenerates them; picking one before the first generation just selects it.
+function renderTemplateChips() {
+  const m = currentMeeting()
+  tmplChips.innerHTML = ''
+  if (!m || !m.transcribed) return
+  const current = m.template || 'general'
+  for (const t of TEMPLATES) {
+    const b = document.createElement('button')
+    b.className = 'chip act' + (t.id === current ? ' sel' : '')
+    b.textContent = t.label
+    b.addEventListener('click', () => selectTemplate(m, t.id))
+    tmplChips.appendChild(b)
+  }
+}
+
+async function selectTemplate(m, id) {
+  if (id === (m.template || 'general')) return
+  m.template = id
+  renderTemplateChips()
+  if (m.has_notes) await renderNotes(true, true)
 }
 
 function setTab(tab) {
@@ -557,7 +627,7 @@ async function renderTranscript() {
   }
 }
 
-async function renderNotes(force = false) {
+async function renderNotes(force = false, regenerate = false) {
   const m = currentMeeting()
   if (!m) return
 
@@ -591,7 +661,7 @@ async function renderNotes(force = false) {
   setModelChip('busy', 'Writing notes…')
   const asked = m.id
   try {
-    const md = await invoke('write_notes', { id: m.id, force: false })
+    const md = await invoke('write_notes', { id: m.id, template: m.template || 'general', force: regenerate })
     m.has_notes = true
     renderSidebar()
     renderNotesList()
@@ -631,6 +701,17 @@ async function commitTitle() {
     setStatus(String(e), true)
   }
 }
+
+chipExport.addEventListener('click', async () => {
+  const m = currentMeeting()
+  if (!m) return
+  try {
+    const dest = await invoke('export_meeting', { id: m.id })
+    setStatus(`Exported to ${dest}`)
+  } catch (e) {
+    setStatus(String(e), true)
+  }
+})
 
 chipDelete.addEventListener('click', async () => {
   const m = currentMeeting()
@@ -688,37 +769,66 @@ async function ask() {
   const question = askInput.value.trim()
   if (!m || !question) return
   askInput.value = ''
-  askSend.disabled = true
+  await runChat(question, 'Thinking…', () => invoke('ask_meeting', { id: m.id, question }))
+}
 
+/// Draft a follow-up message from this meeting's notes, into the same answers
+/// list an ask writes to. Sending it is the user's job — Oatmeal never sends
+/// anything itself — so a finished draft gets a copy button.
+async function draftFollowup() {
+  const m = currentMeeting()
+  if (!m) return
+  const a = await runChat('Follow-up draft', 'Drafting…', () => invoke('draft_followup', { id: m.id }))
+  if (!a) return
+  const copy = document.createElement('button')
+  copy.className = 'copy'
+  copy.textContent = 'Copy'
+  copy.addEventListener('click', () => {
+    navigator.clipboard.writeText(a.textContent)
+    copy.textContent = 'Copied'
+    setTimeout(() => { copy.textContent = 'Copy' }, 1500)
+  })
+  a.after(copy)
+}
+
+/// Add a prompt and its pending answer to the list, run `generate` against the
+/// local model with the chat controls disabled, and stream the reply into the
+/// answer. Returns the answer element, or null if the model failed.
+async function runChat(prompt, pending, generate) {
   const qa = document.createElement('div')
   qa.className = 'qa'
   const q = document.createElement('div')
   q.className = 'q'
-  q.textContent = question
+  q.textContent = prompt
   const a = document.createElement('div')
   a.className = 'a thinking'
-  a.textContent = 'Thinking…'
+  a.textContent = pending
   qa.append(q, a)
   answersEl.appendChild(qa)
   qa.scrollIntoView({ behavior: 'smooth', block: 'end' })
 
+  askSend.disabled = true
+  chipFollowup.disabled = true
   streamingAnswer = a
-  setModelChip('busy', 'Thinking…')
+  setModelChip('busy', pending)
   try {
-    const answer = await invoke('ask_meeting', { id: m.id, question })
-    a.classList.remove('thinking')
     // The returned string is authoritative: it also covers any event that was
     // dropped while the window was busy.
-    a.textContent = answer
+    a.textContent = await generate()
+    return a
   } catch (e) {
-    a.classList.remove('thinking')
     a.textContent = String(e)
+    return null
   } finally {
+    a.classList.remove('thinking')
     streamingAnswer = null
     askSend.disabled = false
+    chipFollowup.disabled = false
     refreshModelChip()
   }
 }
+
+chipFollowup.addEventListener('click', draftFollowup)
 
 // ── local model status ───────────────────────────────────────────────────────
 

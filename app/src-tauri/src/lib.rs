@@ -449,6 +449,13 @@ fn list_meetings() -> Vec<library::Meeting> {
     library::list_meetings()
 }
 
+/// Meetings matching `query` against title, transcript, or notes — the
+/// sidebar's full-text search. Same cost as `list_meetings`, just filtered.
+#[tauri::command]
+fn search_meetings(query: String) -> Vec<library::Meeting> {
+    library::search_meetings(&query)
+}
+
 // ── Local language model — notes and recaps ─────────────────────────────────
 
 /// Ensure the chat model is downloaded. Separate from `ensure_model` because
@@ -480,8 +487,8 @@ fn meeting_segments(id: String) -> Result<Vec<library::TranscriptLine>, String> 
 /// Write structured notes for a past meeting and cache them next to the
 /// transcript, so reopening a note doesn't re-run the model.
 #[tauri::command]
-fn write_notes(id: String, force: bool) -> Result<String, String> {
-    library::write_notes(&id, force)
+fn write_notes(id: String, template: chat::Template, force: bool) -> Result<String, String> {
+    library::write_notes(&id, template, force)
 }
 
 /// Answer a question about a meeting. `id` empty means the meeting currently
@@ -510,17 +517,31 @@ fn ask_meeting(
     };
 
     let path = model::ensure_chat_model()?;
-    // Stream the answer as it is generated: a local model takes seconds to write a
-    // paragraph, and a silent wait reads as a hang.
+    chat::recap(&path, &transcript, &question, &mut chat_token_sink(app))
+}
+
+/// Sink that forwards generated tokens to the window as they arrive: a local
+/// model takes seconds to write a paragraph, and a silent wait reads as a hang.
+/// `seq` lets the UI tell the first token from the rest.
+fn chat_token_sink(app: tauri::AppHandle) -> impl FnMut(&str) {
     use tauri::Emitter;
     let mut seq = 0u32;
-    chat::recap(&path, &transcript, &question, &mut |piece| {
+    move |piece: &str| {
         seq += 1;
         let _ = app.emit(
             CHAT_TOKEN_EVENT,
             serde_json::json!({ "seq": seq, "text": piece }),
         );
-    })
+    }
+}
+
+/// Draft a follow-up message from a meeting's notes — text for the user to copy
+/// and send themselves; Oatmeal never sends it anywhere.
+#[tauri::command]
+fn draft_followup(app: tauri::AppHandle, id: String) -> Result<String, String> {
+    let notes = library::followup_source(&id)?;
+    let path = model::ensure_chat_model()?;
+    chat::draft_followup(&path, &notes, &mut chat_token_sink(app))
 }
 
 /// Free the chat model's memory.
@@ -541,6 +562,19 @@ fn rename_meeting(id: String, title: String) -> Result<(), String> {
 #[tauri::command]
 fn delete_meeting(id: String) -> Result<String, String> {
     library::delete_meeting(&id)
+}
+
+/// Bundle a meeting's notes and transcript into a Markdown file under
+/// `~/Downloads/Oatmeal Exports/` and reveal it in Finder, so it can be shared
+/// without touching the app's own recordings folder.
+#[tauri::command]
+fn export_meeting(id: String) -> Result<String, String> {
+    let dest = library::export_meeting(&id)?;
+    std::process::Command::new("open")
+        .arg(&dest)
+        .status()
+        .map_err(|e| format!("reveal export in Finder: {e}"))?;
+    Ok(dest)
 }
 
 // ── settings + calendar ──────────────────────────────────────────────────────
@@ -618,6 +652,7 @@ pub fn run() {
             is_session_active,
             session_elapsed_ms,
             list_meetings,
+            search_meetings,
             live_lines,
             save_notes,
             set_transcript_window_visible,
@@ -628,9 +663,11 @@ pub fn run() {
             meeting_segments,
             meeting_typed_notes,
             ask_meeting,
+            draft_followup,
             unload_chat_model,
             rename_meeting,
             delete_meeting,
+            export_meeting,
             get_settings,
             save_settings,
             calendar_authorized,

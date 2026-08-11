@@ -29,6 +29,9 @@ pub struct Meeting {
     pub transcribed: bool,
     /// Whether the language model has already written notes for this meeting.
     pub has_notes: bool,
+    /// Which note template was used the last time notes were generated, so the
+    /// picker reopens on the same choice. Defaults when nothing is recorded yet.
+    pub template: crate::chat::Template,
     pub dir: String,
 }
 
@@ -117,8 +120,36 @@ fn read_meeting(dir: &Path, name: &str) -> Meeting {
         duration_secs,
         transcribed,
         has_notes: has_summary(dir),
+        template: meta_template(dir).unwrap_or_default(),
         dir: dir.display().to_string(),
     }
+}
+
+/// Meetings whose title, transcript, or notes contain `query` (case-insensitive
+/// substring). There's no index — one person's worth of meetings is cheap
+/// enough to grep on every keystroke.
+pub fn search_meetings(query: &str) -> Vec<Meeting> {
+    let q = query.trim().to_lowercase();
+    if q.is_empty() {
+        return list_meetings();
+    }
+    list_meetings()
+        .into_iter()
+        .filter(|m| meeting_matches(m, &q))
+        .collect()
+}
+
+/// Whether a meeting's title or on-disk content (transcript, typed notes, or
+/// the model's summary) contains `q`. `q` must already be lowercased.
+fn meeting_matches(m: &Meeting, q: &str) -> bool {
+    if m.title.to_lowercase().contains(q) {
+        return true;
+    }
+    let dir = Path::new(&m.dir);
+    ["transcript.md", TYPED_NOTES, SUMMARY]
+        .iter()
+        .filter_map(|file| std::fs::read_to_string(dir.join(file)).ok())
+        .any(|text| text.to_lowercase().contains(q))
 }
 
 /// `YYYYMMDD-HHMMSS[-slug]` → `YYYY-MM-DDTHH:MM:SS`, or None if the prefix
@@ -173,6 +204,28 @@ fn meta_title(path: &Path) -> Option<String> {
     (!title.is_empty()).then(|| title.to_string())
 }
 
+/// The template notes were last generated with, if any were ever generated.
+fn meta_template(dir: &Path) -> Option<crate::chat::Template> {
+    serde_json::from_value(read_meta(dir).get("template")?.clone()).ok()
+}
+
+/// Read `meta.json` as a JSON object, or an empty one if it doesn't exist or
+/// isn't valid JSON. Every writer merges into this so fields it doesn't touch
+/// — a rename's title, a generation's chosen template — survive.
+fn read_meta(dir: &Path) -> serde_json::Map<String, serde_json::Value> {
+    std::fs::read_to_string(dir.join("meta.json"))
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default()
+}
+
+fn write_meta(dir: &Path, meta: &serde_json::Map<String, serde_json::Value>) -> Result<(), String> {
+    let path = dir.join("meta.json");
+    std::fs::write(&path, serde_json::Value::Object(meta.clone()).to_string())
+        .map_err(|e| format!("write {}: {e}", path.display()))
+}
+
 /// Resolve a meeting id (a folder name) to its directory, refusing anything
 /// that isn't a plain name directly under the recordings root. The id crosses
 /// the boundary from the UI, so `..` or an absolute path must not be able to
@@ -204,10 +257,9 @@ pub fn rename_meeting(id: &str, title: &str) -> Result<(), String> {
         return Err("a meeting needs a title".into());
     }
 
-    let meta = serde_json::json!({ "title": title });
-    let meta_path = dir.join("meta.json");
-    std::fs::write(&meta_path, meta.to_string())
-        .map_err(|e| format!("write {}: {e}", meta_path.display()))?;
+    let mut meta = read_meta(&dir);
+    meta.insert("title".into(), serde_json::Value::String(title.to_string()));
+    write_meta(&dir, &meta)?;
 
     let transcript = dir.join("transcript.md");
     if let Ok(text) = std::fs::read_to_string(&transcript) {
@@ -239,6 +291,64 @@ pub fn delete_meeting(id: &str) -> Result<String, String> {
         format!("move {} to Trash: {e}", dir.display())
     })?;
     Ok(dest.display().to_string())
+}
+
+/// Replace characters that can't survive in a filename with `-`, trim the
+/// result, and fall back to a fixed name if nothing usable is left.
+fn sanitize_filename(name: &str) -> String {
+    let cleaned: String = name
+        .chars()
+        .map(|c| if c.is_alphanumeric() || c == ' ' || c == '-' || c == '_' { c } else { '-' })
+        .collect();
+    let trimmed = cleaned.trim().trim_matches('-').trim();
+    if trimmed.is_empty() { "meeting".to_string() } else { trimmed.to_string() }
+}
+
+/// Bundle a meeting's write-up and transcript into one shareable Markdown file
+/// under `~/Downloads/Oatmeal Exports/<title>-<date>/`, and return that folder's
+/// path. A meeting with nothing written up or transcribed yet has nothing worth
+/// sharing, so that's an error rather than an empty file.
+pub fn export_meeting(id: &str) -> Result<String, String> {
+    let dir = meeting_dir(id)?;
+    let meeting = read_meeting(&dir, id);
+
+    let sections = [
+        ("Notes", std::fs::read_to_string(dir.join(SUMMARY)).unwrap_or_default()),
+        ("Your notes", typed_notes(id).unwrap_or_default()),
+        ("Transcript", transcript_text(id).unwrap_or_default()),
+    ];
+
+    let mut body = format!("# {}\n\n", meeting.title);
+    let mut has_content = false;
+    for (heading, text) in &sections {
+        let text = text.trim();
+        if text.is_empty() {
+            continue;
+        }
+        body.push_str(&format!("## {heading}\n\n{text}\n\n"));
+        has_content = true;
+    }
+    if !has_content {
+        return Err("this meeting has nothing to export yet".into());
+    }
+
+    let name = sanitize_filename(&meeting.title);
+    let date = meeting.started_at.get(..10).unwrap_or("");
+    let folder_name = if date.is_empty() { name.clone() } else { format!("{name}-{date}") };
+
+    let home = std::env::var("HOME").map_err(|_| "no HOME set".to_string())?;
+    let dest_dir = Path::new(&home)
+        .join("Downloads")
+        .join("Oatmeal Exports")
+        .join(folder_name);
+    std::fs::create_dir_all(&dest_dir)
+        .map_err(|e| format!("create {}: {e}", dest_dir.display()))?;
+
+    let dest_file = dest_dir.join(format!("{name}.md"));
+    std::fs::write(&dest_file, body.trim_end().to_string() + "\n")
+        .map_err(|e| format!("write {}: {e}", dest_file.display()))?;
+
+    Ok(dest_dir.display().to_string())
 }
 
 /// The transcript's spoken text, with the markdown scaffolding and timestamps
@@ -316,7 +426,7 @@ pub fn transcript_lines(id: &str) -> Result<Vec<TranscriptLine>, String> {
 ///
 /// This never touches `notes.md`: that file belongs to whoever was typing during
 /// the meeting.
-pub fn write_notes(id: &str, force: bool) -> Result<String, String> {
+pub fn write_notes(id: &str, template: crate::chat::Template, force: bool) -> Result<String, String> {
     let dir = meeting_dir(id)?;
     let summary_path = dir.join(SUMMARY);
     if !force {
@@ -332,11 +442,38 @@ pub fn write_notes(id: &str, force: bool) -> Result<String, String> {
 
     let transcript = transcript_text(id)?;
     let model = crate::model::ensure_chat_model()?;
-    let notes = crate::chat::write_notes(&model, &transcript)?;
+    let notes = crate::chat::write_notes(&model, &transcript, template)?;
 
     std::fs::write(&summary_path, &notes)
         .map_err(|e| format!("write {}: {e}", summary_path.display()))?;
+
+    let mut meta = read_meta(&dir);
+    meta.insert("template".into(), serde_json::to_value(template).unwrap());
+    write_meta(&dir, &meta)?;
+
     Ok(notes)
+}
+
+/// Text to draft a follow-up message from: the AI-written summary (generating
+/// it if this is the first time it's been asked for), falling back to what the
+/// user typed by hand if there's no transcript to summarize. Never the raw
+/// transcript — a follow-up should read like the notes, not the ASR output.
+///
+/// The template only decides how notes are *written*, and a meeting that
+/// already has notes gets the cached copy back untouched, so the default is all
+/// this path can meaningfully ask for.
+pub fn followup_source(id: &str) -> Result<String, String> {
+    match write_notes(id, crate::chat::Template::default(), false) {
+        Ok(notes) => Ok(notes),
+        Err(_) => {
+            let typed = typed_notes(id)?;
+            if typed.trim().is_empty() {
+                Err("this meeting has no notes yet".into())
+            } else {
+                Ok(typed)
+            }
+        }
+    }
 }
 
 /// What the person typed during the meeting, if anything. The heading and the
@@ -542,7 +679,10 @@ mod tests {
             std::fs::write(dir.join("summary.md"), "## Summary\n\ncached").unwrap();
 
             // Returns the cache without touching the model, which isn't present.
-            assert_eq!(write_notes(id, false).unwrap(), "## Summary\n\ncached");
+            assert_eq!(
+                write_notes(id, crate::chat::Template::General, false).unwrap(),
+                "## Summary\n\ncached"
+            );
             assert!(list_meetings()[0].has_notes);
         });
     }
@@ -559,11 +699,83 @@ mod tests {
     }
 
     #[test]
+    fn search_matches_title_transcript_and_notes() {
+        with_temp_home(|_| {
+            let standup = seed_meeting("20260724-100000-standup");
+            std::fs::write(standup.join("notes.md"), "# Standup\n\n_Written 2026-07-24 22:37_\n\nship the roadmap Friday\n").unwrap();
+
+            let kickoff = seed_meeting("20260724-110000-kickoff");
+            std::fs::write(kickoff.join("transcript.md"), "# Kickoff\n\n## Transcript\n\nwelcome aboard\n").unwrap();
+            std::fs::write(kickoff.join("summary.md"), "## Summary\n\nAgreed on the budget\n").unwrap();
+
+            let lecture = seed_meeting("20260724-120000-lecture");
+            std::fs::write(lecture.join("transcript.md"), "# Lecture\n\n## Transcript\n\nquietly listening\n").unwrap();
+
+            // Title match, case-insensitive.
+            assert_eq!(search_meetings("kickoff").len(), 1);
+            // Typed-notes content match.
+            let by_notes = search_meetings("roadmap");
+            assert_eq!(by_notes.len(), 1);
+            assert_eq!(by_notes[0].id, "20260724-100000-standup");
+            // Model summary content match.
+            let by_summary = search_meetings("budget");
+            assert_eq!(by_summary.len(), 1);
+            assert_eq!(by_summary[0].id, "20260724-110000-kickoff");
+            // Transcript body content match.
+            let by_transcript = search_meetings("Quietly Listening");
+            assert_eq!(by_transcript.len(), 1);
+            assert_eq!(by_transcript[0].id, "20260724-120000-lecture");
+            // No match anywhere.
+            assert!(search_meetings("nonexistent query").is_empty());
+            // Blank query behaves like list_meetings.
+            assert_eq!(search_meetings("   ").len(), 3);
+        });
+    }
+
+    #[test]
     fn recovers_title_from_slug() {
         assert_eq!(
             title_from_slug("20260724-103300-acme-discovery").as_deref(),
             Some("Acme discovery")
         );
         assert_eq!(title_from_slug("20260724-103300"), None);
+    }
+
+    #[test]
+    fn sanitizes_titles_into_filenames() {
+        assert_eq!(sanitize_filename("Acme: Q3 / Discovery"), "Acme- Q3 - Discovery");
+        assert_eq!(sanitize_filename("  ../../etc  "), "etc");
+        assert_eq!(sanitize_filename("::://"), "meeting");
+    }
+
+    #[test]
+    fn export_bundles_notes_and_transcript_into_downloads() {
+        with_temp_home(|home| {
+            let id = "20260724-103300-standup";
+            let dir = seed_meeting(id);
+            std::fs::write(dir.join("summary.md"), "## Summary\n\nShipped the export feature.").unwrap();
+
+            let dest = export_meeting(id).unwrap();
+            let expected_dir = home
+                .join("Downloads")
+                .join("Oatmeal Exports")
+                .join("Standup-2026-07-24");
+            assert_eq!(dest, expected_dir.display().to_string());
+
+            let md = std::fs::read_to_string(expected_dir.join("Standup.md")).unwrap();
+            assert!(md.starts_with("# Standup\n"), "got: {md:?}");
+            assert!(md.contains("Shipped the export feature."));
+            assert!(md.contains("hi"), "transcript body should be bundled too");
+        });
+    }
+
+    #[test]
+    fn export_fails_when_there_is_nothing_to_share() {
+        with_temp_home(|_| {
+            let id = "20260724-103300-empty";
+            let dir = recordings_root().join(id);
+            std::fs::create_dir_all(&dir).unwrap();
+            assert!(export_meeting(id).is_err());
+        });
     }
 }
