@@ -57,6 +57,7 @@ const noteTitle = $('noteTitle')
 const noteBody = $('noteBody')
 const chipWhen = $('chipWhen')
 const chipDelete = $('chipDelete')
+const tmplChips = $('tmplChips')
 const tabNotes = $('tabNotes')
 const tabRaw = $('tabRaw')
 const answersEl = $('answers')
@@ -67,6 +68,13 @@ const askSend = $('askSend')
 const DRAFT_KEY = 'oatmeal.draft'
 const INTRO_KEY = 'oatmeal.introSeen'
 const SUGGESTIONS = ['What did I miss?', 'What are the action items?', 'Summarize the decisions', 'What should I follow up on?']
+// Matches chat::Template on the Rust side, serialized snake_case.
+const TEMPLATES = [
+  { id: 'general', label: 'General' },
+  { id: 'standup', label: 'Standup' },
+  { id: 'one_on_one', label: '1:1' },
+  { id: 'interview', label: 'Interview' },
+]
 
 let recording = false
 let busy = false
@@ -491,7 +499,32 @@ async function openNote(id) {
   if (!m) return
   noteTitle.value = m.title
   chipWhen.textContent = [fmtWhen(new Date(m.started_at)), fmtDuration(m.duration_secs)].filter(Boolean).join(' · ')
+  renderTemplateChips()
   setTab('notes')
+}
+
+/// Which shape of notes to write, remembered per meeting in `meta.json` once
+/// generated. Picking a different template on a meeting that already has notes
+/// regenerates them; picking one before the first generation just selects it.
+function renderTemplateChips() {
+  const m = currentMeeting()
+  tmplChips.innerHTML = ''
+  if (!m || !m.transcribed) return
+  const current = m.template || 'general'
+  for (const t of TEMPLATES) {
+    const b = document.createElement('button')
+    b.className = 'chip act' + (t.id === current ? ' sel' : '')
+    b.textContent = t.label
+    b.addEventListener('click', () => selectTemplate(m, t.id))
+    tmplChips.appendChild(b)
+  }
+}
+
+async function selectTemplate(m, id) {
+  if (id === (m.template || 'general')) return
+  m.template = id
+  renderTemplateChips()
+  if (m.has_notes) await renderNotes(true, true)
 }
 
 function setTab(tab) {
@@ -557,7 +590,7 @@ async function renderTranscript() {
   }
 }
 
-async function renderNotes(force = false) {
+async function renderNotes(force = false, regenerate = false) {
   const m = currentMeeting()
   if (!m) return
 
@@ -591,7 +624,7 @@ async function renderNotes(force = false) {
   setModelChip('busy', 'Writing notes…')
   const asked = m.id
   try {
-    const md = await invoke('write_notes', { id: m.id, force: false })
+    const md = await invoke('write_notes', { id: m.id, template: m.template || 'general', force: regenerate })
     m.has_notes = true
     renderSidebar()
     renderNotesList()

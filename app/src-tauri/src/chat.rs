@@ -14,6 +14,8 @@ use std::num::NonZeroU32;
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 
+use serde::{Deserialize, Serialize};
+
 use llama_cpp_2::context::params::LlamaContextParams;
 use llama_cpp_2::llama_backend::LlamaBackend;
 use llama_cpp_2::llama_batch::LlamaBatch;
@@ -227,13 +229,84 @@ You are condensing one part of a long transcript so it can be summarized as a wh
 Capture every substantive point, decision, name, number and commitment in compact prose. \
 Do not editorialize and do not add a preamble.";
 
-/// Write structured notes for a finished transcript.
+const STANDUP_SYSTEM: &str = "\
+You write standup notes from a raw meeting transcript. The transcript comes from automatic \
+speech recognition, so it contains errors, false starts and no speaker labels — read through \
+them and work out who is speaking from context.
+
+Write in Markdown. For each person who gave an update, add a '## ' heading with their name \
+(or 'Speaker' plus a number if a name never comes up) and '- ' bullets for what they did \
+yesterday, what they're doing today, and any blockers — omit a bullet if the transcript didn't \
+cover it. Close with a 'Blockers' section listing every blocker again in one place, or say \
+there were none.
+
+Be faithful to the transcript. Never invent names, numbers, dates or commitments that are \
+not there. If the transcript is too short or too garbled to summarize, say so plainly in \
+one sentence and stop.";
+
+const ONE_ON_ONE_SYSTEM: &str = "\
+You write notes from a 1:1 meeting transcript. The transcript comes from automatic speech \
+recognition, so it contains errors, false starts and no speaker labels — read through them \
+and write what was actually meant.
+
+Write in Markdown. Open with a one-paragraph summary of how the conversation went. Then, only \
+where the material supports them, add sections: talking points, feedback given, and \
+follow-ups (commitments either person made for next time). Use '## ' headings and '- ' \
+bullets.
+
+Be faithful to the transcript. Never invent names, numbers, dates or commitments that are \
+not there. If the transcript is too short or too garbled to summarize, say so plainly in \
+one sentence and stop.";
+
+const INTERVIEW_SYSTEM: &str = "\
+You write interview debrief notes from a raw transcript. The transcript comes from automatic \
+speech recognition, so it contains errors, false starts and no speaker labels — read through \
+them and distinguish interviewer from candidate by context.
+
+Write in Markdown. Open with a one-paragraph summary of the candidate's overall signal. Then, \
+only where the material supports them, add sections: strengths, concerns, and a \
+recommendation (hire, no hire, or more signal needed, with the reasoning in one or two \
+sentences). Use '## ' headings and '- ' bullets.
+
+Be faithful to the transcript. Never invent names, numbers, dates or claims that are not \
+there. If the transcript is too short or too garbled to assess, say so plainly in one \
+sentence and stop.";
+
+/// Which shape of notes to write. `General` reproduces the original fixed
+/// format; the others match the system prompt to the kind of meeting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Template {
+    General,
+    Standup,
+    OneOnOne,
+    Interview,
+}
+
+impl Default for Template {
+    fn default() -> Self {
+        Template::General
+    }
+}
+
+impl Template {
+    fn system_prompt(self) -> &'static str {
+        match self {
+            Template::General => NOTES_SYSTEM,
+            Template::Standup => STANDUP_SYSTEM,
+            Template::OneOnOne => ONE_ON_ONE_SYSTEM,
+            Template::Interview => INTERVIEW_SYSTEM,
+        }
+    }
+}
+
+/// Write structured notes for a finished transcript, shaped by `template`.
 ///
 /// Long transcripts exceed the context window, so they're condensed in passes:
 /// each chunk is summarized on its own, then the summaries are written up
 /// together. This is lossier than a single pass but degrades gracefully, which
 /// matters for a two-hour lecture.
-pub fn write_notes(model_path: &Path, transcript: &str) -> Result<String, String> {
+pub fn write_notes(model_path: &Path, transcript: &str, template: Template) -> Result<String, String> {
     let transcript = transcript.trim();
     if transcript.split_whitespace().count() < 20 {
         return Err("transcript is too short to summarize".into());
@@ -241,7 +314,7 @@ pub fn write_notes(model_path: &Path, transcript: &str) -> Result<String, String
 
     let budget = (N_CTX as usize - 1500) * CHARS_PER_TOKEN;
     if transcript.len() <= budget {
-        return complete(model_path, NOTES_SYSTEM, transcript);
+        return complete(model_path, template.system_prompt(), transcript);
     }
 
     let chunks = split_into_chunks(transcript, budget);
@@ -250,7 +323,7 @@ pub fn write_notes(model_path: &Path, transcript: &str) -> Result<String, String
         let part = complete(model_path, CHUNK_SYSTEM, chunk)?;
         condensed.push_str(&format!("\n\n--- part {} ---\n{}", i + 1, part));
     }
-    complete(model_path, NOTES_SYSTEM, condensed.trim())
+    complete(model_path, template.system_prompt(), condensed.trim())
 }
 
 /// Answer a question about a transcript, streaming the reply as it is generated.
@@ -367,7 +440,7 @@ mod tests {
 
     #[test]
     fn refuses_transcripts_with_nothing_in_them() {
-        let err = write_notes(Path::new("/nonexistent"), "um, so, yeah").unwrap_err();
+        let err = write_notes(Path::new("/nonexistent"), "um, so, yeah", Template::General).unwrap_err();
         assert!(err.contains("too short"), "got: {err}");
     }
 }
