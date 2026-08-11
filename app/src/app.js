@@ -74,6 +74,13 @@ let tick = null
 let startedAt = 0
 let meetings = []
 let filter = ''
+/// Content search results (title + transcript + notes) for the current
+/// `filter`, or null while none has come back yet — `visibleMeetings()` falls
+/// back to a title-only match until it does, so typing never shows an empty
+/// list while the backend scan is in flight.
+let searchResults = null
+let searchTimer = null
+let searchSeq = 0
 let openId = null
 let noteTab = 'notes'
 let liveLines = []
@@ -376,8 +383,29 @@ function fmtWhen(date) {
 
 function visibleMeetings() {
   if (!filter) return meetings
+  if (searchResults) {
+    const ids = new Set(searchResults.map((m) => m.id))
+    return meetings.filter((m) => ids.has(m.id))
+  }
   const q = filter.toLowerCase()
   return meetings.filter((m) => m.title.toLowerCase().includes(q))
+}
+
+/// Runs `filter` against transcript and notes content too, not just titles.
+/// Debounced so a full scan doesn't happen on every keystroke.
+async function runSearch() {
+  const q = filter
+  const seq = ++searchSeq
+  let results
+  try {
+    results = await invoke('search_meetings', { query: q })
+  } catch {
+    return
+  }
+  if (seq !== searchSeq || q !== filter) return
+  searchResults = results
+  renderSidebar()
+  renderNotesList()
 }
 
 function renderSidebar() {
@@ -429,7 +457,14 @@ async function loadMeetings() {
   renderNotesList()
 }
 
-searchEl.addEventListener('input', () => { filter = searchEl.value.trim(); renderSidebar(); renderNotesList() })
+searchEl.addEventListener('input', () => {
+  filter = searchEl.value.trim()
+  searchResults = null
+  renderSidebar()
+  renderNotesList()
+  clearTimeout(searchTimer)
+  if (filter) searchTimer = setTimeout(runSearch, 150)
+})
 navHome.addEventListener('click', showHome)
 navSettings.addEventListener('click', showSettings)
 newNoteBtn.addEventListener('click', showDraft)

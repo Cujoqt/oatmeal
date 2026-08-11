@@ -449,6 +449,13 @@ fn list_meetings() -> Vec<library::Meeting> {
     library::list_meetings()
 }
 
+/// Meetings matching `query` against title, transcript, or notes — the
+/// sidebar's full-text search. Same cost as `list_meetings`, just filtered.
+#[tauri::command]
+fn search_meetings(query: String) -> Vec<library::Meeting> {
+    library::search_meetings(&query)
+}
+
 // ── Local language model — notes and recaps ─────────────────────────────────
 
 /// Ensure the chat model is downloaded. Separate from `ensure_model` because
@@ -618,6 +625,7 @@ pub fn run() {
             is_session_active,
             session_elapsed_ms,
             list_meetings,
+            search_meetings,
             live_lines,
             save_notes,
             set_transcript_window_visible,

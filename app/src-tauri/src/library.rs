@@ -121,6 +121,33 @@ fn read_meeting(dir: &Path, name: &str) -> Meeting {
     }
 }
 
+/// Meetings whose title, transcript, or notes contain `query` (case-insensitive
+/// substring). There's no index — one person's worth of meetings is cheap
+/// enough to grep on every keystroke.
+pub fn search_meetings(query: &str) -> Vec<Meeting> {
+    let q = query.trim().to_lowercase();
+    if q.is_empty() {
+        return list_meetings();
+    }
+    list_meetings()
+        .into_iter()
+        .filter(|m| meeting_matches(m, &q))
+        .collect()
+}
+
+/// Whether a meeting's title or on-disk content (transcript, typed notes, or
+/// the model's summary) contains `q`. `q` must already be lowercased.
+fn meeting_matches(m: &Meeting, q: &str) -> bool {
+    if m.title.to_lowercase().contains(q) {
+        return true;
+    }
+    let dir = Path::new(&m.dir);
+    ["transcript.md", TYPED_NOTES, SUMMARY]
+        .iter()
+        .filter_map(|file| std::fs::read_to_string(dir.join(file)).ok())
+        .any(|text| text.to_lowercase().contains(q))
+}
+
 /// `YYYYMMDD-HHMMSS[-slug]` → `YYYY-MM-DDTHH:MM:SS`, or None if the prefix
 /// isn't a timestamp.
 fn parse_stamp(name: &str) -> Option<String> {
@@ -556,6 +583,40 @@ mod tests {
                 "expected {bad:?} to be rejected"
             );
         }
+    }
+
+    #[test]
+    fn search_matches_title_transcript_and_notes() {
+        with_temp_home(|_| {
+            let standup = seed_meeting("20260724-100000-standup");
+            std::fs::write(standup.join("notes.md"), "# Standup\n\n_Written 2026-07-24 22:37_\n\nship the roadmap Friday\n").unwrap();
+
+            let kickoff = seed_meeting("20260724-110000-kickoff");
+            std::fs::write(kickoff.join("transcript.md"), "# Kickoff\n\n## Transcript\n\nwelcome aboard\n").unwrap();
+            std::fs::write(kickoff.join("summary.md"), "## Summary\n\nAgreed on the budget\n").unwrap();
+
+            let lecture = seed_meeting("20260724-120000-lecture");
+            std::fs::write(lecture.join("transcript.md"), "# Lecture\n\n## Transcript\n\nquietly listening\n").unwrap();
+
+            // Title match, case-insensitive.
+            assert_eq!(search_meetings("kickoff").len(), 1);
+            // Typed-notes content match.
+            let by_notes = search_meetings("roadmap");
+            assert_eq!(by_notes.len(), 1);
+            assert_eq!(by_notes[0].id, "20260724-100000-standup");
+            // Model summary content match.
+            let by_summary = search_meetings("budget");
+            assert_eq!(by_summary.len(), 1);
+            assert_eq!(by_summary[0].id, "20260724-110000-kickoff");
+            // Transcript body content match.
+            let by_transcript = search_meetings("Quietly Listening");
+            assert_eq!(by_transcript.len(), 1);
+            assert_eq!(by_transcript[0].id, "20260724-120000-lecture");
+            // No match anywhere.
+            assert!(search_meetings("nonexistent query").is_empty());
+            // Blank query behaves like list_meetings.
+            assert_eq!(search_meetings("   ").len(), 3);
+        });
     }
 
     #[test]
