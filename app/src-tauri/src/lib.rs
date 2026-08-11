@@ -530,6 +530,24 @@ fn ask_meeting(
     })
 }
 
+/// Draft a follow-up message from a meeting's notes — text for the user to copy
+/// and send themselves; Oatmeal never sends it anywhere.
+#[tauri::command]
+fn draft_followup(app: tauri::AppHandle, id: String) -> Result<String, String> {
+    let notes = library::followup_source(&id)?;
+    let path = model::ensure_chat_model()?;
+    // Stream the draft as it is generated, same as `ask_meeting`.
+    use tauri::Emitter;
+    let mut seq = 0u32;
+    chat::draft_followup(&path, &notes, &mut |piece| {
+        seq += 1;
+        let _ = app.emit(
+            CHAT_TOKEN_EVENT,
+            serde_json::json!({ "seq": seq, "text": piece }),
+        );
+    })
+}
+
 /// Free the chat model's memory.
 #[tauri::command]
 fn unload_chat_model() {
@@ -649,6 +667,7 @@ pub fn run() {
             meeting_segments,
             meeting_typed_notes,
             ask_meeting,
+            draft_followup,
             unload_chat_model,
             rename_meeting,
             delete_meeting,

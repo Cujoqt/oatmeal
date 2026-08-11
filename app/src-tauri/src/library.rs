@@ -437,6 +437,24 @@ pub fn write_notes(id: &str, force: bool) -> Result<String, String> {
     Ok(notes)
 }
 
+/// Text to draft a follow-up message from: the AI-written summary (generating
+/// it if this is the first time it's been asked for), falling back to what the
+/// user typed by hand if there's no transcript to summarize. Never the raw
+/// transcript — a follow-up should read like the notes, not the ASR output.
+pub fn followup_source(id: &str) -> Result<String, String> {
+    match write_notes(id, false) {
+        Ok(notes) => Ok(notes),
+        Err(_) => {
+            let typed = typed_notes(id)?;
+            if typed.trim().is_empty() {
+                Err("this meeting has no notes yet".into())
+            } else {
+                Ok(typed)
+            }
+        }
+    }
+}
+
 /// What the person typed during the meeting, if anything. The heading and the
 /// `_Written …_` stamp are dropped: the note view has its own title and date.
 pub fn typed_notes(id: &str) -> Result<String, String> {
