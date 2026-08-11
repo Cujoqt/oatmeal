@@ -543,6 +543,19 @@ fn delete_meeting(id: String) -> Result<String, String> {
     library::delete_meeting(&id)
 }
 
+/// Bundle a meeting's notes and transcript into a Markdown file under
+/// `~/Downloads/Oatmeal Exports/` and reveal it in Finder, so it can be shared
+/// without touching the app's own recordings folder.
+#[tauri::command]
+fn export_meeting(id: String) -> Result<String, String> {
+    let dest = library::export_meeting(&id)?;
+    std::process::Command::new("open")
+        .arg(&dest)
+        .status()
+        .map_err(|e| format!("reveal export in Finder: {e}"))?;
+    Ok(dest)
+}
+
 // ── settings + calendar ──────────────────────────────────────────────────────
 
 /// The editable settings: what the app should call you, and how transcription
@@ -631,6 +644,7 @@ pub fn run() {
             unload_chat_model,
             rename_meeting,
             delete_meeting,
+            export_meeting,
             get_settings,
             save_settings,
             calendar_authorized,

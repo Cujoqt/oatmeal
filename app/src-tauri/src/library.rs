@@ -241,6 +241,77 @@ pub fn delete_meeting(id: &str) -> Result<String, String> {
     Ok(dest.display().to_string())
 }
 
+/// Replace characters that can't survive in a filename with `-`, trim the
+/// result, and fall back to a fixed name if nothing usable is left.
+fn sanitize_filename(name: &str) -> String {
+    let cleaned: String = name
+        .chars()
+        .map(|c| if c.is_alphanumeric() || c == ' ' || c == '-' || c == '_' { c } else { '-' })
+        .collect();
+    let trimmed = cleaned.trim().trim_matches('-').trim();
+    if trimmed.is_empty() { "meeting".to_string() } else { trimmed.to_string() }
+}
+
+/// Bundle a meeting's write-up and transcript into one shareable Markdown file
+/// under `~/Downloads/Oatmeal Exports/<title>-<date>/`, and return that folder's
+/// path. A meeting with nothing written up or transcribed yet has nothing worth
+/// sharing, so that's an error rather than an empty file.
+pub fn export_meeting(id: &str) -> Result<String, String> {
+    let dir = meeting_dir(id)?;
+    let meeting = read_meeting(&dir, id);
+
+    let mut body = format!("# {}\n\n", meeting.title);
+    let mut has_content = false;
+
+    if let Ok(notes) = std::fs::read_to_string(dir.join(SUMMARY)) {
+        if !notes.trim().is_empty() {
+            body.push_str("## Notes\n\n");
+            body.push_str(notes.trim());
+            body.push_str("\n\n");
+            has_content = true;
+        }
+    }
+    if let Ok(typed) = typed_notes(id) {
+        if !typed.is_empty() {
+            body.push_str("## Your notes\n\n");
+            body.push_str(&typed);
+            body.push_str("\n\n");
+            has_content = true;
+        }
+    }
+    if let Ok(transcript) = transcript_text(id) {
+        if !transcript.is_empty() {
+            body.push_str("## Transcript\n\n");
+            body.push_str(&transcript);
+            body.push('\n');
+            has_content = true;
+        }
+    }
+    if !has_content {
+        return Err("this meeting has nothing to export yet".into());
+    }
+
+    let date = meeting.started_at.get(..10).unwrap_or("");
+    let folder_name = if date.is_empty() {
+        sanitize_filename(&meeting.title)
+    } else {
+        format!("{}-{date}", sanitize_filename(&meeting.title))
+    };
+
+    let home = std::env::var("HOME").map_err(|_| "no HOME set".to_string())?;
+    let dest_dir = Path::new(&home)
+        .join("Downloads")
+        .join("Oatmeal Exports")
+        .join(folder_name);
+    std::fs::create_dir_all(&dest_dir)
+        .map_err(|e| format!("create {}: {e}", dest_dir.display()))?;
+
+    let dest_file = dest_dir.join(format!("{}.md", sanitize_filename(&meeting.title)));
+    std::fs::write(&dest_file, body).map_err(|e| format!("write {}: {e}", dest_file.display()))?;
+
+    Ok(dest_dir.display().to_string())
+}
+
 /// The transcript's spoken text, with the markdown scaffolding and timestamps
 /// stripped — what the language model should actually read.
 pub fn transcript_text(id: &str) -> Result<String, String> {
@@ -565,5 +636,43 @@ mod tests {
             Some("Acme discovery")
         );
         assert_eq!(title_from_slug("20260724-103300"), None);
+    }
+
+    #[test]
+    fn sanitizes_titles_into_filenames() {
+        assert_eq!(sanitize_filename("Acme: Q3 / Discovery"), "Acme- Q3 - Discovery");
+        assert_eq!(sanitize_filename("  ../../etc  "), "etc");
+        assert_eq!(sanitize_filename("::://"), "meeting");
+    }
+
+    #[test]
+    fn export_bundles_notes_and_transcript_into_downloads() {
+        with_temp_home(|home| {
+            let id = "20260724-103300-standup";
+            let dir = seed_meeting(id);
+            std::fs::write(dir.join("summary.md"), "## Summary\n\nShipped the export feature.").unwrap();
+
+            let dest = export_meeting(id).unwrap();
+            let expected_dir = home
+                .join("Downloads")
+                .join("Oatmeal Exports")
+                .join("Standup-2026-07-24");
+            assert_eq!(dest, expected_dir.display().to_string());
+
+            let md = std::fs::read_to_string(expected_dir.join("Standup.md")).unwrap();
+            assert!(md.starts_with("# Standup\n"), "got: {md:?}");
+            assert!(md.contains("Shipped the export feature."));
+            assert!(md.contains("hi"), "transcript body should be bundled too");
+        });
+    }
+
+    #[test]
+    fn export_fails_when_there_is_nothing_to_share() {
+        with_temp_home(|_| {
+            let id = "20260724-103300-empty";
+            let dir = recordings_root().join(id);
+            std::fs::create_dir_all(&dir).unwrap();
+            assert!(export_meeting(id).is_err());
+        });
     }
 }
