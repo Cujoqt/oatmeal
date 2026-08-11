@@ -227,6 +227,15 @@ You are condensing one part of a long transcript so it can be summarized as a wh
 Capture every substantive point, decision, name, number and commitment in compact prose. \
 Do not editorialize and do not add a preamble.";
 
+const FOLLOWUP_SYSTEM: &str = "\
+You write a brief, friendly follow-up message summarizing what was discussed and any next \
+steps, suitable to paste into an email or chat message. Do not invent facts not present in \
+the notes you're given.
+
+Plain prose, not Markdown — no headings or bullet asterisks. A short paragraph or two is \
+enough; add a plain list of next steps only if the notes name any. No subject line, and no \
+greeting or sign-off naming a specific person unless the notes do.";
+
 /// Write structured notes for a finished transcript.
 ///
 /// Long transcripts exceed the context window, so they're condensed in passes:
@@ -271,6 +280,25 @@ pub fn recap(
 
     let user = format!("Transcript:\n{context}\n\nQuestion: {question}");
     complete_streaming(model_path, RECAP_SYSTEM, &user, on_token)
+}
+
+/// Draft a follow-up message from a meeting's notes, streaming the reply as it
+/// is generated. Takes notes rather than the transcript — the source is already
+/// a human-readable write-up, not raw ASR output.
+pub fn draft_followup(
+    model_path: &Path,
+    notes: &str,
+    on_token: &mut dyn FnMut(&str),
+) -> Result<String, String> {
+    let notes = notes.trim();
+    if notes.is_empty() {
+        return Err("this meeting has no notes yet".into());
+    }
+    let budget = (N_CTX as usize - 500) * CHARS_PER_TOKEN;
+    let context = tail(notes, budget);
+
+    let user = format!("Meeting notes:\n{context}");
+    complete_streaming(model_path, FOLLOWUP_SYSTEM, &user, on_token)
 }
 
 /// The last `budget` bytes of `text`, snapped forward to a character boundary.

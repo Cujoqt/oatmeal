@@ -379,6 +379,11 @@
     .qa .q::before { content: "›"; color: var(--accent); }
     .qa .a { font-size: 14.5px; line-height: 1.7; color: var(--ink-soft); }
     .qa .a.thinking { color: var(--faint); font-style: italic; }
+    .qa .copy {
+      margin-top: 8px; border: 1px solid var(--line-2); background: transparent; color: var(--muted);
+      border-radius: 14px; padding: 4px 11px; font: 500 12px var(--sans); cursor: pointer;
+    }
+    .qa .copy:hover { border-color: var(--accent); color: var(--accent); }
 
     /* ── sidebar collapse ──────────────────────────────────────────────────*/
     #railToggle {
@@ -704,6 +709,10 @@
               <button id="tabRaw">Transcript</button>
             </div>
             <span class="chip" id="chipWhen"></span>
+            <button class="chip act" id="draftFollowup" title="Draft a follow-up message">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 11l19-9-9 19-2-8-8-2z" /></svg>
+              Draft follow-up
+            </button>
             <button class="chip act danger" id="chipDelete" title="Move to Trash">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M9.5 7V5.2A1.2 1.2 0 0 1 10.7 4h2.6a1.2 1.2 0 0 1 1.2 1.2V7M6.5 7l.8 12a1.6 1.6 0 0 0 1.6 1.5h6.2a1.6 1.6 0 0 0 1.6-1.5l.8-12" /></svg>
               Delete
