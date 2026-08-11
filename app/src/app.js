@@ -57,7 +57,7 @@ const noteTitle = $('noteTitle')
 const noteBody = $('noteBody')
 const chipWhen = $('chipWhen')
 const chipExport = $('chipExport')
-const draftFollowupBtn = $('draftFollowup')
+const chipFollowup = $('chipFollowup')
 const chipDelete = $('chipDelete')
 const tmplChips = $('tmplChips')
 const tabNotes = $('tabNotes')
@@ -769,91 +769,66 @@ async function ask() {
   const question = askInput.value.trim()
   if (!m || !question) return
   askInput.value = ''
-  askSend.disabled = true
-  draftFollowupBtn.disabled = true
+  await runChat(question, 'Thinking…', () => invoke('ask_meeting', { id: m.id, question }))
+}
 
+/// Draft a follow-up message from this meeting's notes, into the same answers
+/// list an ask writes to. Sending it is the user's job — Oatmeal never sends
+/// anything itself — so a finished draft gets a copy button.
+async function draftFollowup() {
+  const m = currentMeeting()
+  if (!m) return
+  const a = await runChat('Follow-up draft', 'Drafting…', () => invoke('draft_followup', { id: m.id }))
+  if (!a) return
+  const copy = document.createElement('button')
+  copy.className = 'copy'
+  copy.textContent = 'Copy'
+  copy.addEventListener('click', () => {
+    navigator.clipboard.writeText(a.textContent)
+    copy.textContent = 'Copied'
+    setTimeout(() => { copy.textContent = 'Copy' }, 1500)
+  })
+  a.after(copy)
+}
+
+/// Add a prompt and its pending answer to the list, run `generate` against the
+/// local model with the chat controls disabled, and stream the reply into the
+/// answer. Returns the answer element, or null if the model failed.
+async function runChat(prompt, pending, generate) {
   const qa = document.createElement('div')
   qa.className = 'qa'
   const q = document.createElement('div')
   q.className = 'q'
-  q.textContent = question
+  q.textContent = prompt
   const a = document.createElement('div')
   a.className = 'a thinking'
-  a.textContent = 'Thinking…'
+  a.textContent = pending
   qa.append(q, a)
   answersEl.appendChild(qa)
   qa.scrollIntoView({ behavior: 'smooth', block: 'end' })
 
-  streamingAnswer = a
-  setModelChip('busy', 'Thinking…')
-  try {
-    const answer = await invoke('ask_meeting', { id: m.id, question })
-    a.classList.remove('thinking')
-    // The returned string is authoritative: it also covers any event that was
-    // dropped while the window was busy.
-    a.textContent = answer
-  } catch (e) {
-    a.classList.remove('thinking')
-    a.textContent = String(e)
-  } finally {
-    streamingAnswer = null
-    askSend.disabled = false
-    draftFollowupBtn.disabled = false
-    refreshModelChip()
-  }
-}
-
-/// Draft a follow-up message from this meeting's notes and drop it into the
-/// answers list, same streaming pattern as `ask()`. Copying it is the user's
-/// job — Oatmeal never sends anything itself.
-async function draftFollowUp() {
-  const m = currentMeeting()
-  if (!m) return
   askSend.disabled = true
-  draftFollowupBtn.disabled = true
-
-  const qa = document.createElement('div')
-  qa.className = 'qa'
-  const q = document.createElement('div')
-  q.className = 'q'
-  q.textContent = 'Follow-up draft'
-  const a = document.createElement('div')
-  a.className = 'a thinking'
-  a.textContent = 'Drafting…'
-  const copyBtn = document.createElement('button')
-  copyBtn.className = 'copy'
-  copyBtn.textContent = 'Copy'
-  copyBtn.hidden = true
-  copyBtn.addEventListener('click', () => {
-    navigator.clipboard.writeText(a.textContent)
-    copyBtn.textContent = 'Copied'
-    setTimeout(() => { copyBtn.textContent = 'Copy' }, 1500)
-  })
-  qa.append(q, a, copyBtn)
-  answersEl.appendChild(qa)
-  qa.scrollIntoView({ behavior: 'smooth', block: 'end' })
-
+  chipFollowup.disabled = true
   streamingAnswer = a
-  setModelChip('busy', 'Drafting…')
+  setModelChip('busy', pending)
   try {
-    const draft = await invoke('draft_followup', { id: m.id })
-    a.classList.remove('thinking')
     // The returned string is authoritative: it also covers any event that was
     // dropped while the window was busy.
-    a.textContent = draft
-    copyBtn.hidden = false
+    a.textContent = await generate()
+    return a
   } catch (e) {
-    a.classList.remove('thinking')
     a.textContent = String(e)
+    return null
   } finally {
+    a.classList.remove('thinking')
     streamingAnswer = null
     askSend.disabled = false
-    draftFollowupBtn.disabled = false
+    chipFollowup.disabled = false
     refreshModelChip()
   }
 }
 
-draftFollowupBtn.addEventListener('click', () => draftFollowUp())
+chipFollowup.addEventListener('click', draftFollowup)
 
 // ── local model status ───────────────────────────────────────────────────────
 

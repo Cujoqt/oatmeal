@@ -120,7 +120,7 @@ fn read_meeting(dir: &Path, name: &str) -> Meeting {
         duration_secs,
         transcribed,
         has_notes: has_summary(dir),
-        template: meta_template(&dir.join("meta.json")).unwrap_or_default(),
+        template: meta_template(dir).unwrap_or_default(),
         dir: dir.display().to_string(),
     }
 }
@@ -205,10 +205,8 @@ fn meta_title(path: &Path) -> Option<String> {
 }
 
 /// The template notes were last generated with, if any were ever generated.
-fn meta_template(path: &Path) -> Option<crate::chat::Template> {
-    let text = std::fs::read_to_string(path).ok()?;
-    let meta: serde_json::Value = serde_json::from_str(&text).ok()?;
-    serde_json::from_value(meta.get("template")?.clone()).ok()
+fn meta_template(dir: &Path) -> Option<crate::chat::Template> {
+    serde_json::from_value(read_meta(dir).get("template")?.clone()).ok()
 }
 
 /// Read `meta.json` as a JSON object, or an empty one if it doesn't exist or
@@ -314,43 +312,29 @@ pub fn export_meeting(id: &str) -> Result<String, String> {
     let dir = meeting_dir(id)?;
     let meeting = read_meeting(&dir, id);
 
+    let sections = [
+        ("Notes", std::fs::read_to_string(dir.join(SUMMARY)).unwrap_or_default()),
+        ("Your notes", typed_notes(id).unwrap_or_default()),
+        ("Transcript", transcript_text(id).unwrap_or_default()),
+    ];
+
     let mut body = format!("# {}\n\n", meeting.title);
     let mut has_content = false;
-
-    if let Ok(notes) = std::fs::read_to_string(dir.join(SUMMARY)) {
-        if !notes.trim().is_empty() {
-            body.push_str("## Notes\n\n");
-            body.push_str(notes.trim());
-            body.push_str("\n\n");
-            has_content = true;
+    for (heading, text) in &sections {
+        let text = text.trim();
+        if text.is_empty() {
+            continue;
         }
-    }
-    if let Ok(typed) = typed_notes(id) {
-        if !typed.is_empty() {
-            body.push_str("## Your notes\n\n");
-            body.push_str(&typed);
-            body.push_str("\n\n");
-            has_content = true;
-        }
-    }
-    if let Ok(transcript) = transcript_text(id) {
-        if !transcript.is_empty() {
-            body.push_str("## Transcript\n\n");
-            body.push_str(&transcript);
-            body.push('\n');
-            has_content = true;
-        }
+        body.push_str(&format!("## {heading}\n\n{text}\n\n"));
+        has_content = true;
     }
     if !has_content {
         return Err("this meeting has nothing to export yet".into());
     }
 
+    let name = sanitize_filename(&meeting.title);
     let date = meeting.started_at.get(..10).unwrap_or("");
-    let folder_name = if date.is_empty() {
-        sanitize_filename(&meeting.title)
-    } else {
-        format!("{}-{date}", sanitize_filename(&meeting.title))
-    };
+    let folder_name = if date.is_empty() { name.clone() } else { format!("{name}-{date}") };
 
     let home = std::env::var("HOME").map_err(|_| "no HOME set".to_string())?;
     let dest_dir = Path::new(&home)
@@ -360,8 +344,9 @@ pub fn export_meeting(id: &str) -> Result<String, String> {
     std::fs::create_dir_all(&dest_dir)
         .map_err(|e| format!("create {}: {e}", dest_dir.display()))?;
 
-    let dest_file = dest_dir.join(format!("{}.md", sanitize_filename(&meeting.title)));
-    std::fs::write(&dest_file, body).map_err(|e| format!("write {}: {e}", dest_file.display()))?;
+    let dest_file = dest_dir.join(format!("{name}.md"));
+    std::fs::write(&dest_file, body.trim_end().to_string() + "\n")
+        .map_err(|e| format!("write {}: {e}", dest_file.display()))?;
 
     Ok(dest_dir.display().to_string())
 }
@@ -473,6 +458,10 @@ pub fn write_notes(id: &str, template: crate::chat::Template, force: bool) -> Re
 /// it if this is the first time it's been asked for), falling back to what the
 /// user typed by hand if there's no transcript to summarize. Never the raw
 /// transcript — a follow-up should read like the notes, not the ASR output.
+///
+/// The template only decides how notes are *written*, and a meeting that
+/// already has notes gets the cached copy back untouched, so the default is all
+/// this path can meaningfully ask for.
 pub fn followup_source(id: &str) -> Result<String, String> {
     match write_notes(id, crate::chat::Template::default(), false) {
         Ok(notes) => Ok(notes),

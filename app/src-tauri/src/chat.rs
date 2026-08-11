@@ -283,19 +283,14 @@ sentence and stop.";
 
 /// Which shape of notes to write. `General` reproduces the original fixed
 /// format; the others match the system prompt to the kind of meeting.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Template {
+    #[default]
     General,
     Standup,
     OneOnOne,
     Interview,
-}
-
-impl Default for Template {
-    fn default() -> Self {
-        Template::General
-    }
 }
 
 impl Template {

@@ -517,17 +517,22 @@ fn ask_meeting(
     };
 
     let path = model::ensure_chat_model()?;
-    // Stream the answer as it is generated: a local model takes seconds to write a
-    // paragraph, and a silent wait reads as a hang.
+    chat::recap(&path, &transcript, &question, &mut chat_token_sink(app))
+}
+
+/// Sink that forwards generated tokens to the window as they arrive: a local
+/// model takes seconds to write a paragraph, and a silent wait reads as a hang.
+/// `seq` lets the UI tell the first token from the rest.
+fn chat_token_sink(app: tauri::AppHandle) -> impl FnMut(&str) {
     use tauri::Emitter;
     let mut seq = 0u32;
-    chat::recap(&path, &transcript, &question, &mut |piece| {
+    move |piece: &str| {
         seq += 1;
         let _ = app.emit(
             CHAT_TOKEN_EVENT,
             serde_json::json!({ "seq": seq, "text": piece }),
         );
-    })
+    }
 }
 
 /// Draft a follow-up message from a meeting's notes — text for the user to copy
@@ -536,16 +541,7 @@ fn ask_meeting(
 fn draft_followup(app: tauri::AppHandle, id: String) -> Result<String, String> {
     let notes = library::followup_source(&id)?;
     let path = model::ensure_chat_model()?;
-    // Stream the draft as it is generated, same as `ask_meeting`.
-    use tauri::Emitter;
-    let mut seq = 0u32;
-    chat::draft_followup(&path, &notes, &mut |piece| {
-        seq += 1;
-        let _ = app.emit(
-            CHAT_TOKEN_EVENT,
-            serde_json::json!({ "seq": seq, "text": piece }),
-        );
-    })
+    chat::draft_followup(&path, &notes, &mut chat_token_sink(app))
 }
 
 /// Free the chat model's memory.
