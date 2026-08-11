@@ -487,8 +487,8 @@ fn meeting_segments(id: String) -> Result<Vec<library::TranscriptLine>, String> 
 /// Write structured notes for a past meeting and cache them next to the
 /// transcript, so reopening a note doesn't re-run the model.
 #[tauri::command]
-fn write_notes(id: String, force: bool) -> Result<String, String> {
-    library::write_notes(&id, force)
+fn write_notes(id: String, template: chat::Template, force: bool) -> Result<String, String> {
+    library::write_notes(&id, template, force)
 }
 
 /// Answer a question about a meeting. `id` empty means the meeting currently

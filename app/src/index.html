@@ -316,6 +316,8 @@
     .chip.sel { background: var(--key-bg); border-color: transparent; color: var(--ink); }
     .chip svg { width: 14px; height: 14px; }
     .chip.danger:hover { color: var(--danger); border-color: var(--danger); }
+    /* Transparent grouping element so its chip children lay out directly in the .chips row. */
+    .tmpl-chips { display: contents; }
 
     .seg-toggle { display: inline-flex; border: 1px solid var(--line-2); border-radius: 20px; overflow: hidden; }
     .seg-toggle button {
@@ -708,6 +710,7 @@
               </button>
               <button id="tabRaw">Transcript</button>
             </div>
+            <div class="tmpl-chips" id="tmplChips"></div>
             <span class="chip" id="chipWhen"></span>
             <button class="chip act" id="chipExport" title="Export as Markdown">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v10M8 10l4 4 4-4M5 18h14" /></svg>

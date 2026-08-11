@@ -29,6 +29,9 @@ pub struct Meeting {
     pub transcribed: bool,
     /// Whether the language model has already written notes for this meeting.
     pub has_notes: bool,
+    /// Which note template was used the last time notes were generated, so the
+    /// picker reopens on the same choice. Defaults when nothing is recorded yet.
+    pub template: crate::chat::Template,
     pub dir: String,
 }
 
@@ -117,6 +120,7 @@ fn read_meeting(dir: &Path, name: &str) -> Meeting {
         duration_secs,
         transcribed,
         has_notes: has_summary(dir),
+        template: meta_template(&dir.join("meta.json")).unwrap_or_default(),
         dir: dir.display().to_string(),
     }
 }
@@ -200,6 +204,30 @@ fn meta_title(path: &Path) -> Option<String> {
     (!title.is_empty()).then(|| title.to_string())
 }
 
+/// The template notes were last generated with, if any were ever generated.
+fn meta_template(path: &Path) -> Option<crate::chat::Template> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let meta: serde_json::Value = serde_json::from_str(&text).ok()?;
+    serde_json::from_value(meta.get("template")?.clone()).ok()
+}
+
+/// Read `meta.json` as a JSON object, or an empty one if it doesn't exist or
+/// isn't valid JSON. Every writer merges into this so fields it doesn't touch
+/// — a rename's title, a generation's chosen template — survive.
+fn read_meta(dir: &Path) -> serde_json::Map<String, serde_json::Value> {
+    std::fs::read_to_string(dir.join("meta.json"))
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default()
+}
+
+fn write_meta(dir: &Path, meta: &serde_json::Map<String, serde_json::Value>) -> Result<(), String> {
+    let path = dir.join("meta.json");
+    std::fs::write(&path, serde_json::Value::Object(meta.clone()).to_string())
+        .map_err(|e| format!("write {}: {e}", path.display()))
+}
+
 /// Resolve a meeting id (a folder name) to its directory, refusing anything
 /// that isn't a plain name directly under the recordings root. The id crosses
 /// the boundary from the UI, so `..` or an absolute path must not be able to
@@ -231,10 +259,9 @@ pub fn rename_meeting(id: &str, title: &str) -> Result<(), String> {
         return Err("a meeting needs a title".into());
     }
 
-    let meta = serde_json::json!({ "title": title });
-    let meta_path = dir.join("meta.json");
-    std::fs::write(&meta_path, meta.to_string())
-        .map_err(|e| format!("write {}: {e}", meta_path.display()))?;
+    let mut meta = read_meta(&dir);
+    meta.insert("title".into(), serde_json::Value::String(title.to_string()));
+    write_meta(&dir, &meta)?;
 
     let transcript = dir.join("transcript.md");
     if let Ok(text) = std::fs::read_to_string(&transcript) {
@@ -414,7 +441,7 @@ pub fn transcript_lines(id: &str) -> Result<Vec<TranscriptLine>, String> {
 ///
 /// This never touches `notes.md`: that file belongs to whoever was typing during
 /// the meeting.
-pub fn write_notes(id: &str, force: bool) -> Result<String, String> {
+pub fn write_notes(id: &str, template: crate::chat::Template, force: bool) -> Result<String, String> {
     let dir = meeting_dir(id)?;
     let summary_path = dir.join(SUMMARY);
     if !force {
@@ -430,10 +457,15 @@ pub fn write_notes(id: &str, force: bool) -> Result<String, String> {
 
     let transcript = transcript_text(id)?;
     let model = crate::model::ensure_chat_model()?;
-    let notes = crate::chat::write_notes(&model, &transcript)?;
+    let notes = crate::chat::write_notes(&model, &transcript, template)?;
 
     std::fs::write(&summary_path, &notes)
         .map_err(|e| format!("write {}: {e}", summary_path.display()))?;
+
+    let mut meta = read_meta(&dir);
+    meta.insert("template".into(), serde_json::to_value(template).unwrap());
+    write_meta(&dir, &meta)?;
+
     Ok(notes)
 }
 
@@ -442,7 +474,7 @@ pub fn write_notes(id: &str, force: bool) -> Result<String, String> {
 /// user typed by hand if there's no transcript to summarize. Never the raw
 /// transcript — a follow-up should read like the notes, not the ASR output.
 pub fn followup_source(id: &str) -> Result<String, String> {
-    match write_notes(id, false) {
+    match write_notes(id, crate::chat::Template::default(), false) {
         Ok(notes) => Ok(notes),
         Err(_) => {
             let typed = typed_notes(id)?;
@@ -658,7 +690,10 @@ mod tests {
             std::fs::write(dir.join("summary.md"), "## Summary\n\ncached").unwrap();
 
             // Returns the cache without touching the model, which isn't present.
-            assert_eq!(write_notes(id, false).unwrap(), "## Summary\n\ncached");
+            assert_eq!(
+                write_notes(id, crate::chat::Template::General, false).unwrap(),
+                "## Summary\n\ncached"
+            );
             assert!(list_meetings()[0].has_notes);
         });
     }
