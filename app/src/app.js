@@ -56,6 +56,7 @@ const viewNote = $('viewNote')
 const noteTitle = $('noteTitle')
 const noteBody = $('noteBody')
 const chipWhen = $('chipWhen')
+const chipExport = $('chipExport')
 const chipDelete = $('chipDelete')
 const tabNotes = $('tabNotes')
 const tabRaw = $('tabRaw')
@@ -666,6 +667,17 @@ async function commitTitle() {
     setStatus(String(e), true)
   }
 }
+
+chipExport.addEventListener('click', async () => {
+  const m = currentMeeting()
+  if (!m) return
+  try {
+    const dest = await invoke('export_meeting', { id: m.id })
+    setStatus(`Exported to ${dest}`)
+  } catch (e) {
+    setStatus(String(e), true)
+  }
+})
 
 chipDelete.addEventListener('click', async () => {
   const m = currentMeeting()
