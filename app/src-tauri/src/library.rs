@@ -82,6 +82,110 @@ pub fn list_meetings() -> Vec<Meeting> {
         .collect()
 }
 
+/// One folder of meetings, as reconstructed from its directory under the
+/// recordings root.
+#[derive(Debug, Clone, Serialize)]
+pub struct Folder {
+    pub name: String,
+    pub count: usize,
+}
+
+/// Every folder under the recordings root, alphabetically by name.
+pub fn list_folders() -> Vec<Folder> {
+    let root = recordings_root();
+    let Ok(entries) = std::fs::read_dir(&root) else {
+        return Vec::new();
+    };
+
+    let mut folders: Vec<Folder> = entries
+        .flatten()
+        .filter(|e| e.path().is_dir())
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if parse_stamp(&name).is_some() {
+                return None;
+            }
+            let count = std::fs::read_dir(e.path())
+                .map(|inner| {
+                    inner
+                        .flatten()
+                        .filter(|i| {
+                            i.path().is_dir()
+                                && parse_stamp(&i.file_name().to_string_lossy()).is_some()
+                        })
+                        .count()
+                })
+                .unwrap_or(0);
+            Some(Folder { name, count })
+        })
+        .collect();
+    folders.sort_unstable_by(|a, b| a.name.cmp(&b.name));
+    folders
+}
+
+/// Reject anything that can't safely be a folder name: empty, path
+/// separators, `..`, more than one path component, or a name that would
+/// itself parse as a meeting timestamp — which would make a folder
+/// indistinguishable from a meeting while walking the tree.
+fn validate_folder_name(name: &str) -> Result<(), String> {
+    if name.is_empty()
+        || name.contains('/')
+        || name.contains('\\')
+        || name.contains("..")
+        || Path::new(name).components().count() != 1
+    {
+        return Err(format!("invalid folder name: {name}"));
+    }
+    if parse_stamp(name).is_some() {
+        return Err(format!("\"{name}\" looks like a meeting, not a folder name"));
+    }
+    Ok(())
+}
+
+/// Create a new, empty folder.
+pub fn create_folder(name: &str) -> Result<(), String> {
+    let name = name.trim();
+    validate_folder_name(name)?;
+    let dir = recordings_root().join(name);
+    if dir.exists() {
+        return Err(format!("\"{name}\" already exists"));
+    }
+    std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))
+}
+
+/// Rename a folder in place. Meetings inside move with it — it's the same
+/// directory, just renamed.
+pub fn rename_folder(old: &str, new: &str) -> Result<(), String> {
+    let new = new.trim();
+    validate_folder_name(new)?;
+    let old_dir = recordings_root().join(old);
+    if !old_dir.is_dir() {
+        return Err(format!("no such folder: {old}"));
+    }
+    let new_dir = recordings_root().join(new);
+    if new_dir.exists() {
+        return Err(format!("\"{new}\" already exists"));
+    }
+    std::fs::rename(&old_dir, &new_dir).map_err(|e| format!("rename folder: {e}"))
+}
+
+/// Delete a folder. Refuses while it still holds anything, so filing a note
+/// away is never silently undone by a folder cleanup.
+pub fn delete_folder(name: &str) -> Result<(), String> {
+    let dir = recordings_root().join(name);
+    if !dir.is_dir() {
+        return Err(format!("no such folder: {name}"));
+    }
+    let has_entries = std::fs::read_dir(&dir)
+        .map_err(|e| format!("read {}: {e}", dir.display()))?
+        .next()
+        .is_some();
+    if has_entries {
+        return Err(format!("\"{name}\" still has notes in it — move them out first"));
+    }
+    std::fs::remove_dir(&dir).map_err(|e| format!("remove {}: {e}", dir.display()))
+}
+
 /// What the person typed during the meeting. Written continuously by
 /// `session::write_notes`.
 const TYPED_NOTES: &str = "notes.md";
@@ -860,6 +964,54 @@ mod tests {
             rename_meeting(id, "Renamed kickoff").unwrap();
             let listed = list_meetings();
             assert_eq!(listed[0].title, "Renamed kickoff");
+        });
+    }
+
+    #[test]
+    fn folders_can_be_created_renamed_and_listed() {
+        with_temp_home(|_| {
+            create_folder("Client Work").unwrap();
+            create_folder("  Interviews  ").unwrap(); // trimmed before use
+            assert!(create_folder("Client Work").is_err(), "duplicate name");
+
+            let mut names: Vec<_> = list_folders().into_iter().map(|f| f.name).collect();
+            names.sort();
+            assert_eq!(names, vec!["Client Work", "Interviews"]);
+
+            rename_folder("Interviews", "Candidate interviews").unwrap();
+            let names: Vec<_> = list_folders().into_iter().map(|f| f.name).collect();
+            assert!(names.contains(&"Candidate interviews".to_string()));
+            assert!(!names.contains(&"Interviews".to_string()));
+
+            assert!(
+                rename_folder("Candidate interviews", "Client Work").is_err(),
+                "collides with an existing folder"
+            );
+        });
+    }
+
+    #[test]
+    fn folder_names_are_validated() {
+        with_temp_home(|_| {
+            assert!(create_folder("20260724-100000-standup").is_err(), "looks like a meeting");
+            assert!(create_folder("").is_err());
+            assert!(create_folder("a/b").is_err());
+            assert!(create_folder("../escape").is_err());
+        });
+    }
+
+    #[test]
+    fn delete_folder_is_blocked_while_it_has_notes() {
+        with_temp_home(|_| {
+            create_folder("Client Work").unwrap();
+            let nested = recordings_root().join("Client Work").join("20260724-100000-kickoff");
+            std::fs::create_dir_all(&nested).unwrap();
+
+            assert!(delete_folder("Client Work").is_err(), "must refuse while non-empty");
+
+            std::fs::remove_dir_all(&nested).unwrap();
+            delete_folder("Client Work").unwrap();
+            assert!(list_folders().is_empty());
         });
     }
 }
