@@ -379,8 +379,7 @@ fn read_meta(dir: &Path) -> serde_json::Map<String, serde_json::Value> {
 
 fn write_meta(dir: &Path, meta: &serde_json::Map<String, serde_json::Value>) -> Result<(), String> {
     let path = dir.join("meta.json");
-    std::fs::write(&path, serde_json::Value::Object(meta.clone()).to_string())
-        .map_err(|e| format!("write {}: {e}", path.display()))
+    crate::store::write(&path, &serde_json::Value::Object(meta.clone()).to_string())
 }
 
 /// Resolve a meeting id (a folder name) to its directory, refusing anything
@@ -441,8 +440,7 @@ pub fn rename_meeting(id: &str, title: &str) -> Result<(), String> {
     if let Ok(text) = std::fs::read_to_string(&transcript) {
         let rest = text.split_once('\n').map(|(_, r)| r).unwrap_or("");
         let updated = format!("# {title}\n{rest}");
-        std::fs::write(&transcript, updated)
-            .map_err(|e| format!("write {}: {e}", transcript.display()))?;
+        crate::store::write(&transcript, &updated)?;
     }
     Ok(())
 }
@@ -620,8 +618,7 @@ pub fn write_notes(id: &str, template: crate::chat::Template, force: bool) -> Re
     let model = crate::model::ensure_chat_model()?;
     let notes = crate::chat::write_notes(&model, &transcript, template)?;
 
-    std::fs::write(&summary_path, &notes)
-        .map_err(|e| format!("write {}: {e}", summary_path.display()))?;
+    crate::store::write(&summary_path, &notes)?;
 
     let mut meta = read_meta(&dir);
     meta.insert("template".into(), serde_json::to_value(template).unwrap());

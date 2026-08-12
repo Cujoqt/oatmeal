@@ -7,6 +7,7 @@ mod mic;
 pub mod model;
 pub mod session;
 pub mod settings;
+pub mod store;
 mod sysaudio;
 pub mod transcribe;
 mod window;
@@ -688,6 +689,20 @@ fn delete_homework(id: String) -> Result<(), String> {
     homework::delete_homework(&id)
 }
 
+// ── Data compatibility ───────────────────────────────────────────────────────
+
+/// How this build's understanding of the on-disk format compares to what is
+/// actually there. The UI reads this to explain itself when writes are refused
+/// because the data came from a newer Oatmeal.
+#[tauri::command]
+fn data_status() -> serde_json::Value {
+    serde_json::json!({
+        "dataVersion": store::DATA_VERSION,
+        "storedVersion": store::stored_version(),
+        "writesLocked": store::writes_locked(),
+    })
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -739,9 +754,24 @@ pub fn run() {
             list_homework,
             add_homework,
             set_homework_done,
-            delete_homework
+            delete_homework,
+            data_status
         ])
         .setup(|app| {
+            // Before anything reads or writes a meeting: reconcile this build
+            // against what is already on disk. Refuses to write at all if the
+            // data came from a newer Oatmeal, rather than rewriting it older.
+            match store::prepare() {
+                store::Compatibility::Migrated { from, backup } => {
+                    eprintln!(
+                        "[oatmeal] data migrated from v{from}{}",
+                        backup
+                            .map(|b| format!(", previous documents copied to {b}"))
+                            .unwrap_or_default()
+                    );
+                }
+                state => eprintln!("[oatmeal] data check: {state:?}"),
+            }
             // Apply the hide flag as soon as the window exists.
             let hidden = app
                 .state::<AppState>()

@@ -37,9 +37,7 @@ fn write_all(items: &[HomeworkItem]) -> Result<(), String> {
     }
     let text =
         serde_json::to_string_pretty(items).map_err(|e| format!("serialize homework: {e}"))?;
-    std::fs::write(&path, text).map_err(|e| format!("write {}: {e}", path.display()))?;
-    restrict(&path);
-    Ok(())
+    crate::store::write(&path, &text)
 }
 
 /// `YYYY-MM-DD`, nothing fancier — good enough to sort lexicographically and

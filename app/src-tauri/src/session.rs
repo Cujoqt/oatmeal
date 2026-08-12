@@ -128,7 +128,7 @@ pub fn write_notes(dir: &Path, title: &str, body: &str) -> Result<PathBuf, Strin
     };
     let md = format!("# {heading}\n\n_Written {}_\n\n{}\n", human_now(), body.trim_end());
     let path = dir.join("notes.md");
-    std::fs::write(&path, md).map_err(|e| format!("write notes {}: {e}", path.display()))?;
+    crate::store::write(&path, &md)?;
     Ok(path)
 }
 
@@ -150,7 +150,7 @@ fn write_transcript_md(dir: &Path, title: &str, t: &Transcript) -> Result<PathBu
     }
 
     let path = dir.join("transcript.md");
-    std::fs::write(&path, md).map_err(|e| format!("write transcript {}: {e}", path.display()))?;
+    crate::store::write(&path, &md)?;
     Ok(path)
 }
 

@@ -82,9 +82,7 @@ fn write(doc: &serde_json::Value) -> Result<(), String> {
         restrict_dir(parent);
     }
     let text = serde_json::to_string_pretty(doc).map_err(|e| format!("serialize config: {e}"))?;
-    std::fs::write(&path, text).map_err(|e| format!("write {}: {e}", path.display()))?;
-    restrict(&path);
-    Ok(())
+    crate::store::write(&path, &text)
 }
 
 /// The config and the token file hold credentials — keep them owner-only, and
