@@ -514,8 +514,14 @@ function renderFolders() {
     const row = el('button', 'folder-row' + (f.name === currentFolder ? ' on' : ''))
     const name = el('span', 'name', f.name)
     const count = el('span', 'count', String(f.count))
-    row.append(name, count)
+    const del = el('button', 'del', '×')
+    del.title = `Delete "${f.name}"`
+    del.addEventListener('click', (e) => { e.stopPropagation(); deleteFolder(f.name) })
+    row.append(name, count, del)
+
     row.addEventListener('click', () => selectFolder(f.name))
+    name.addEventListener('dblclick', (e) => { e.stopPropagation(); startRenameFolder(row, name, f.name) })
+
     row.addEventListener('dragover', (e) => { e.preventDefault(); row.classList.add('drag-over') })
     row.addEventListener('dragleave', () => row.classList.remove('drag-over'))
     row.addEventListener('drop', (e) => {
@@ -523,7 +529,54 @@ function renderFolders() {
       row.classList.remove('drag-over')
       dropMeetingOn(f.name, e.dataTransfer.getData('text/plain'))
     })
+
     folderList.appendChild(row)
+  }
+}
+
+/// Swaps a folder row's name span for a text input, committing the rename on
+/// blur/Enter and reverting on Escape or an empty/unchanged value — same
+/// idiom as the note title's `commitTitle`.
+function startRenameFolder(row, nameEl, oldName) {
+  const input = document.createElement('input')
+  input.className = 'name'
+  input.value = oldName
+  row.replaceChild(input, nameEl)
+  input.focus()
+  input.select()
+
+  const finish = async (commit) => {
+    input.removeEventListener('blur', onBlur)
+    input.removeEventListener('keydown', onKey)
+    const next = input.value.trim()
+    if (commit && next && next !== oldName) {
+      try {
+        await invoke('rename_folder', { old: oldName, new: next })
+        if (currentFolder === oldName) currentFolder = next
+        await loadFolders()
+        return
+      } catch (e) {
+        setStatus(String(e), true)
+      }
+    }
+    row.replaceChild(nameEl, input)
+  }
+  const onBlur = () => finish(true)
+  const onKey = (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); input.blur() }
+    if (e.key === 'Escape') { finish(false) }
+  }
+  input.addEventListener('blur', onBlur)
+  input.addEventListener('keydown', onKey)
+}
+
+async function deleteFolder(name) {
+  try {
+    await invoke('delete_folder', { name })
+    if (currentFolder === name) currentFolder = null
+    await loadFolders()
+  } catch (e) {
+    setStatus(String(e), true)
   }
 }
 
@@ -560,6 +613,36 @@ searchEl.addEventListener('input', () => {
 navHome.addEventListener('click', showHome)
 navSettings.addEventListener('click', showSettings)
 newNoteBtn.addEventListener('click', showDraft)
+
+newFolderBtn.addEventListener('click', () => {
+  const row = el('div', 'folder-row')
+  const input = document.createElement('input')
+  input.className = 'name'
+  input.placeholder = 'Folder name'
+  row.appendChild(input)
+  folderList.prepend(row)
+  input.focus()
+
+  const finish = async () => {
+    input.removeEventListener('blur', finish)
+    input.removeEventListener('keydown', onKey)
+    const name = input.value.trim()
+    row.remove()
+    if (!name) return
+    try {
+      await invoke('create_folder', { name })
+      await loadFolders()
+    } catch (e) {
+      setStatus(String(e), true)
+    }
+  }
+  const onKey = (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); input.blur() }
+    if (e.key === 'Escape') { input.value = ''; input.blur() }
+  }
+  input.addEventListener('blur', finish)
+  input.addEventListener('keydown', onKey)
+})
 
 // ── views ────────────────────────────────────────────────────────────────────
 
