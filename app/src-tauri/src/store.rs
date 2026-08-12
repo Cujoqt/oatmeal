@@ -378,14 +378,36 @@ mod tests {
 
     /// Data written before the stamp existed is v1 by definition — adopt it,
     /// don't treat it as a migration and don't refuse it.
+    ///
+    /// Covers each marker `has_existing_data` looks for independently. A machine
+    /// that has only ever opened Settings has `config.json` and no `recordings/`
+    /// at all, and misreading that as a fresh install would be harmless — but
+    /// misreading it as anything that locks writes would not.
     #[test]
     fn data_predating_the_stamp_is_adopted_as_current() {
-        with_temp_home(|| {
-            let root = support_root();
-            std::fs::create_dir_all(root.join("recordings")).unwrap();
-            assert_eq!(prepare(), Compatibility::Current);
-            assert_eq!(stored_version(), Some(DATA_VERSION));
-        })
+        for marker in ["recordings", "config.json", "homework.json"] {
+            with_temp_home(|| {
+                let root = support_root();
+                std::fs::create_dir_all(&root).unwrap();
+                if marker.ends_with(".json") {
+                    std::fs::write(root.join(marker), "{}").unwrap();
+                } else {
+                    std::fs::create_dir_all(root.join(marker)).unwrap();
+                }
+
+                assert_eq!(
+                    prepare(),
+                    Compatibility::Current,
+                    "{marker} should be adopted, not migrated or refused"
+                );
+                assert_eq!(stored_version(), Some(DATA_VERSION));
+                assert!(!writes_locked(), "{marker} must stay writable");
+                // Adopting must not have rewritten what was already there.
+                if marker.ends_with(".json") {
+                    assert_eq!(std::fs::read_to_string(root.join(marker)).unwrap(), "{}");
+                }
+            })
+        }
     }
 
     #[test]
