@@ -452,12 +452,17 @@ function applyUpdateState(data) {
   renderVersionCard()
 
   if (data?.writesLocked) {
+    // storedVersion is null when the stamp exists but couldn't be read, which is
+    // a different sentence from "a newer version wrote this".
+    const why = data.storedVersion
+      ? `The notes in this folder were written by a newer version of Oatmeal
+         (format ${data.storedVersion}, this build reads ${data.dataVersion}).`
+      : `Oatmeal can't tell which format the notes in this folder are in, so it is
+         treating them as newer than this build.`
     showGate(
       'Update Oatmeal to edit these notes',
-      `<p>The notes in this folder were written by a newer version of Oatmeal
-       (format ${data.storedVersion}, this build reads ${data.dataVersion}). Nothing
-       has been changed — editing is turned off so an older build can't rewrite
-       them into a shape it understands.</p>
+      `<p>${why} Nothing has been changed — editing is turned off so an older build
+       can't rewrite them into a shape it understands.</p>
        <p class="ver">Installed ${update?.current || ''}</p>`,
     )
     return

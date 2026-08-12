@@ -701,8 +701,9 @@ fn check_for_update() -> update::UpdateStatus {
 }
 
 /// Open a release page or its DMG in the browser. Refuses links outside the
-/// project's own repository.
-#[tauri::command]
+/// project's own repository. Spawning `open` and waiting on it blocks, so it
+/// stays off the main thread like everything else here that blocks.
+#[tauri::command(async)]
 fn open_update_download(url: String) -> Result<(), String> {
     update::open_download(&url)
 }
@@ -718,6 +719,7 @@ fn data_status() -> serde_json::Value {
         "dataVersion": store::DATA_VERSION,
         "storedVersion": store::stored_version(),
         "writesLocked": store::writes_locked(),
+        "lockReason": store::lock_reason(),
     })
 }
 
@@ -829,6 +831,7 @@ mod tests {
             "ask_meeting",
             "draft_followup",
             "check_for_update",
+            "open_update_download",
         ] {
             let decl = format!("fn {name}(");
             let at = src

@@ -95,21 +95,33 @@ pub fn is_newer(candidate: &str, current: &str) -> bool {
 }
 
 /// Pull the mandatory-minimum out of a release body, if the author put one there.
+///
+/// The directive has to be the *whole* line — a line that merely mentions the
+/// marker in prose is not one. That matters more than it looks: the release notes
+/// announcing this feature will naturally contain a sentence like "mark a release
+/// required with `Oatmeal-Minimum-Version: 1.3.0`", and matching that would gate
+/// every user on a release nobody meant to make mandatory.
 fn minimum_from_notes(body: &str) -> Option<String> {
     for line in body.lines() {
-        let trimmed = line.trim().trim_start_matches(['#', '*', '-', '_', '>', ' ']);
-        let lowered = trimmed.to_ascii_lowercase();
-        let Some(at) = lowered.find(MIN_VERSION_MARKER) else {
+        // Strip list bullets, quote markers and emphasis from both ends so a
+        // decorated standalone line still counts as standalone.
+        let bare = line.trim_matches(|c: char| {
+            c.is_whitespace() || matches!(c, '#' | '*' | '-' | '_' | '>' | '`')
+        });
+        let lowered = bare.to_ascii_lowercase();
+        // Must *start* with the marker, not merely contain it.
+        if !lowered.starts_with(MIN_VERSION_MARKER) {
             continue;
-        };
-        // Markdown decoration and whitespace can interleave (`**…:** \`1.3.0\``),
-        // so strip both in one pass rather than one after the other.
-        let value = trimmed[at + MIN_VERSION_MARKER.len()..]
+        }
+        let value = bare[MIN_VERSION_MARKER.len()..]
             .trim_matches(|c: char| c.is_whitespace() || c == '`' || c == '*' || c == '"');
-        // Only accept something that actually parses, so a mangled line fails
-        // open (no gate) instead of blocking everyone out of the app.
-        if parse_version(value).is_some() {
-            return Some(value.to_string());
+        // The remainder must be nothing but the version. Anything else is prose,
+        // and a mangled value fails open (no gate) rather than locking everyone
+        // out of the app.
+        if !value.is_empty() && value.split(|c: char| c.is_whitespace()).count() == 1 {
+            if parse_version(value).is_some() {
+                return Some(value.to_string());
+            }
         }
     }
     None
@@ -159,6 +171,12 @@ fn status_from_release(doc: &serde_json::Value, current: &str) -> UpdateStatus {
 /// Ask GitHub for the newest release. Never returns an error: a failed check is
 /// reported as "not checked" so the UI can stay quiet rather than block.
 pub fn check() -> UpdateStatus {
+    check_with(fetch_latest_release)
+}
+
+/// `check` with the network call injected, so the fail-open paths that matter
+/// most — unreachable, and unparseable — are testable without GitHub.
+fn check_with(fetch: impl FnOnce() -> Result<Vec<u8>, String>) -> UpdateStatus {
     let unchecked = |error: String| UpdateStatus {
         current: current_version().to_string(),
         checked: false,
@@ -166,6 +184,18 @@ pub fn check() -> UpdateStatus {
         ..Default::default()
     };
 
+    let body = match fetch() {
+        Ok(b) => b,
+        Err(e) => return unchecked(e),
+    };
+
+    match serde_json::from_slice::<serde_json::Value>(&body) {
+        Ok(doc) => status_from_release(&doc, current_version()),
+        Err(e) => unchecked(format!("could not read the release list: {e}")),
+    }
+}
+
+fn fetch_latest_release() -> Result<Vec<u8>, String> {
     let out = Command::new("curl")
         .arg("-fsSL")
         .arg("--max-time")
@@ -178,20 +208,13 @@ pub fn check() -> UpdateStatus {
         .arg(RELEASES_LATEST)
         .output();
 
-    let out = match out {
-        Ok(o) if o.status.success() => o,
-        Ok(o) => {
-            return unchecked(format!(
-                "could not reach GitHub (curl exited {})",
-                o.status.code().unwrap_or(-1)
-            ))
-        }
-        Err(e) => return unchecked(format!("could not run curl: {e}")),
-    };
-
-    match serde_json::from_slice::<serde_json::Value>(&out.stdout) {
-        Ok(doc) => status_from_release(&doc, current_version()),
-        Err(e) => unchecked(format!("could not read the release list: {e}")),
+    match out {
+        Ok(o) if o.status.success() => Ok(o.stdout),
+        Ok(o) => Err(format!(
+            "could not reach GitHub (curl exited {})",
+            o.status.code().unwrap_or(-1)
+        )),
+        Err(e) => Err(format!("could not run curl: {e}")),
     }
 }
 
@@ -313,17 +336,76 @@ mod tests {
         );
     }
 
-    /// A failed check must look like "unknown", never like "you are current" and
-    /// never like "you must update".
+    /// The guarantee the whole design rests on: if we cannot reach GitHub, the app
+    /// reports "unknown" — never "you are current", never "you must update". Runs
+    /// `check_with` for real rather than hand-building a status, so it would catch
+    /// the failure path being rewritten to block.
     #[test]
     fn an_unreachable_check_never_blocks() {
-        let s = UpdateStatus {
-            current: "1.2.0".into(),
-            checked: false,
-            error: Some("offline".into()),
-            ..Default::default()
-        };
-        assert!(!s.mandatory);
+        let s = check_with(|| Err("curl exited 6".into()));
+        assert!(!s.checked, "a failed fetch must not look checked");
+        assert!(!s.mandatory, "being offline must never gate the app");
         assert!(!s.update_available);
+        assert_eq!(s.latest, None);
+        assert_eq!(s.error.as_deref(), Some("curl exited 6"));
+        assert_eq!(s.current, current_version());
+    }
+
+    /// Same guarantee for a reply that arrives but isn't the JSON we expect — a
+    /// captive-portal login page, or a rate-limit body.
+    #[test]
+    fn a_reply_that_is_not_a_release_never_blocks() {
+        for body in [
+            &b"<html>sign in to continue</html>"[..],
+            &b""[..],
+            &b"{\"message\":\"API rate limit exceeded\""[..],
+        ] {
+            let s = check_with(|| Ok(body.to_vec()));
+            assert!(!s.checked, "unparseable body should not look checked: {body:?}");
+            assert!(!s.mandatory);
+            assert!(!s.update_available);
+        }
+    }
+
+    /// A well-formed reply with no releases at all must also stay quiet.
+    #[test]
+    fn an_empty_release_document_never_blocks() {
+        let s = check_with(|| Ok(b"{}".to_vec()));
+        assert!(s.checked, "valid JSON did parse");
+        assert_eq!(s.latest, None);
+        assert!(!s.update_available);
+        assert!(!s.mandatory);
+    }
+
+    /// The release notes announcing this very feature will mention the marker in a
+    /// sentence. That must not gate anybody.
+    #[test]
+    fn the_marker_mentioned_in_prose_does_not_gate() {
+        for body in [
+            "Mark a release required with `Oatmeal-Minimum-Version: 1.3.0` in its notes.",
+            "- You can now set Oatmeal-Minimum-Version: 9.9.9 to force an update",
+            "See the docs for Oatmeal-Minimum-Version: 1.3.0 and friends",
+        ] {
+            let doc = serde_json::json!({ "tag_name": "v1.3.0", "body": body });
+            let s = status_from_release(&doc, "1.2.0");
+            assert_eq!(s.minimum, None, "prose should not be read as a directive: {body}");
+            assert!(!s.mandatory, "prose must not gate the app: {body}");
+        }
+    }
+
+    /// ...while the directive on a line of its own still does, decorated or not.
+    #[test]
+    fn the_marker_on_its_own_line_still_gates() {
+        for body in [
+            "Oatmeal-Minimum-Version: 1.3.0",
+            "## Notes\n\nOatmeal-Minimum-Version: 1.3.0\n\nFixes things.",
+            "- **Oatmeal-Minimum-Version:** `1.3.0`",
+            "> Oatmeal-Minimum-Version: v1.3.0",
+        ] {
+            let doc = serde_json::json!({ "tag_name": "v1.3.0", "body": body });
+            let s = status_from_release(&doc, "1.2.0");
+            assert!(s.minimum.is_some(), "should have found a minimum in: {body}");
+            assert!(s.mandatory, "should gate 1.2.0: {body}");
+        }
     }
 }

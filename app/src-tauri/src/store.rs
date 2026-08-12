@@ -18,6 +18,7 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 
@@ -28,17 +29,33 @@ use crate::settings::{restrict, restrict_dir, support_root};
 /// makes the old shape readable before you do.
 pub const DATA_VERSION: u32 = 1;
 
-/// Flipped when `prepare` finds data from a newer build than this one. Every
-/// write funnels through `write`, so one flag is enough to protect all of them.
+/// Flipped when `prepare` finds data this build must not touch. Every write
+/// funnels through `write`, so one flag is enough to protect all of them.
 static WRITES_LOCKED: AtomicBool = AtomicBool::new(false);
+
+/// Why writes are locked, for the UI to explain itself with.
+static LOCK_REASON: Mutex<Option<String>> = Mutex::new(None);
 
 /// Makes temp names unique between threads — the record path is `(async)` now,
 /// so two writes really can be in flight at once.
 static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
-/// Whether writing user data is currently refused (data is from a newer build).
+/// Whether writing user data is currently refused.
 pub fn writes_locked() -> bool {
     WRITES_LOCKED.load(Ordering::SeqCst)
+}
+
+/// Why writes are refused, if they are.
+pub fn lock_reason() -> Option<String> {
+    LOCK_REASON.lock().ok().and_then(|r| r.clone())
+}
+
+fn lock_writes(reason: String) {
+    eprintln!("[oatmeal] refusing to write user data: {reason}");
+    if let Ok(mut slot) = LOCK_REASON.lock() {
+        *slot = Some(reason);
+    }
+    WRITES_LOCKED.store(true, Ordering::SeqCst);
 }
 
 pub fn version_path() -> PathBuf {
@@ -58,6 +75,32 @@ pub enum Compatibility {
     Migrated { from: u32, backup: Option<String> },
     /// Data from a *newer* build. Writes are refused; the app needs updating.
     TooNew { found: u32 },
+    /// There is a stamp but it can't be read. It may well have been written by a
+    /// newer build, so this is treated as cautiously as `TooNew` rather than
+    /// assumed to be ours: guessing wrong here rewrites somebody's notes.
+    Unreadable { detail: String },
+}
+
+/// What `read_stamp` found. Distinguishing "absent" from "unreadable" is the
+/// whole point: folding them together would let a corrupted stamp reopen the
+/// exact hole this module exists to close.
+enum StampState {
+    Missing,
+    Unreadable(String),
+    Version(u32),
+}
+
+fn read_stamp() -> StampState {
+    let path = version_path();
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return StampState::Missing,
+        Err(e) => return StampState::Unreadable(format!("cannot read {}: {e}", path.display())),
+    };
+    match serde_json::from_str::<Stamp>(&text) {
+        Ok(s) => StampState::Version(s.version),
+        Err(e) => StampState::Unreadable(format!("{} is not a valid version stamp: {e}", path.display())),
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -68,10 +111,12 @@ struct Stamp {
     written_by: String,
 }
 
-/// The version recorded on disk, or `None` if there is no stamp.
+/// The version recorded on disk, or `None` if there is no readable stamp.
 pub fn stored_version() -> Option<u32> {
-    let text = std::fs::read_to_string(version_path()).ok()?;
-    serde_json::from_str::<Stamp>(&text).ok().map(|s| s.version)
+    match read_stamp() {
+        StampState::Version(v) => Some(v),
+        _ => None,
+    }
 }
 
 /// True when the support root already holds real user data. Distinguishes a
@@ -86,19 +131,24 @@ fn has_existing_data() -> bool {
 /// Reconcile this build against whatever is on disk. Call once at startup,
 /// before anything reads or writes user data.
 pub fn prepare() -> Compatibility {
-    let outcome = match stored_version() {
-        Some(found) if found > DATA_VERSION => {
+    let outcome = match read_stamp() {
+        StampState::Version(found) if found > DATA_VERSION => {
             // Do not stamp, do not migrate, do not write. Downgrading is the one
             // case where being helpful destroys data.
-            WRITES_LOCKED.store(true, Ordering::SeqCst);
-            eprintln!(
-                "[oatmeal] data on disk is version {found}, this build understands \
-                 {DATA_VERSION} — refusing to write until Oatmeal is updated"
-            );
+            lock_writes(format!(
+                "these notes were written by a newer version of Oatmeal \
+                 (format {found}; this build reads {DATA_VERSION})"
+            ));
             return Compatibility::TooNew { found };
         }
-        Some(found) if found == DATA_VERSION => Compatibility::Current,
-        Some(found) => {
+        StampState::Unreadable(detail) => {
+            // Could be corruption, could be a future stamp format. Either way,
+            // overwriting it is the one thing that can't be undone.
+            lock_writes(detail.clone());
+            return Compatibility::Unreadable { detail };
+        }
+        StampState::Version(found) if found == DATA_VERSION => Compatibility::Current,
+        StampState::Version(found) => {
             let backup = match back_up_documents(found) {
                 Ok(dir) => dir,
                 Err(e) => {
@@ -110,12 +160,12 @@ pub fn prepare() -> Compatibility {
             };
             Compatibility::Migrated { from: found, backup }
         }
-        None if has_existing_data() => {
+        StampState::Missing if has_existing_data() => {
             // Pre-stamp install. Its layout *is* v1, so adopt it rather than
             // treating it as a migration.
             Compatibility::Current
         }
-        None => Compatibility::Fresh,
+        StampState::Missing => Compatibility::Fresh,
     };
 
     if let Err(e) = stamp() {
@@ -140,6 +190,11 @@ pub fn stamp() -> Result<(), String> {
 /// Recordings are deliberately not copied: each meeting is its own folder,
 /// written once and never bulk-rewritten, and duplicating the audio would cost
 /// gigabytes to guard against a risk that doesn't apply to it.
+///
+/// Today a failure here is only logged, because `DATA_VERSION` has never moved
+/// and "migrating" rewrites nothing — the copy is pure precaution. **The first
+/// real migration must not run when this fails**: transform nothing and leave the
+/// stamp alone rather than reshaping data whose backup didn't happen.
 fn back_up_documents(from: u32) -> Result<Option<String>, String> {
     let root = support_root();
     let docs: Vec<PathBuf> = ["config.json", "homework.json"]
@@ -173,9 +228,9 @@ fn back_up_documents(from: u32) -> Result<Option<String>, String> {
 pub fn write(path: &Path, contents: &str) -> Result<(), String> {
     if writes_locked() {
         return Err(format!(
-            "this data was written by a newer version of Oatmeal — update to keep \
-             editing it. Nothing was changed ({}).",
-            path.display()
+            "not writing {} — {}. Nothing was changed; update Oatmeal to edit it.",
+            path.display(),
+            lock_reason().unwrap_or_else(|| "this data may be from a newer version of Oatmeal".into())
         ));
     }
 
@@ -235,6 +290,9 @@ mod tests {
     fn with_temp_home<T>(f: impl FnOnce() -> T) -> T {
         let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         WRITES_LOCKED.store(false, Ordering::SeqCst);
+        if let Ok(mut r) = LOCK_REASON.lock() {
+            *r = None;
+        }
         let home = std::env::temp_dir().join(format!(
             "oatmeal-store-test-{}-{:?}",
             std::process::id(),
@@ -253,6 +311,9 @@ mod tests {
         }
         let _ = std::fs::remove_dir_all(&home);
         WRITES_LOCKED.store(false, Ordering::SeqCst);
+        if let Ok(mut r) = LOCK_REASON.lock() {
+            *r = None;
+        }
         out
     }
 
@@ -350,6 +411,34 @@ mod tests {
                 "{\"displayName\":\"Dylan\"}"
             );
             assert_eq!(stored_version(), Some(DATA_VERSION));
+        })
+    }
+
+    /// A stamp that exists but can't be parsed must be treated as cautiously as a
+    /// newer one. Folding "unreadable" into "absent" would let a corrupted stamp
+    /// reopen the hole this module exists to close: the build would adopt data it
+    /// knows nothing about and stamp it as its own.
+    #[test]
+    fn an_unreadable_stamp_locks_writes_instead_of_adopting_the_data() {
+        with_temp_home(|| {
+            let root = support_root();
+            std::fs::create_dir_all(root.join("recordings")).unwrap();
+            std::fs::write(root.join("homework.json"), "[]").unwrap();
+            // Truncated mid-write by something that isn't us.
+            std::fs::write(version_path(), "{\"version\":").unwrap();
+
+            let outcome = prepare();
+            assert!(
+                matches!(outcome, Compatibility::Unreadable { .. }),
+                "expected Unreadable, got {outcome:?}"
+            );
+            assert!(writes_locked(), "unknown data must not be writable");
+            assert!(write(&root.join("homework.json"), "[]").is_err());
+            // And the stamp it could not understand is left exactly as it was.
+            assert_eq!(
+                std::fs::read_to_string(version_path()).unwrap(),
+                "{\"version\":"
+            );
         })
     }
 

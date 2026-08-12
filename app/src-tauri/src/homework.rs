@@ -5,7 +5,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-use crate::settings::{restrict, restrict_dir, support_root};
+use crate::settings::{restrict_dir, support_root};
 
 fn store_path() -> PathBuf {
     support_root().join("homework.json")

@@ -382,6 +382,28 @@ fn write_meta(dir: &Path, meta: &serde_json::Map<String, serde_json::Value>) -> 
     crate::store::write(&path, &serde_json::Value::Object(meta.clone()).to_string())
 }
 
+/// Serializes read-modify-write of `meta.json`.
+///
+/// `store::write` makes each individual write atomic, but not a read followed by
+/// a write. That gap matters now that the heavy commands are
+/// `#[tauri::command(async)]` and genuinely run on different threads: `write_notes`
+/// reads meta, then writes it back after a long generation, so a `rename_meeting`
+/// landing in between would have its new title overwritten by the stale copy.
+/// One process-wide lock is enough — these edits are two-field JSON writes.
+static META_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Read `meta.json`, let `edit` change it, and write it back — with no window for
+/// another thread to read the same document and clobber the result.
+fn update_meta(
+    dir: &Path,
+    edit: impl FnOnce(&mut serde_json::Map<String, serde_json::Value>),
+) -> Result<(), String> {
+    let _guard = META_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut meta = read_meta(dir);
+    edit(&mut meta);
+    write_meta(dir, &meta)
+}
+
 /// Resolve a meeting id (a folder name) to its directory, refusing anything
 /// that isn't a plain name directly under the recordings root. The id crosses
 /// the boundary from the UI, so `..` or an absolute path must not be able to
@@ -432,9 +454,9 @@ pub fn rename_meeting(id: &str, title: &str) -> Result<(), String> {
         return Err("a meeting needs a title".into());
     }
 
-    let mut meta = read_meta(&dir);
-    meta.insert("title".into(), serde_json::Value::String(title.to_string()));
-    write_meta(&dir, &meta)?;
+    update_meta(&dir, |meta| {
+        meta.insert("title".into(), serde_json::Value::String(title.to_string()));
+    })?;
 
     let transcript = dir.join("transcript.md");
     if let Ok(text) = std::fs::read_to_string(&transcript) {
@@ -620,9 +642,9 @@ pub fn write_notes(id: &str, template: crate::chat::Template, force: bool) -> Re
 
     crate::store::write(&summary_path, &notes)?;
 
-    let mut meta = read_meta(&dir);
-    meta.insert("template".into(), serde_json::to_value(template).unwrap());
-    write_meta(&dir, &meta)?;
+    update_meta(&dir, |meta| {
+        meta.insert("template".into(), serde_json::to_value(template).unwrap());
+    })?;
 
     Ok(notes)
 }
