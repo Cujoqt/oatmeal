@@ -1,5 +1,6 @@
 pub mod apple_calendar;
 pub mod chat;
+pub mod homework;
 pub mod library;
 pub mod live;
 mod mic;
@@ -661,6 +662,30 @@ fn meeting_typed_notes(id: String) -> Result<String, String> {
     library::typed_notes(&id)
 }
 
+/// Every homework item, soonest due date first, for the Homework view.
+#[tauri::command]
+fn list_homework() -> Vec<homework::HomeworkItem> {
+    homework::list_homework()
+}
+
+/// Add a homework item with a due date.
+#[tauri::command]
+fn add_homework(title: String, note: String, due_date: String) -> Result<homework::HomeworkItem, String> {
+    homework::add_homework(&title, &note, &due_date)
+}
+
+/// Toggle a homework item's done state.
+#[tauri::command]
+fn set_homework_done(id: String, done: bool) -> Result<(), String> {
+    homework::set_homework_done(&id, done)
+}
+
+/// Delete a homework item.
+#[tauri::command]
+fn delete_homework(id: String) -> Result<(), String> {
+    homework::delete_homework(&id)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -708,7 +733,11 @@ pub fn run() {
             create_folder,
             rename_folder,
             delete_folder,
-            move_meeting_to_folder
+            move_meeting_to_folder,
+            list_homework,
+            add_homework,
+            set_homework_done,
+            delete_homework
         ])
         .setup(|app| {
             // Apply the hide flag as soon as the window exists.
