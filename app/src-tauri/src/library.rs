@@ -186,6 +186,34 @@ pub fn delete_folder(name: &str) -> Result<(), String> {
     std::fs::remove_dir(&dir).map_err(|e| format!("remove {}: {e}", dir.display()))
 }
 
+/// File a meeting into `folder`, or back to Unsorted when `folder` is
+/// `None`. The meeting keeps its id — this only moves which directory it
+/// lives in.
+pub fn move_meeting_to_folder(id: &str, folder: Option<&str>) -> Result<(), String> {
+    let dir = meeting_dir(id)?;
+
+    let dest_parent = match folder {
+        Some(name) => {
+            validate_folder_name(name)?;
+            let folder_dir = recordings_root().join(name);
+            if !folder_dir.is_dir() {
+                return Err(format!("no such folder: {name}"));
+            }
+            folder_dir
+        }
+        None => recordings_root(),
+    };
+
+    let dest = dest_parent.join(id);
+    if dest == dir {
+        return Ok(());
+    }
+    if dest.exists() {
+        return Err(format!("a meeting named {id} already exists there"));
+    }
+    std::fs::rename(&dir, &dest).map_err(|e| format!("move {}: {e}", dir.display()))
+}
+
 /// What the person typed during the meeting. Written continuously by
 /// `session::write_notes`.
 const TYPED_NOTES: &str = "notes.md";
@@ -1012,6 +1040,35 @@ mod tests {
             std::fs::remove_dir_all(&nested).unwrap();
             delete_folder("Client Work").unwrap();
             assert!(list_folders().is_empty());
+        });
+    }
+
+    #[test]
+    fn move_meeting_files_and_unfiles() {
+        with_temp_home(|_| {
+            let id = "20260724-100000-kickoff";
+            seed_meeting(id);
+            create_folder("Client Work").unwrap();
+
+            move_meeting_to_folder(id, Some("Client Work")).unwrap();
+            let listed = list_meetings();
+            assert_eq!(listed[0].folder.as_deref(), Some("Client Work"));
+            assert!(!recordings_root().join(id).exists());
+            assert!(recordings_root().join("Client Work").join(id).exists());
+
+            move_meeting_to_folder(id, None).unwrap();
+            let listed = list_meetings();
+            assert_eq!(listed[0].folder, None);
+            assert!(recordings_root().join(id).exists());
+        });
+    }
+
+    #[test]
+    fn move_meeting_rejects_an_unknown_folder() {
+        with_temp_home(|_| {
+            let id = "20260724-100000-kickoff";
+            seed_meeting(id);
+            assert!(move_meeting_to_folder(id, Some("Nonexistent")).is_err());
         });
     }
 }
