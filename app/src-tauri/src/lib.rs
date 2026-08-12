@@ -10,6 +10,7 @@ pub mod settings;
 pub mod store;
 mod sysaudio;
 pub mod transcribe;
+pub mod update;
 mod window;
 
 use std::path::{Path, PathBuf};
@@ -689,6 +690,23 @@ fn delete_homework(id: String) -> Result<(), String> {
     homework::delete_homework(&id)
 }
 
+// ── Updates ──────────────────────────────────────────────────────────────────
+
+/// Ask GitHub whether a newer release exists. Network-bound, hence `(async)`.
+/// Never fails: an unreachable check reports `checked: false` so the UI stays
+/// quiet instead of locking someone out of a meeting.
+#[tauri::command(async)]
+fn check_for_update() -> update::UpdateStatus {
+    update::check()
+}
+
+/// Open a release page or its DMG in the browser. Refuses links outside the
+/// project's own repository.
+#[tauri::command]
+fn open_update_download(url: String) -> Result<(), String> {
+    update::open_download(&url)
+}
+
 // ── Data compatibility ───────────────────────────────────────────────────────
 
 /// How this build's understanding of the on-disk format compares to what is
@@ -755,7 +773,9 @@ pub fn run() {
             add_homework,
             set_homework_done,
             delete_homework,
-            data_status
+            data_status,
+            check_for_update,
+            open_update_download
         ])
         .setup(|app| {
             // Before anything reads or writes a meeting: reconcile this build
@@ -808,6 +828,7 @@ mod tests {
             "write_notes",
             "ask_meeting",
             "draft_followup",
+            "check_for_update",
         ] {
             let decl = format!("fn {name}(");
             let at = src

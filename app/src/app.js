@@ -79,9 +79,23 @@ const answersEl = $('answers')
 const suggestEl = $('suggest')
 const askInput = $('askInput')
 const askSend = $('askSend')
+const updateStrip = $('updateStrip')
+const updateStripText = $('updateStripText')
+const updateGetBtn = $('updateGet')
+const updateLaterBtn = $('updateLater')
+const updateGate = $('updateGate')
+const gateTitle = $('gateTitle')
+const gateBody = $('gateBody')
+const gateGetBtn = $('gateGet')
+const versionLabel = $('versionLabel')
+const updateCheckBtn = $('updateCheck')
+const updateOpenBtn = $('updateOpen')
 
 const DRAFT_KEY = 'oatmeal.draft'
 const INTRO_KEY = 'oatmeal.introSeen'
+/// Which version the "Later" button waved away, so an optional update nags once
+/// per release rather than on every launch.
+const UPDATE_SNOOZE_KEY = 'oatmeal.updateSnoozed'
 const SUGGESTIONS = ['What did I miss?', 'What are the action items?', 'Summarize the decisions', 'What should I follow up on?']
 // Matches chat::Template on the Rust side, serialized snake_case.
 const TEMPLATES = [
@@ -404,6 +418,117 @@ okayBtn.addEventListener('click', () => {
   setIntroVisible(false)
   localStorage.setItem(INTRO_KEY, '1')
   notesEl.focus()
+})
+
+// ── updates ──────────────────────────────────────────────────────────────────
+//
+// The check runs in Rust (the CSP lets this page talk to nothing but the IPC
+// bridge). Three possible outcomes, and the quiet one is the default: a check
+// that failed looks the same as no update, because being unable to reach GitHub
+// must never cost somebody a meeting.
+
+let update = null
+
+async function refreshUpdate({ manual = false } = {}) {
+  if (manual) note(versionLabel, 'Checking…')
+  try {
+    update = await invoke('check_for_update')
+  } catch (e) {
+    update = null
+    if (manual) note(versionLabel, String(e))
+    return
+  }
+  // A newer format on disk than this build understands is the other way the
+  // app can be too old to be safe to use.
+  const data = await invoke('data_status').catch(() => null)
+  applyUpdateState(data)
+}
+
+function downloadLink() {
+  return update?.downloadUrl || update?.releaseUrl || null
+}
+
+function applyUpdateState(data) {
+  renderVersionCard()
+
+  if (data?.writesLocked) {
+    showGate(
+      'Update Oatmeal to edit these notes',
+      `<p>The notes in this folder were written by a newer version of Oatmeal
+       (format ${data.storedVersion}, this build reads ${data.dataVersion}). Nothing
+       has been changed — editing is turned off so an older build can't rewrite
+       them into a shape it understands.</p>
+       <p class="ver">Installed ${update?.current || ''}</p>`,
+    )
+    return
+  }
+
+  if (update?.mandatory) {
+    showGate(
+      'This version is out of date',
+      `<p>Oatmeal ${update.latest} is required. This build can't be used until
+       it's updated.</p>
+       <p class="ver">Installed ${update.current} · required ${update.minimum}</p>`,
+    )
+    return
+  }
+
+  updateGate.classList.remove('show')
+  const snoozed = localStorage.getItem(UPDATE_SNOOZE_KEY)
+  const show = Boolean(update?.updateAvailable) && snoozed !== update.latest
+  updateStrip.classList.toggle('show', show)
+  if (show) {
+    updateStripText.innerHTML = `<strong>Oatmeal ${update.latest}</strong> is available — you're on ${update.current}.`
+  }
+}
+
+function showGate(title, bodyHtml) {
+  gateTitle.textContent = title
+  gateBody.innerHTML = bodyHtml
+  gateGetBtn.hidden = !downloadLink()
+  updateStrip.classList.remove('show')
+  updateGate.classList.add('show')
+}
+
+function renderVersionCard() {
+  if (!update) {
+    note(versionLabel, 'Could not reach GitHub — you can keep working.')
+    updateOpenBtn.hidden = true
+    return
+  }
+  if (!update.checked) {
+    note(versionLabel, `Oatmeal ${update.current} — could not check for updates.`)
+    updateOpenBtn.hidden = true
+    return
+  }
+  const newer = update.updateAvailable
+  note(
+    versionLabel,
+    newer
+      ? `Oatmeal ${update.current} — ${update.latest} is available.`
+      : `Oatmeal ${update.current} — up to date.`,
+    newer ? '' : 'ok',
+  )
+  updateOpenBtn.hidden = !newer || !downloadLink()
+}
+
+async function openDownload() {
+  const url = downloadLink()
+  if (!url) return
+  try {
+    await invoke('open_update_download', { url })
+  } catch (e) {
+    note(versionLabel, String(e))
+  }
+}
+
+updateGetBtn.addEventListener('click', openDownload)
+gateGetBtn.addEventListener('click', openDownload)
+updateOpenBtn.addEventListener('click', openDownload)
+updateCheckBtn.addEventListener('click', () => refreshUpdate({ manual: true }))
+updateLaterBtn.addEventListener('click', () => {
+  if (update?.latest) localStorage.setItem(UPDATE_SNOOZE_KEY, update.latest)
+  updateStrip.classList.remove('show')
 })
 
 // ── meeting library ──────────────────────────────────────────────────────────
@@ -1597,6 +1722,9 @@ async function boot() {
   showHome()
   loadAgenda()
   setInterval(loadAgenda, AGENDA_REFRESH_MS)
+  // Not awaited: a slow network must not hold up the window, and the gate can
+  // arrive a moment after the UI does.
+  refreshUpdate()
 
   setIntroVisible(!localStorage.getItem(INTRO_KEY))
   try {

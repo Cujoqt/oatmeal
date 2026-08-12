@@ -117,6 +117,50 @@
     #hide.on .eye { background: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 20%, transparent); }
 
     /* ── shell ─────────────────────────────────────────────────────────────*/
+    /* ── update notice ─────────────────────────────────────────────────────
+       Two strengths. The strip is a suggestion you can wave away; the gate is
+       for a release published as mandatory, or for data a newer Oatmeal wrote,
+       and it deliberately leaves nothing else clickable. Neither ever appears
+       when the check simply failed. */
+    .update-strip {
+      flex: none; display: none; align-items: center; gap: 10px;
+      padding: 9px 16px 9px 20px; background: var(--panel);
+      border-bottom: 1px solid var(--line); font-size: 13px; color: var(--ink-soft);
+    }
+    .update-strip.show { display: flex; }
+    .update-strip .led { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); flex: none; }
+    .update-strip strong { color: var(--ink); font-weight: 600; }
+    .update-strip .grow { flex: 1; min-width: 0; }
+    .update-strip button {
+      border: 1px solid var(--line-2); background: transparent; color: var(--ink);
+      border-radius: 999px; padding: 5px 13px; font: 500 12.5px var(--sans);
+      cursor: pointer; flex: none;
+    }
+    .update-strip button:hover { border-color: var(--accent); color: var(--accent); }
+    .update-strip button.quiet { border-color: transparent; color: var(--muted); }
+    .update-strip button.quiet:hover { color: var(--ink); }
+
+    #updateGate {
+      position: fixed; inset: 0; z-index: 50; display: none;
+      align-items: center; justify-content: center; padding: 32px;
+      background: color-mix(in srgb, var(--bg) 86%, transparent);
+      backdrop-filter: blur(10px);
+    }
+    #updateGate.show { display: flex; }
+    .gate-card {
+      max-width: 460px; background: var(--card); border-radius: 20px;
+      padding: 34px 36px 30px; box-shadow: 0 18px 50px rgba(0, 0, 0, .38);
+      animation: rise .35s cubic-bezier(.2,.7,.3,1) both;
+    }
+    .gate-card h2 { font-family: var(--display); font-weight: 400; font-size: 26px; margin: 0 0 14px; }
+    .gate-card p { margin: 0 0 14px; font-size: 14.5px; line-height: 1.6; color: var(--ink-soft); }
+    .gate-card .ver { font-family: var(--mono); font-size: 13px; color: var(--muted); }
+    .gate-card button {
+      margin-top: 8px; font: 500 14px var(--sans); background: #fff; color: #1a1a1a;
+      border: 0; border-radius: 999px; padding: 10px 24px; cursor: pointer;
+    }
+    .gate-card button:hover { opacity: .88; }
+
     .shell { flex: 1; min-height: 0; display: flex; }
 
     .sidebar {
@@ -672,6 +716,13 @@
     </div>
   </div>
 
+  <div class="update-strip" id="updateStrip">
+    <span class="led" aria-hidden="true"></span>
+    <span class="grow" id="updateStripText"></span>
+    <button id="updateGet">Download</button>
+    <button class="quiet" id="updateLater">Later</button>
+  </div>
+
   <div class="shell">
     <aside class="sidebar">
       <div class="search">
@@ -891,6 +942,17 @@
             </div>
           </div>
 
+          <div class="set-card">
+            <h2>Version</h2>
+            <p>Oatmeal checks GitHub for a new release on launch. Nothing about your
+              meetings is sent — the check asks for the release list and nothing more.</p>
+            <div class="acct"><span class="led"></span><span id="versionLabel">Checking…</span></div>
+            <div class="btn-row">
+              <button class="btn quiet" id="updateCheck">Check for updates</button>
+              <button class="btn primary" id="updateOpen" hidden>Download</button>
+            </div>
+          </div>
+
           <div class="btn-row">
             <button class="btn primary" id="saveSettings">Save settings</button>
             <span class="note-line" id="settingsNote" role="status" aria-live="polite"></span>
@@ -928,6 +990,16 @@
           </div>
         </div>
       </section>
+    </div>
+  </div>
+
+  <!-- Shown only for a release published as mandatory, or when the notes on disk
+       were written by a newer Oatmeal than this one. -->
+  <div id="updateGate" role="alertdialog" aria-modal="true" aria-labelledby="gateTitle">
+    <div class="gate-card">
+      <h2 id="gateTitle"></h2>
+      <div id="gateBody"></div>
+      <button id="gateGet">Download the update</button>
     </div>
   </div>
 

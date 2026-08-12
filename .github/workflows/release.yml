@@ -2,6 +2,16 @@ name: Release
 
 # Push a tag like v0.1.0 and this builds the macOS bundle and attaches the DMG to
 # a GitHub release, so "download Oatmeal" is one click instead of a toolchain.
+#
+# The app checks this repository's release list on launch (app/src-tauri/src/
+# update.rs) and offers a dismissible prompt when a newer tag exists. To make a
+# release *required* — older builds refuse to run until updated — add this line
+# to the published release notes, then re-save them:
+#
+#     Oatmeal-Minimum-Version: 1.3.0
+#
+# It is deliberately not templated below: setting it on every release would mean
+# every user is blocked by every release.
 on:
   push:
     tags:
