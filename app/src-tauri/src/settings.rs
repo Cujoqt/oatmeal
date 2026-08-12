@@ -13,6 +13,13 @@ pub fn support_root() -> PathBuf {
     PathBuf::from(home).join("Library/Application Support/dev.oatmeal.app")
 }
 
+/// Serializes any test that points `$HOME` at a scratch directory (`library.rs`
+/// and `homework.rs` both do this). `$HOME` is process-global, so without a
+/// shared lock two such tests running on different threads — as `cargo test`
+/// does by default — can race and read/write each other's scratch dir.
+#[cfg(test)]
+pub(crate) static HOME_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 pub fn config_path() -> PathBuf {
     support_root().join("config.json")
 }

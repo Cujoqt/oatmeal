@@ -10,6 +10,7 @@ const { listen, emit } = window.__TAURI__.event
 const $ = (id) => document.getElementById(id)
 
 import { EVENTS, getLang, setLang } from '/shared.js'
+import { createDatePicker } from '/datepicker.js'
 
 const btn = $('btn')
 const titleEl = $('title')
@@ -29,8 +30,19 @@ const hideLabel = $('hideLabel')
 const searchEl = $('search')
 const sideList = $('sideList')
 const sideCount = $('sideCount')
+const folderList = $('folderList')
+const folderNote = $('folderNote')
+const newFolderBtn = $('newFolder')
+const meetingsLabel = $('meetingsLabel')
 const navHome = $('navHome')
 const navSettings = $('navSettings')
+const navHomework = $('navHomework')
+const viewHomework = $('viewHomework')
+const hwTitleEl = $('hwTitle')
+const hwNoteInputEl = $('hwNoteInput')
+const hwAddBtn = $('hwAdd')
+const hwStatusEl = $('hwStatus')
+const hwListEl = $('hwList')
 const railToggle = $('railToggle')
 const viewDash = $('viewDash')
 const viewSettings = $('viewSettings')
@@ -91,6 +103,8 @@ let filter = ''
 let searchResults = null
 let searchTimer = null
 let searchSeq = 0
+let folders = []
+let currentFolder = null
 let openId = null
 let noteTab = 'notes'
 let liveLines = []
@@ -99,6 +113,9 @@ let hintTimer = null
 let sessionDir = ''
 /// Element a streamed chat answer is being written into, or null between asks.
 let streamingAnswer = null
+let homework = []
+
+const hwDatePicker = createDatePicker($('hwDatePicker'))
 
 function setStatus(msg, isErr = false) {
   statusEl.textContent = msg
@@ -391,14 +408,30 @@ function fmtWhen(date) {
   return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
 }
 
+function fmtDueDate(iso) {
+  const [y, m, d] = iso.split('-').map(Number)
+  const date = new Date(y, m - 1, d)
+  const startOfDay = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate())
+  const days = Math.round((startOfDay(date) - startOfDay(new Date())) / 86400000)
+  if (days === 0) return 'Today'
+  if (days === 1) return 'Tomorrow'
+  if (days < 0) return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) + ' (overdue)'
+  if (days < 7) return date.toLocaleDateString(undefined, { weekday: 'long' })
+  return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+}
+
 function visibleMeetings() {
-  if (!filter) return meetings
-  if (searchResults) {
+  let list
+  if (!filter) {
+    list = meetings
+  } else if (searchResults) {
     const ids = new Set(searchResults.map((m) => m.id))
-    return meetings.filter((m) => ids.has(m.id))
+    list = meetings.filter((m) => ids.has(m.id))
+  } else {
+    const q = filter.toLowerCase()
+    list = meetings.filter((m) => m.title.toLowerCase().includes(q))
   }
-  const q = filter.toLowerCase()
-  return meetings.filter((m) => m.title.toLowerCase().includes(q))
+  return currentFolder ? list.filter((m) => m.folder === currentFolder) : list
 }
 
 /// Runs `filter` against transcript and notes content too, not just titles.
@@ -452,6 +485,11 @@ function renderSidebar() {
 
     item.append(dot, txt)
     item.addEventListener('click', () => openNote(m.id))
+    item.draggable = true
+    item.addEventListener('dragstart', (e) => {
+      e.dataTransfer.effectAllowed = 'move'
+      e.dataTransfer.setData('text/plain', m.id)
+    })
     sideList.appendChild(item)
   }
 }
@@ -467,6 +505,137 @@ async function loadMeetings() {
   renderNotesList()
 }
 
+async function loadFolders() {
+  try {
+    folders = await invoke('list_folders')
+  } catch {
+    folders = []
+  }
+  renderFolders()
+}
+
+async function refreshLibrary() {
+  await Promise.all([loadMeetings(), loadFolders()])
+}
+
+/// `folderName` is a folder name to file into, or `null` to unfile back to
+/// Unsorted. Reads which meeting is being dragged off the dataTransfer set in
+/// `renderSidebar`'s `dragstart` handler.
+async function dropMeetingOn(folderName, id) {
+  if (!id) return
+  try {
+    await invoke('move_meeting_to_folder', { id, folder: folderName })
+    setFolderNote('')
+    await refreshLibrary()
+  } catch (e) {
+    setFolderNote(String(e))
+  }
+}
+
+/// Folder errors go beside the folder list, not through `setStatus`: `#status`
+/// lives inside the draft view, so a message written there is invisible while
+/// the user is working in the sidebar.
+function setFolderNote(msg) {
+  folderNote.textContent = msg
+}
+
+function renderFolders() {
+  meetingsLabel.classList.toggle('on', !currentFolder)
+  folderList.innerHTML = ''
+  for (const f of folders) {
+    const row = el('button', 'folder-row' + (f.name === currentFolder ? ' on' : ''))
+    const name = el('span', 'name', f.name)
+    const count = el('span', 'count', String(f.count))
+    const del = el('button', 'del', '×')
+    del.title = `Delete "${f.name}"`
+    del.addEventListener('click', (e) => { e.stopPropagation(); deleteFolder(f.name) })
+    row.append(name, count, del)
+
+    row.addEventListener('click', () => selectFolder(f.name))
+    name.addEventListener('dblclick', (e) => { e.stopPropagation(); startRenameFolder(row, name, f.name) })
+
+    row.addEventListener('dragover', (e) => { e.preventDefault(); row.classList.add('drag-over') })
+    row.addEventListener('dragleave', () => row.classList.remove('drag-over'))
+    row.addEventListener('drop', (e) => {
+      e.preventDefault()
+      row.classList.remove('drag-over')
+      dropMeetingOn(f.name, e.dataTransfer.getData('text/plain'))
+    })
+
+    folderList.appendChild(row)
+  }
+}
+
+/// Swaps a folder row's name span for a text input, committing the rename on
+/// blur/Enter and reverting on Escape or an empty/unchanged value — same
+/// idiom as the note title's `commitTitle`.
+function startRenameFolder(row, nameEl, oldName) {
+  const input = document.createElement('input')
+  input.className = 'name'
+  input.value = oldName
+  row.replaceChild(input, nameEl)
+  input.focus()
+  input.select()
+
+  const finish = async (commit) => {
+    input.removeEventListener('blur', onBlur)
+    input.removeEventListener('keydown', onKey)
+    const next = input.value.trim()
+    if (commit && next && next !== oldName) {
+      try {
+        await invoke('rename_folder', { old: oldName, new: next })
+        if (currentFolder === oldName) currentFolder = next
+        setFolderNote('')
+        await loadFolders()
+        return
+      } catch (e) {
+        setFolderNote(String(e))
+      }
+    }
+    row.replaceChild(nameEl, input)
+  }
+  const onBlur = () => finish(true)
+  const onKey = (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); input.blur() }
+    if (e.key === 'Escape') { finish(false) }
+  }
+  input.addEventListener('blur', onBlur)
+  input.addEventListener('keydown', onKey)
+}
+
+async function deleteFolder(name) {
+  try {
+    await invoke('delete_folder', { name })
+    if (currentFolder === name) currentFolder = null
+    setFolderNote('')
+    await loadFolders()
+  } catch (e) {
+    setFolderNote(String(e))
+  }
+}
+
+function selectFolder(name) {
+  currentFolder = name
+  renderFolders()
+  renderSidebar()
+  renderNotesList()
+}
+
+meetingsLabel.addEventListener('click', () => {
+  currentFolder = null
+  renderFolders()
+  renderSidebar()
+  renderNotesList()
+})
+
+meetingsLabel.addEventListener('dragover', (e) => { e.preventDefault(); meetingsLabel.classList.add('drag-over') })
+meetingsLabel.addEventListener('dragleave', () => meetingsLabel.classList.remove('drag-over'))
+meetingsLabel.addEventListener('drop', (e) => {
+  e.preventDefault()
+  meetingsLabel.classList.remove('drag-over')
+  dropMeetingOn(null, e.dataTransfer.getData('text/plain'))
+})
+
 searchEl.addEventListener('input', () => {
   filter = searchEl.value.trim()
   searchResults = null
@@ -479,19 +648,52 @@ navHome.addEventListener('click', showHome)
 navSettings.addEventListener('click', showSettings)
 newNoteBtn.addEventListener('click', showDraft)
 
+newFolderBtn.addEventListener('click', () => {
+  const row = el('div', 'folder-row')
+  const input = document.createElement('input')
+  input.className = 'name'
+  input.placeholder = 'Folder name'
+  row.appendChild(input)
+  folderList.prepend(row)
+  input.focus()
+
+  const finish = async () => {
+    input.removeEventListener('blur', finish)
+    input.removeEventListener('keydown', onKey)
+    const name = input.value.trim()
+    row.remove()
+    if (!name) return
+    try {
+      await invoke('create_folder', { name })
+      setFolderNote('')
+      await loadFolders()
+    } catch (e) {
+      setFolderNote(String(e))
+    }
+  }
+  const onKey = (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); input.blur() }
+    if (e.key === 'Escape') { input.value = ''; input.blur() }
+  }
+  input.addEventListener('blur', finish)
+  input.addEventListener('keydown', onKey)
+})
+
 // ── views ────────────────────────────────────────────────────────────────────
 
-/// Four surfaces share the content pane: the Coming-up dashboard, the blank
-/// note you type into, a recorded meeting, and Settings. One function owns which
-/// is lit so the nav highlight can never drift from the view.
+/// Five surfaces share the content pane: the Coming-up dashboard, the blank
+/// note you type into, a recorded meeting, Settings, and Homework. One function
+/// owns which is lit so the nav highlight can never drift from the view.
 function showView(view) {
   viewDash.classList.toggle('on', view === 'dash')
   viewHome.classList.toggle('on', view === 'draft')
   viewNote.classList.toggle('on', view === 'note')
   viewSettings.classList.toggle('on', view === 'settings')
+  viewHomework.classList.toggle('on', view === 'homework')
   navHome.classList.toggle('on', view === 'dash')
   navSettings.classList.toggle('on', view === 'settings')
-  for (const [el, active] of [[navHome, view === 'dash'], [navSettings, view === 'settings']]) {
+  navHomework.classList.toggle('on', view === 'homework')
+  for (const [el, active] of [[navHome, view === 'dash'], [navSettings, view === 'settings'], [navHomework, view === 'homework']]) {
     active ? el.setAttribute('aria-current', 'page') : el.removeAttribute('aria-current')
   }
 }
@@ -519,6 +721,15 @@ function showSettings() {
   loadSettings()
   renderSidebar()
 }
+
+function showHomework() {
+  openId = null
+  showView('homework')
+  renderSidebar()
+  loadHomework()
+}
+
+navHomework.addEventListener('click', showHomework)
 
 function currentMeeting() {
   return meetings.find((m) => m.id === openId)
@@ -1204,6 +1415,84 @@ async function loadSettings() {
   refreshCalendar()
 }
 
+async function loadHomework() {
+  try {
+    homework = await invoke('list_homework')
+  } catch {
+    homework = []
+  }
+  renderHomework()
+}
+
+function renderHomework() {
+  hwListEl.innerHTML = ''
+  if (!homework.length) {
+    hwListEl.appendChild(el('div', 'notes-empty', 'No homework yet — add something above.'))
+    return
+  }
+  for (const item of homework) {
+    const row = el('div', 'hw-row' + (item.done ? ' done' : ''))
+    const check = document.createElement('input')
+    check.type = 'checkbox'
+    check.checked = item.done
+    check.addEventListener('change', () => toggleHomework(item.id, check.checked))
+
+    const txt = el('span', 'txt')
+    txt.append(
+      el('div', 't', item.title),
+      el('div', 's', [fmtDueDate(item.due_date), item.note].filter(Boolean).join(' · '))
+    )
+
+    const del = el('button', 'del', '×')
+    del.title = 'Delete'
+    del.addEventListener('click', () => deleteHomeworkItem(item.id))
+
+    row.append(check, txt, del)
+    hwListEl.appendChild(row)
+  }
+}
+
+async function toggleHomework(id, done) {
+  try {
+    await invoke('set_homework_done', { id, done })
+    await loadHomework()
+  } catch (e) {
+    note(hwStatusEl, String(e), 'err')
+  }
+}
+
+async function deleteHomeworkItem(id) {
+  try {
+    await invoke('delete_homework', { id })
+    await loadHomework()
+  } catch (e) {
+    note(hwStatusEl, String(e), 'err')
+  }
+}
+
+hwAddBtn.addEventListener('click', async () => {
+  const title = hwTitleEl.value.trim()
+  const dueDate = hwDatePicker.getValue()
+  if (!title) {
+    note(hwStatusEl, 'Give it a title.', 'err')
+    return
+  }
+  if (!dueDate) {
+    note(hwStatusEl, 'Pick a due date.', 'err')
+    return
+  }
+  try {
+    await invoke('add_homework', { title, note: hwNoteInputEl.value.trim(), dueDate })
+    hwTitleEl.value = ''
+    hwNoteInputEl.value = ''
+    hwDatePicker.setValue(null)
+    note(hwStatusEl, 'Added.', 'ok')
+    await loadHomework()
+  } catch (e) {
+    note(hwStatusEl, String(e), 'err')
+  }
+})
+
 $('saveSettings').addEventListener('click', async () => {
   note(settingsNote, 'Saving…')
   try {
@@ -1290,6 +1579,7 @@ async function boot() {
   refreshHide()
   refreshModelChip()
   await loadMeetings()
+  await loadFolders()
   showHome()
   loadAgenda()
   setInterval(loadAgenda, AGENDA_REFRESH_MS)
