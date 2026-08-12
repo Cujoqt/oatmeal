@@ -13,6 +13,7 @@ import { EVENTS, getLang, setLang } from '/shared.js'
 import { createDatePicker } from '/datepicker.js'
 
 const btn = $('btn')
+const cluster = $('cluster')
 const titleEl = $('title')
 const notesEl = $('notes')
 const saveHintEl = $('saveHint')
@@ -196,6 +197,7 @@ function stopTimer() { clearInterval(tick); tick = null }
 function toRecordButton() {
   document.body.classList.remove('recording')
   btn.title = 'Start recording'
+  cluster.title = 'Start recording'
   btn.disabled = false
   titleEl.setAttribute('data-placeholder', 'New note')
 }
@@ -203,6 +205,7 @@ function toRecordButton() {
 function toStopButton() {
   document.body.classList.add('recording')
   btn.title = 'Stop recording'
+  cluster.title = 'Stop recording'
   btn.disabled = false
   titleEl.setAttribute('data-placeholder', 'Untitled meeting')
 }
@@ -314,7 +317,11 @@ async function stopRecording() {
   }
 }
 
-btn.addEventListener('click', () => {
+// The whole cluster toggles recording, not just the 13px square inside it: the
+// dots read as part of the same control, and clicking them used to do nothing.
+// The chevron is the one thing in the pill with its own job.
+cluster.addEventListener('click', (e) => {
+  if (e.target.closest('#expand')) return
   if (busy) return
   recording ? stopRecording() : startRecording()
 })
@@ -386,8 +393,15 @@ revealBtn.addEventListener('click', () => {
   setStatus(sessionDir ? `Saved in ${sessionDir}` : 'The folder is created when you start recording.')
 })
 
+/// The dock stays out of the way while the onboarding card is up: the card is
+/// taller than the frame, so a bottom-pinned dock would lie across its text.
+function setIntroVisible(visible) {
+  introEl.hidden = !visible
+  document.body.classList.toggle('intro', visible)
+}
+
 okayBtn.addEventListener('click', () => {
-  introEl.hidden = true
+  setIntroVisible(false)
   localStorage.setItem(INTRO_KEY, '1')
   notesEl.focus()
 })
@@ -1584,7 +1598,7 @@ async function boot() {
   loadAgenda()
   setInterval(loadAgenda, AGENDA_REFRESH_MS)
 
-  introEl.hidden = Boolean(localStorage.getItem(INTRO_KEY))
+  setIntroVisible(!localStorage.getItem(INTRO_KEY))
   try {
     const saved = JSON.parse(localStorage.getItem(DRAFT_KEY) || '{}')
     if (saved.title) titleEl.textContent = saved.title

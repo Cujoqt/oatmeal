@@ -269,11 +269,16 @@
       color: var(--danger); letter-spacing: .5px;
     }
     body.recording #timer { display: inline; }
+    /* Above the dock's own scrim (hence the z-index), and carrying a scrim of its
+       own so notes scrolling past never run through the text — but only when it
+       has something to say. */
     #status {
-      position: absolute; left: 0; right: 0; bottom: 74px;
+      position: sticky; bottom: 74px; z-index: 7;
       text-align: center; font-size: 12.5px; color: var(--muted);
       pointer-events: none; min-height: 1.2em; padding: 0 32px;
+      background: linear-gradient(to top, var(--bg) 62%, transparent);
     }
+    #status:empty { background: none; }
     #status.err { color: var(--danger); }
 
     /* ── onboarding card ───────────────────────────────────────────────── */
@@ -304,12 +309,22 @@
     #okay:active { transform: translateY(1px); }
 
     /* ── bottom dock ───────────────────────────────────────────────────── */
+    /* Sticky rather than absolute: #viewHome is itself the scroll container, and
+       an absolutely positioned child of one scrolls away with the content — which
+       dragged the dock (and #status above it) up over the onboarding card. */
     .dock {
-      position: absolute; left: 0; right: 0; bottom: 22px; z-index: 6;
-      display: flex; align-items: center; gap: 12px; padding: 0 26px;
+      position: sticky; bottom: 0; z-index: 6;
+      display: flex; align-items: center; gap: 12px; padding: 14px 26px 22px;
+      background: linear-gradient(to top, var(--bg) 62%, transparent);
     }
+    /* The onboarding card is taller than the frame, so a pinned dock would lie
+       across its text. The card has its own Okay button; the controls arrive
+       once it is dismissed. */
+    body.intro .dock { display: none; }
+    /* The whole pill is the record control: the square alone is a 13px target,
+       and the dots beside it read as part of the same button. */
     .cluster {
-      display: inline-flex; align-items: center; gap: 4px;
+      display: inline-flex; align-items: center; gap: 4px; cursor: pointer;
       background: var(--key-bg); border-radius: 999px; padding: 7px 11px;
     }
     .dots { display: inline-flex; gap: 3px; padding: 0 4px; }
@@ -777,8 +792,11 @@
           </section>
         </div>
 
+        <!-- Above the dock, and before it in flow: both stick to the bottom of the
+             scroller, so the status line has to come first to stay clear of it. -->
+        <div id="status" role="status" aria-live="polite"></div>
         <div class="dock">
-          <div class="cluster" id="cluster">
+          <div class="cluster" id="cluster" title="Start recording">
             <span class="dots"><i></i><i></i><i></i></span>
             <button class="round-btn sm" id="expand" title="Show the transcript window">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 14l6-6 6 6" /></svg>
@@ -787,7 +805,6 @@
           </div>
           <input class="dock-ask" id="homeAsk" placeholder="Ask anything" />
         </div>
-        <div id="status" role="status" aria-live="polite"></div>
       </section>
 
       <!-- Note: the primary surface for a recorded meeting -->

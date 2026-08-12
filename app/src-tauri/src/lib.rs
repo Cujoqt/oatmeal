@@ -164,7 +164,9 @@ fn is_sysaudio_recording(state: tauri::State<'_, AppState>) -> bool {
 
 /// Transcribe a WAV file on disk with on-device Whisper (M4). `model_path` may be
 /// empty to use `OATMEAL_MODEL` / the default model location; `language` empty
-/// means auto-detect. Blocking — Tauri runs commands off the UI thread.
+/// means auto-detect. Blocking, and *not* off the UI thread: a plain
+/// `#[tauri::command]` runs on the main thread. Nothing in the UI calls this yet;
+/// whatever does needs `(async)` first, like the rest of the Whisper path.
 #[tauri::command]
 fn transcribe_wav(
     model_path: String,
@@ -188,7 +190,7 @@ fn default_model_path() -> String {
 
 /// Ensure the Whisper model is present, downloading it on first run. Returns the
 /// model path. Blocking (can take a while on a cold download).
-#[tauri::command]
+#[tauri::command(async)]
 fn ensure_model() -> Result<String, String> {
     model::ensure_model().map(|p| p.display().to_string())
 }
@@ -198,7 +200,7 @@ fn ensure_model() -> Result<String, String> {
 /// Start a meeting: create its folder and fire up both audio lanes. A lane that
 /// can't start (no mic, denied screen-capture) is logged and skipped rather than
 /// failing the whole meeting — but if *neither* starts, that's an error.
-#[tauri::command]
+#[tauri::command(async)]
 fn start_session(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
@@ -390,7 +392,7 @@ fn is_session_active(state: tauri::State<'_, AppState>) -> bool {
 
 /// Stop the meeting: end both lanes, mix + transcribe, and write `transcript.md`.
 /// `model_path`/`language` may be empty to use the fallbacks.
-#[tauri::command]
+#[tauri::command(async)]
 fn stop_session(
     state: tauri::State<'_, AppState>,
     model_path: String,
@@ -461,7 +463,7 @@ fn search_meetings(query: String) -> Vec<library::Meeting> {
 
 /// Ensure the chat model is downloaded. Separate from `ensure_model` because
 /// it's a much larger download and only needed for summaries, not recording.
-#[tauri::command]
+#[tauri::command(async)]
 fn ensure_chat_model() -> Result<String, String> {
     model::ensure_chat_model().map(|p| p.display().to_string())
 }
@@ -487,14 +489,14 @@ fn meeting_segments(id: String) -> Result<Vec<library::TranscriptLine>, String> 
 
 /// Write structured notes for a past meeting and cache them next to the
 /// transcript, so reopening a note doesn't re-run the model.
-#[tauri::command]
+#[tauri::command(async)]
 fn write_notes(id: String, template: chat::Template, force: bool) -> Result<String, String> {
     library::write_notes(&id, template, force)
 }
 
 /// Answer a question about a meeting. `id` empty means the meeting currently
 /// being recorded, answered from the live transcript so far.
-#[tauri::command]
+#[tauri::command(async)]
 fn ask_meeting(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
@@ -538,7 +540,7 @@ fn chat_token_sink(app: tauri::AppHandle) -> impl FnMut(&str) {
 
 /// Draft a follow-up message from a meeting's notes — text for the user to copy
 /// and send themselves; Oatmeal never sends it anywhere.
-#[tauri::command]
+#[tauri::command(async)]
 fn draft_followup(app: tauri::AppHandle, id: String) -> Result<String, String> {
     let notes = library::followup_source(&id)?;
     let path = model::ensure_chat_model()?;
@@ -756,4 +758,37 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running Oatmeal");
+}
+
+#[cfg(test)]
+mod tests {
+    /// A plain `#[tauri::command]` runs its body inline on the main thread, so a
+    /// command that downloads a model, opens an audio device or runs Whisper
+    /// freezes the window until it returns — the spinning-wait-cursor on the
+    /// record button. `(async)` hands the same sync body to the async runtime
+    /// instead. Anything on the record → transcribe → notes path belongs here.
+    #[test]
+    fn heavy_commands_do_not_run_on_the_main_thread() {
+        let src = include_str!("lib.rs");
+        for name in [
+            "ensure_model",
+            "start_session",
+            "stop_session",
+            "ensure_chat_model",
+            "write_notes",
+            "ask_meeting",
+            "draft_followup",
+        ] {
+            let decl = format!("fn {name}(");
+            let at = src
+                .find(&decl)
+                .unwrap_or_else(|| panic!("{name} is no longer declared in lib.rs"));
+            let attr = src[..at].rsplit_once('\n').expect("attribute above fn").0;
+            assert!(
+                attr.ends_with("#[tauri::command(async)]"),
+                "{name} must be #[tauri::command(async)] — a blocking body on the \
+                 main thread freezes the UI"
+            );
+        }
+    }
 }
