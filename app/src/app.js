@@ -107,6 +107,9 @@ let hintTimer = null
 let sessionDir = ''
 /// Element a streamed chat answer is being written into, or null between asks.
 let streamingAnswer = null
+let homework = []
+
+const hwDatePicker = createDatePicker($('hwDatePicker'))
 
 function setStatus(msg, isErr = false) {
   statusEl.textContent = msg
@@ -395,6 +398,18 @@ function fmtWhen(date) {
   const days = Math.round((startOfDay(new Date()) - startOfDay(date)) / 86400000)
   if (days === 0) return 'Today'
   if (days === 1) return 'Yesterday'
+  if (days < 7) return date.toLocaleDateString(undefined, { weekday: 'long' })
+  return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+}
+
+function fmtDueDate(iso) {
+  const [y, m, d] = iso.split('-').map(Number)
+  const date = new Date(y, m - 1, d)
+  const startOfDay = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate())
+  const days = Math.round((startOfDay(date) - startOfDay(new Date())) / 86400000)
+  if (days === 0) return 'Today'
+  if (days === 1) return 'Tomorrow'
+  if (days < 0) return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) + ' (overdue)'
   if (days < 7) return date.toLocaleDateString(undefined, { weekday: 'long' })
   return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
 }
@@ -1222,6 +1237,84 @@ async function loadSettings() {
   } catch { /* the path is informational */ }
   refreshCalendar()
 }
+
+async function loadHomework() {
+  try {
+    homework = await invoke('list_homework')
+  } catch {
+    homework = []
+  }
+  renderHomework()
+}
+
+function renderHomework() {
+  hwListEl.innerHTML = ''
+  if (!homework.length) {
+    hwListEl.appendChild(el('div', 'notes-empty', 'No homework yet — add something above.'))
+    return
+  }
+  for (const item of homework) {
+    const row = el('div', 'hw-row' + (item.done ? ' done' : ''))
+    const check = document.createElement('input')
+    check.type = 'checkbox'
+    check.checked = item.done
+    check.addEventListener('change', () => toggleHomework(item.id, check.checked))
+
+    const txt = el('span', 'txt')
+    txt.append(
+      el('div', 't', item.title),
+      el('div', 's', [fmtDueDate(item.due_date), item.note].filter(Boolean).join(' · '))
+    )
+
+    const del = el('button', 'del', '×')
+    del.title = 'Delete'
+    del.addEventListener('click', () => deleteHomeworkItem(item.id))
+
+    row.append(check, txt, del)
+    hwListEl.appendChild(row)
+  }
+}
+
+async function toggleHomework(id, done) {
+  try {
+    await invoke('set_homework_done', { id, done })
+    await loadHomework()
+  } catch (e) {
+    setStatus(String(e), true)
+  }
+}
+
+async function deleteHomeworkItem(id) {
+  try {
+    await invoke('delete_homework', { id })
+    await loadHomework()
+  } catch (e) {
+    setStatus(String(e), true)
+  }
+}
+
+hwAddBtn.addEventListener('click', async () => {
+  const title = hwTitleEl.value.trim()
+  const dueDate = hwDatePicker.getValue()
+  if (!title) {
+    note(hwStatusEl, 'Give it a title.', 'err')
+    return
+  }
+  if (!dueDate) {
+    note(hwStatusEl, 'Pick a due date.', 'err')
+    return
+  }
+  try {
+    await invoke('add_homework', { title, note: hwNoteInputEl.value.trim(), dueDate })
+    hwTitleEl.value = ''
+    hwNoteInputEl.value = ''
+    hwDatePicker.setValue(null)
+    note(hwStatusEl, 'Added.', 'ok')
+    await loadHomework()
+  } catch (e) {
+    note(hwStatusEl, String(e), 'err')
+  }
+})
 
 $('saveSettings').addEventListener('click', async () => {
   note(settingsNote, 'Saving…')
