@@ -526,6 +526,34 @@
     .field input:focus { border-color: var(--accent); }
     .field input::placeholder { color: var(--faint); }
     .field .hint { font: 400 12px/1.5 var(--sans); color: var(--hint); margin-top: 6px; word-break: break-all; }
+    #hwDatePicker { position: relative; }
+    .dp-btn {
+      font: 400 13.5px var(--sans); color: var(--ink); background: var(--card);
+      border: 1px solid var(--line-2); border-radius: 8px; padding: 7px 10px; cursor: pointer;
+      text-align: left; width: 220px;
+    }
+    .dp-btn:hover { border-color: var(--ink-soft); }
+    .dp-pop {
+      position: absolute; z-index: 20; margin-top: 4px; width: 240px; padding: 10px;
+      background: var(--card); border: 1px solid var(--line-2); border-radius: 10px;
+      box-shadow: 0 8px 24px rgba(0,0,0,.15);
+    }
+    .dp-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+    .dp-head span { font: 600 12.5px var(--sans); color: var(--ink); }
+    .dp-head button {
+      width: 22px; height: 22px; border-radius: 6px; border: 0; background: none;
+      color: var(--hint); cursor: pointer; font: 600 14px var(--sans);
+    }
+    .dp-head button:hover { background: var(--hover); color: var(--ink); }
+    .dp-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 2px; }
+    .dp-dow { font: 600 10px var(--sans); color: var(--faint); text-align: center; padding: 2px 0; }
+    .dp-day {
+      font: 400 12px var(--sans); color: var(--ink); background: none; border: 0; border-radius: 6px;
+      padding: 5px 0; cursor: pointer; text-align: center;
+    }
+    .dp-day:hover { background: var(--hover); }
+    .dp-day.today { color: var(--accent); font-weight: 600; }
+    .dp-day.sel { background: var(--key-bg); }
     .acct { display: flex; align-items: center; gap: 9px; margin-bottom: 16px; font: 400 13.5px var(--sans); color: var(--ink-soft); }
     .acct .led { width: 8px; height: 8px; border-radius: 50%; background: var(--line-2); flex: none; }
     .acct.linked .led { background: var(--good-ink); box-shadow: 0 0 0 3px color-mix(in srgb, var(--good-ink) 22%, transparent); }
