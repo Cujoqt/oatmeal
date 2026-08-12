@@ -461,6 +461,11 @@ function renderSidebar() {
 
     item.append(dot, txt)
     item.addEventListener('click', () => openNote(m.id))
+    item.draggable = true
+    item.addEventListener('dragstart', (e) => {
+      e.dataTransfer.effectAllowed = 'move'
+      e.dataTransfer.setData('text/plain', m.id)
+    })
     sideList.appendChild(item)
   }
 }
@@ -485,6 +490,23 @@ async function loadFolders() {
   renderFolders()
 }
 
+async function refreshLibrary() {
+  await Promise.all([loadMeetings(), loadFolders()])
+}
+
+/// `folderName` is a folder name to file into, or `null` to unfile back to
+/// Unsorted. Reads which meeting is being dragged off the dataTransfer set in
+/// `renderSidebar`'s `dragstart` handler.
+async function dropMeetingOn(folderName, id) {
+  if (!id) return
+  try {
+    await invoke('move_meeting_to_folder', { id, folder: folderName })
+    await refreshLibrary()
+  } catch (e) {
+    setStatus(String(e), true)
+  }
+}
+
 function renderFolders() {
   meetingsLabel.classList.toggle('on', !currentFolder)
   folderList.innerHTML = ''
@@ -494,6 +516,13 @@ function renderFolders() {
     const count = el('span', 'count', String(f.count))
     row.append(name, count)
     row.addEventListener('click', () => selectFolder(f.name))
+    row.addEventListener('dragover', (e) => { e.preventDefault(); row.classList.add('drag-over') })
+    row.addEventListener('dragleave', () => row.classList.remove('drag-over'))
+    row.addEventListener('drop', (e) => {
+      e.preventDefault()
+      row.classList.remove('drag-over')
+      dropMeetingOn(f.name, e.dataTransfer.getData('text/plain'))
+    })
     folderList.appendChild(row)
   }
 }
@@ -510,6 +539,14 @@ meetingsLabel.addEventListener('click', () => {
   renderFolders()
   renderSidebar()
   renderNotesList()
+})
+
+meetingsLabel.addEventListener('dragover', (e) => { e.preventDefault(); meetingsLabel.classList.add('drag-over') })
+meetingsLabel.addEventListener('dragleave', () => meetingsLabel.classList.remove('drag-over'))
+meetingsLabel.addEventListener('drop', (e) => {
+  e.preventDefault()
+  meetingsLabel.classList.remove('drag-over')
+  dropMeetingOn(null, e.dataTransfer.getData('text/plain'))
 })
 
 searchEl.addEventListener('input', () => {
