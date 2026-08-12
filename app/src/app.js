@@ -29,6 +29,9 @@ const hideLabel = $('hideLabel')
 const searchEl = $('search')
 const sideList = $('sideList')
 const sideCount = $('sideCount')
+const folderList = $('folderList')
+const newFolderBtn = $('newFolder')
+const meetingsLabel = $('meetingsLabel')
 const navHome = $('navHome')
 const navSettings = $('navSettings')
 const railToggle = $('railToggle')
@@ -91,6 +94,8 @@ let filter = ''
 let searchResults = null
 let searchTimer = null
 let searchSeq = 0
+let folders = []
+let currentFolder = null
 let openId = null
 let noteTab = 'notes'
 let liveLines = []
@@ -392,13 +397,17 @@ function fmtWhen(date) {
 }
 
 function visibleMeetings() {
-  if (!filter) return meetings
-  if (searchResults) {
+  let list
+  if (!filter) {
+    list = meetings
+  } else if (searchResults) {
     const ids = new Set(searchResults.map((m) => m.id))
-    return meetings.filter((m) => ids.has(m.id))
+    list = meetings.filter((m) => ids.has(m.id))
+  } else {
+    const q = filter.toLowerCase()
+    list = meetings.filter((m) => m.title.toLowerCase().includes(q))
   }
-  const q = filter.toLowerCase()
-  return meetings.filter((m) => m.title.toLowerCase().includes(q))
+  return currentFolder ? list.filter((m) => m.folder === currentFolder) : list
 }
 
 /// Runs `filter` against transcript and notes content too, not just titles.
@@ -466,6 +475,42 @@ async function loadMeetings() {
   renderSidebar()
   renderNotesList()
 }
+
+async function loadFolders() {
+  try {
+    folders = await invoke('list_folders')
+  } catch {
+    folders = []
+  }
+  renderFolders()
+}
+
+function renderFolders() {
+  meetingsLabel.classList.toggle('on', !currentFolder)
+  folderList.innerHTML = ''
+  for (const f of folders) {
+    const row = el('button', 'folder-row' + (f.name === currentFolder ? ' on' : ''))
+    const name = el('span', 'name', f.name)
+    const count = el('span', 'count', String(f.count))
+    row.append(name, count)
+    row.addEventListener('click', () => selectFolder(f.name))
+    folderList.appendChild(row)
+  }
+}
+
+function selectFolder(name) {
+  currentFolder = name
+  renderFolders()
+  renderSidebar()
+  renderNotesList()
+}
+
+meetingsLabel.addEventListener('click', () => {
+  currentFolder = null
+  renderFolders()
+  renderSidebar()
+  renderNotesList()
+})
 
 searchEl.addEventListener('input', () => {
   filter = searchEl.value.trim()
@@ -1290,6 +1335,7 @@ async function boot() {
   refreshHide()
   refreshModelChip()
   await loadMeetings()
+  await loadFolders()
   showHome()
   loadAgenda()
   setInterval(loadAgenda, AGENDA_REFRESH_MS)

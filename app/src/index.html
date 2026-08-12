@@ -165,6 +165,39 @@
     .side-item .s { font: 400 11px var(--sans); color: var(--hint); }
     .side-empty { font: 400 12px var(--sans); color: var(--hint); font-style: italic; padding: 8px 10px; }
 
+    .side-label.clickable { cursor: pointer; }
+    .side-label.clickable:hover span:first-child { color: var(--ink); }
+    .side-label .mini {
+      width: 16px; height: 16px; border-radius: 4px; border: 0; background: none;
+      color: var(--hint); cursor: pointer; font: 600 13px var(--sans); line-height: 1;
+      display: inline-flex; align-items: center; justify-content: center;
+    }
+    .side-label .mini:hover { color: var(--ink); background: var(--hover); }
+
+    .folder-row {
+      width: 100%; text-align: left; background: none; border: 0; cursor: pointer;
+      padding: 7px 10px; border-radius: 9px; display: flex; gap: 8px; align-items: center;
+      font: 500 13px var(--sans); color: var(--ink-soft);
+    }
+    .folder-row:hover { background: var(--hover); }
+    .folder-row.on { background: var(--key-bg); color: var(--ink); }
+    .folder-row .name {
+      flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .folder-row input.name {
+      flex: 1; min-width: 0; font: 500 13px var(--sans); color: var(--ink);
+      background: var(--card); border: 1px solid var(--accent); border-radius: 4px;
+      padding: 0 4px; outline: none;
+    }
+    .folder-row .count { font: 400 11px var(--sans); color: var(--hint); flex: none; }
+    .folder-row .del {
+      flex: none; width: 16px; height: 16px; border-radius: 4px; border: 0; background: none;
+      color: var(--hint); cursor: pointer; font: 600 12px var(--sans); line-height: 1;
+      display: none; align-items: center; justify-content: center;
+    }
+    .folder-row:hover .del { display: inline-flex; }
+    .folder-row .del:hover { color: var(--danger); }
+
     .side-foot { border-top: 1px solid var(--line); padding-top: 8px; }
     .model-chip {
       display: flex; align-items: center; gap: 8px; width: 100%; padding: 7px 10px;
@@ -597,7 +630,13 @@
       </button>
       </nav>
 
-      <div class="side-label"><span>Meetings</span><span id="sideCount"></span></div>
+      <div class="side-label">
+        <span>Folders</span>
+        <button class="mini" id="newFolder" title="New folder" aria-label="New folder">+</button>
+      </div>
+      <div class="side-list folders" id="folderList"></div>
+
+      <div class="side-label clickable" id="meetingsLabel"><span>Meetings</span><span id="sideCount"></span></div>
       <div class="side-list" id="sideList"></div>
 
       <div class="side-foot">
