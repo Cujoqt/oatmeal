@@ -564,6 +564,36 @@ fn delete_meeting(id: String) -> Result<String, String> {
     library::delete_meeting(&id)
 }
 
+/// Every folder under the recordings root, for the sidebar's Folders section.
+#[tauri::command]
+fn list_folders() -> Vec<library::Folder> {
+    library::list_folders()
+}
+
+/// Create a new, empty folder to file notes into.
+#[tauri::command]
+fn create_folder(name: String) -> Result<(), String> {
+    library::create_folder(&name)
+}
+
+/// Rename a folder in place.
+#[tauri::command]
+fn rename_folder(old: String, new: String) -> Result<(), String> {
+    library::rename_folder(&old, &new)
+}
+
+/// Delete an empty folder. Refuses if it still has notes in it.
+#[tauri::command]
+fn delete_folder(name: String) -> Result<(), String> {
+    library::delete_folder(&name)
+}
+
+/// File a meeting into a folder, or back to Unsorted when `folder` is `None`.
+#[tauri::command]
+fn move_meeting_to_folder(id: String, folder: Option<String>) -> Result<(), String> {
+    library::move_meeting_to_folder(&id, folder.as_deref())
+}
+
 /// Bundle a meeting's notes and transcript into a Markdown file under
 /// `~/Downloads/Oatmeal Exports/` and reveal it in Finder, so it can be shared
 /// without touching the app's own recordings folder.
@@ -673,7 +703,12 @@ pub fn run() {
             calendar_authorized,
             calendar_request_access,
             open_calendar_settings,
-            list_events
+            list_events,
+            list_folders,
+            create_folder,
+            rename_folder,
+            delete_folder,
+            move_meeting_to_folder
         ])
         .setup(|app| {
             // Apply the hide flag as soon as the window exists.
