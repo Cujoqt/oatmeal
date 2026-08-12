@@ -1,5 +1,6 @@
 pub mod apple_calendar;
 pub mod chat;
+pub mod homework;
 pub mod library;
 pub mod live;
 mod mic;

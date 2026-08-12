@@ -537,8 +537,9 @@ mod tests {
     /// Point `$HOME` at a scratch dir for the duration of the closure, so the
     /// tests exercise the real path logic (recordings root *and* Trash) without
     /// touching the developer's own recordings.
-    /// `$HOME` is process-global, so these tests can't overlap.
-    static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    /// `$HOME` is process-global, so these tests can't overlap — not even with
+    /// `homework.rs`'s tests, hence the shared lock in `settings.rs`.
+    use crate::settings::HOME_ENV_LOCK as HOME_LOCK;
 
     fn with_temp_home<T>(f: impl FnOnce(&Path) -> T) -> T {
         let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
