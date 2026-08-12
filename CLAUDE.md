@@ -52,6 +52,14 @@ say so plainly instead of implying it works.
   share a rule with a plain selector.
 - **One router.** `showView()` in `app.js` owns which surface is visible; nav
   highlighting is derived from it, never set by hand.
+- **`setStatus()` is safe to call from any surface.** `#status` itself lives inside
+  the draft view, so it is a hidden element everywhere else — which is how a failed
+  export, rename, and model download all came to look like nothing happening.
+  `setStatus` now mirrors to `#toast` whenever the draft isn't the visible view, so
+  don't add per-view status elements for errors; just call `setStatus`. `#toast` is
+  deliberately **in flow**, not floating: every surface fills the frame, so a
+  floating notice covers the note title at the top or the ask bar at the bottom
+  (and that bar changes height when its suggestion chips wrap).
 - **The recorder's window is hidden from screen capture by default**
   (`NSWindowSharingNone`), so screenshots of it come out blank until the title-bar
   pill is switched to "visible to shares". This is the product's headline feature,

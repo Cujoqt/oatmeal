@@ -87,6 +87,7 @@ const updateGate = $('updateGate')
 const gateTitle = $('gateTitle')
 const gateBody = $('gateBody')
 const gateGetBtn = $('gateGet')
+const toastEl = $('toast')
 const versionLabel = $('versionLabel')
 const updateCheckBtn = $('updateCheck')
 const updateOpenBtn = $('updateOpen')
@@ -129,12 +130,32 @@ let sessionDir = ''
 /// Element a streamed chat answer is being written into, or null between asks.
 let streamingAnswer = null
 let homework = []
+let toastTimer = null
 
 const hwDatePicker = createDatePicker($('hwDatePicker'))
 
+/// `#status` lives inside the draft view, so on every other surface it is a
+/// hidden element — which is how a failed export, a failed rename, and a failed
+/// model download all came to look like nothing happening at all. The line still
+/// belongs in the draft (it sits above the dock, and carries the recording
+/// state), so anywhere else the same message goes to a toast instead.
 function setStatus(msg, isErr = false) {
   statusEl.textContent = msg
   statusEl.classList.toggle('err', isErr)
+  if (!viewHome.classList.contains('on')) showToast(msg, isErr)
+}
+
+function showToast(msg, isErr = false) {
+  clearTimeout(toastTimer)
+  if (!msg) {
+    toastEl.classList.remove('show')
+    return
+  }
+  toastEl.textContent = msg
+  toastEl.classList.toggle('err', isErr)
+  toastEl.classList.add('show')
+  // Errors are worth reading twice; progress notes can go quietly.
+  toastTimer = setTimeout(() => toastEl.classList.remove('show'), isErr ? 7000 : 4000)
 }
 
 // ── tiny markdown renderer ───────────────────────────────────────────────────

@@ -140,6 +140,29 @@
     .update-strip button.quiet { border-color: transparent; color: var(--muted); }
     .update-strip button.quiet:hover { color: var(--ink); }
 
+    /* Where setStatus lands on every surface that isn't the draft. `#status`
+       itself is scoped to that view, so without this a failed export or model
+       download reported into a hidden element. */
+    /* An in-flow strip, not a floating pill. Every surface fills the frame, so a
+       floating message covers something wherever it is parked — the note title at
+       the top, the ask bar and its suggestion chips at the bottom, and that
+       furniture changes height when the chips wrap. This pushes content down for a
+       few seconds instead, which cannot hide anything. Same shape as
+       `.update-strip`, which is already the app's idiom for a notice. */
+    #toast {
+      flex: none; display: none; align-items: center; gap: 10px;
+      padding: 9px 20px; background: var(--panel);
+      border-bottom: 1px solid var(--line);
+      font: 400 13px var(--sans); color: var(--ink-soft);
+    }
+    #toast.show { display: flex; }
+    #toast::before {
+      content: ''; width: 6px; height: 6px; border-radius: 50%; flex: none;
+      background: var(--hint);
+    }
+    #toast.err { color: var(--danger); }
+    #toast.err::before { background: var(--danger); }
+
     #updateGate {
       position: fixed; inset: 0; z-index: 50; display: none;
       align-items: center; justify-content: center; padding: 32px;
@@ -722,6 +745,10 @@
     <button id="updateGet">Download</button>
     <button class="quiet" id="updateLater">Later</button>
   </div>
+
+  <!-- setStatus's home on every surface but the draft: its own #status line lives
+       inside that view, so a failed export used to report into a hidden element. -->
+  <div id="toast" role="status" aria-live="polite"></div>
 
   <div class="shell">
     <aside class="sidebar">
