@@ -501,6 +501,19 @@
     .note-row .s { font: 400 12px var(--sans); color: var(--hint); margin-top: 2px; }
     .notes-empty { text-align: center; color: var(--hint); font-size: 14px; padding: 46px 0; }
 
+    .hw-row { display: flex; align-items: center; gap: 10px; padding: 8px 4px; border-bottom: 1px solid var(--line); }
+    .hw-row:last-child { border-bottom: 0; }
+    .hw-row.done .t { text-decoration: line-through; color: var(--hint); }
+    .hw-row input[type="checkbox"] { flex: none; width: 15px; height: 15px; accent-color: var(--accent); }
+    .hw-row .txt { flex: 1; min-width: 0; }
+    .hw-row .t { font: 500 13.5px var(--sans); color: var(--ink); }
+    .hw-row .s { font: 400 11.5px var(--sans); color: var(--hint); }
+    .hw-row .del {
+      flex: none; width: 20px; height: 20px; border-radius: 4px; border: 0; background: none;
+      color: var(--hint); cursor: pointer; font: 600 14px var(--sans); line-height: 1;
+    }
+    .hw-row .del:hover { color: var(--danger); background: var(--hover); }
+
     /* ── settings ──────────────────────────────────────────────────────────*/
     #viewSettings { padding: 0; }
     .set-wrap { width: 100%; max-width: 720px; margin: 0 auto; padding: 30px 34px 44px; }
@@ -622,6 +635,11 @@
       <button class="nav" id="navSettings">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3.2" /><path d="M12 2.6v2.6M12 18.8v2.6M21.4 12h-2.6M5.2 12H2.6M18.6 5.4l-1.9 1.9M7.3 16.7l-1.9 1.9M18.6 18.6l-1.9-1.9M7.3 7.3 5.4 5.4" /></svg>
         <span>Settings</span>
+      </button>
+
+      <button class="nav" id="navHomework">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3h8a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z" /><path d="M9 9h6M9 13h6M9 17h4" /></svg>
+        <span>Homework</span>
       </button>
       </nav>
 
@@ -813,6 +831,37 @@
           <div class="btn-row">
             <button class="btn primary" id="saveSettings">Save settings</button>
             <span class="note-line" id="settingsNote" role="status" aria-live="polite"></span>
+          </div>
+        </div>
+      </section>
+
+      <section class="view" id="viewHomework">
+        <div class="set-wrap">
+          <h1>Homework</h1>
+
+          <div class="set-card">
+            <h2>Add homework</h2>
+            <div class="field">
+              <label for="hwTitle">Title</label>
+              <input id="hwTitle" placeholder="Read chapter 4" autocomplete="off" spellcheck="false" maxlength="120" />
+            </div>
+            <div class="field">
+              <label for="hwNoteInput">Note</label>
+              <input id="hwNoteInput" placeholder="Optional details" autocomplete="off" spellcheck="false" />
+            </div>
+            <div class="field">
+              <label>Due date</label>
+              <div id="hwDatePicker"></div>
+            </div>
+            <div class="btn-row">
+              <button class="btn primary" id="hwAdd">Add</button>
+              <span class="note-line" id="hwStatus" role="status" aria-live="polite"></span>
+            </div>
+          </div>
+
+          <div class="set-card">
+            <h2>Upcoming</h2>
+            <div id="hwList"></div>
           </div>
         </div>
       </section>

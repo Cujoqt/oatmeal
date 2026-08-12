@@ -10,6 +10,7 @@ const { listen, emit } = window.__TAURI__.event
 const $ = (id) => document.getElementById(id)
 
 import { EVENTS, getLang, setLang } from '/shared.js'
+import { createDatePicker } from '/datepicker.js'
 
 const btn = $('btn')
 const titleEl = $('title')
@@ -31,6 +32,13 @@ const sideList = $('sideList')
 const sideCount = $('sideCount')
 const navHome = $('navHome')
 const navSettings = $('navSettings')
+const navHomework = $('navHomework')
+const viewHomework = $('viewHomework')
+const hwTitleEl = $('hwTitle')
+const hwNoteInputEl = $('hwNoteInput')
+const hwAddBtn = $('hwAdd')
+const hwStatusEl = $('hwStatus')
+const hwListEl = $('hwList')
 const railToggle = $('railToggle')
 const viewDash = $('viewDash')
 const viewSettings = $('viewSettings')
@@ -481,17 +489,19 @@ newNoteBtn.addEventListener('click', showDraft)
 
 // ── views ────────────────────────────────────────────────────────────────────
 
-/// Four surfaces share the content pane: the Coming-up dashboard, the blank
-/// note you type into, a recorded meeting, and Settings. One function owns which
-/// is lit so the nav highlight can never drift from the view.
+/// Five surfaces share the content pane: the Coming-up dashboard, the blank
+/// note you type into, a recorded meeting, Settings, and Homework. One function
+/// owns which is lit so the nav highlight can never drift from the view.
 function showView(view) {
   viewDash.classList.toggle('on', view === 'dash')
   viewHome.classList.toggle('on', view === 'draft')
   viewNote.classList.toggle('on', view === 'note')
   viewSettings.classList.toggle('on', view === 'settings')
+  viewHomework.classList.toggle('on', view === 'homework')
   navHome.classList.toggle('on', view === 'dash')
   navSettings.classList.toggle('on', view === 'settings')
-  for (const [el, active] of [[navHome, view === 'dash'], [navSettings, view === 'settings']]) {
+  navHomework.classList.toggle('on', view === 'homework')
+  for (const [el, active] of [[navHome, view === 'dash'], [navSettings, view === 'settings'], [navHomework, view === 'homework']]) {
     active ? el.setAttribute('aria-current', 'page') : el.removeAttribute('aria-current')
   }
 }
@@ -519,6 +529,15 @@ function showSettings() {
   loadSettings()
   renderSidebar()
 }
+
+function showHomework() {
+  openId = null
+  showView('homework')
+  renderSidebar()
+  loadHomework()
+}
+
+navHomework.addEventListener('click', showHomework)
 
 function currentMeeting() {
   return meetings.find((m) => m.id === openId)
