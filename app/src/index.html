@@ -199,6 +199,10 @@
     .folder-row .del:hover { color: var(--danger); }
 
     .folder-row.drag-over, .side-label.clickable.drag-over { background: var(--hover); }
+    /* Folder errors surface here: #status lives inside the draft view, so it is
+       invisible while the sidebar is what the user is actually working in. */
+    .side-note { font: 400 11.5px var(--sans); color: var(--danger); padding: 2px 10px 6px; }
+    .side-note:empty { display: none; }
 
     .side-foot { border-top: 1px solid var(--line); padding-top: 8px; }
     .model-chip {
@@ -683,6 +687,7 @@
         <button class="mini" id="newFolder" title="New folder" aria-label="New folder">+</button>
       </div>
       <div class="side-list folders" id="folderList"></div>
+      <div class="side-note" id="folderNote" role="status" aria-live="polite"></div>
 
       <div class="side-label clickable" id="meetingsLabel"><span>Meetings</span><span id="sideCount"></span></div>
       <div class="side-list" id="sideList"></div>

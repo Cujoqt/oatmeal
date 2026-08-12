@@ -31,6 +31,7 @@ const searchEl = $('search')
 const sideList = $('sideList')
 const sideCount = $('sideCount')
 const folderList = $('folderList')
+const folderNote = $('folderNote')
 const newFolderBtn = $('newFolder')
 const meetingsLabel = $('meetingsLabel')
 const navHome = $('navHome')
@@ -524,10 +525,18 @@ async function dropMeetingOn(folderName, id) {
   if (!id) return
   try {
     await invoke('move_meeting_to_folder', { id, folder: folderName })
+    setFolderNote('')
     await refreshLibrary()
   } catch (e) {
-    setStatus(String(e), true)
+    setFolderNote(String(e))
   }
+}
+
+/// Folder errors go beside the folder list, not through `setStatus`: `#status`
+/// lives inside the draft view, so a message written there is invisible while
+/// the user is working in the sidebar.
+function setFolderNote(msg) {
+  folderNote.textContent = msg
 }
 
 function renderFolders() {
@@ -576,10 +585,11 @@ function startRenameFolder(row, nameEl, oldName) {
       try {
         await invoke('rename_folder', { old: oldName, new: next })
         if (currentFolder === oldName) currentFolder = next
+        setFolderNote('')
         await loadFolders()
         return
       } catch (e) {
-        setStatus(String(e), true)
+        setFolderNote(String(e))
       }
     }
     row.replaceChild(nameEl, input)
@@ -597,9 +607,10 @@ async function deleteFolder(name) {
   try {
     await invoke('delete_folder', { name })
     if (currentFolder === name) currentFolder = null
+    setFolderNote('')
     await loadFolders()
   } catch (e) {
-    setStatus(String(e), true)
+    setFolderNote(String(e))
   }
 }
 
@@ -654,9 +665,10 @@ newFolderBtn.addEventListener('click', () => {
     if (!name) return
     try {
       await invoke('create_folder', { name })
+      setFolderNote('')
       await loadFolders()
     } catch (e) {
-      setStatus(String(e), true)
+      setFolderNote(String(e))
     }
   }
   const onKey = (e) => {
@@ -1445,7 +1457,7 @@ async function toggleHomework(id, done) {
     await invoke('set_homework_done', { id, done })
     await loadHomework()
   } catch (e) {
-    setStatus(String(e), true)
+    note(hwStatusEl, String(e), 'err')
   }
 }
 
@@ -1454,7 +1466,7 @@ async function deleteHomeworkItem(id) {
     await invoke('delete_homework', { id })
     await loadHomework()
   } catch (e) {
-    setStatus(String(e), true)
+    note(hwStatusEl, String(e), 'err')
   }
 }
 
