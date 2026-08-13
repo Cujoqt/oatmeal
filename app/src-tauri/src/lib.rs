@@ -266,36 +266,47 @@ fn begin_session(
     }
     let paths = paths()?;
 
-    // Both lanes mirror into one tap, so the live worker hears the room and the
-    // call as a single stream — the same mix the final transcript is made from.
-    let tap = std::sync::Arc::new(Tap::default());
+    // Each recorder mirrors into its own lane of one tap, which sums them — the
+    // same mix the final transcript is made from. A lane whose recorder never
+    // starts is retired so the tap doesn't sit waiting on a buffer that will
+    // never fill.
+    let (tap, mut lanes) = Tap::with_lanes(2);
+    let sys_lane = lanes.pop();
+    let mic_lane = lanes.pop();
 
     let mut any = false;
     {
         let mut m = state.mic.lock().map_err(|_| "mic state poisoned")?;
         if m.is_none() {
-            match MicRecorder::start_with_tap(PathBuf::from(&paths.mic_wav), Some(tap.clone())) {
+            match MicRecorder::start_with_tap(PathBuf::from(&paths.mic_wav), mic_lane) {
                 Ok(r) => {
                     *m = Some(r);
                     any = true;
                 }
-                Err(e) => eprintln!("[oatmeal] mic lane did not start: {e}"),
+                Err(e) => {
+                    eprintln!("[oatmeal] mic lane did not start: {e}");
+                    tap.retire(0);
+                }
             }
+        } else {
+            tap.retire(0);
         }
     }
     {
         let mut s = state.sysaudio.lock().map_err(|_| "sysaudio state poisoned")?;
         if s.is_none() {
-            match SysAudioRecorder::start_with_tap(
-                PathBuf::from(&paths.sys_wav),
-                Some(tap.clone()),
-            ) {
+            match SysAudioRecorder::start_with_tap(PathBuf::from(&paths.sys_wav), sys_lane) {
                 Ok(r) => {
                     *s = Some(r);
                     any = true;
                 }
-                Err(e) => eprintln!("[oatmeal] system-audio lane did not start: {e}"),
+                Err(e) => {
+                    eprintln!("[oatmeal] system-audio lane did not start: {e}");
+                    tap.retire(1);
+                }
             }
+        } else {
+            tap.retire(1);
         }
     }
 

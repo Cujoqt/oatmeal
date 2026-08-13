@@ -22,7 +22,7 @@ use std::thread::JoinHandle;
 
 use hound::{WavSpec, WavWriter};
 
-use crate::live::Tap;
+use crate::live::Lane;
 use screencapturekit::prelude::{
     CMSampleBuffer, CMSampleBufferExt, SCContentFilter, SCShareableContent, SCStream,
     SCStreamConfiguration, SCStreamOutputType,
@@ -51,7 +51,7 @@ impl SysAudioRecorder {
 
     /// As `start`, but also mirror the captured audio into `tap` so the live
     /// transcription worker can decode the far side of the call as it arrives.
-    pub fn start_with_tap(path: PathBuf, tap: Option<Arc<Tap>>) -> Result<Self, String> {
+    pub fn start_with_tap(path: PathBuf, tap: Option<Lane>) -> Result<Self, String> {
         let stop = Arc::new(AtomicBool::new(false));
         let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<(), String>>();
 
@@ -114,7 +114,7 @@ fn run_capture(
     path: PathBuf,
     stop: Arc<AtomicBool>,
     ready: std::sync::mpsc::Sender<Result<(), String>>,
-    tap: Option<Arc<Tap>>,
+    tap: Option<Lane>,
 ) -> Result<(), String> {
     macro_rules! bail {
         ($e:expr) => {{
@@ -170,7 +170,7 @@ fn run_capture(
     stream.add_output_handler(
         move |sample: CMSampleBuffer, of_type: SCStreamOutputType| {
             if of_type == SCStreamOutputType::Audio {
-                write_audio_sample(&cb_writer, cb_tap.as_deref(), &sample);
+                write_audio_sample(&cb_writer, cb_tap.as_ref(), &sample);
             }
         },
         SCStreamOutputType::Audio,
@@ -201,7 +201,7 @@ fn run_capture(
 /// dispatch queue. SCK delivers Float32 non-interleaved: one `AudioBuffer` per
 /// channel, each holding the same number of frames. Averaging the channels gives
 /// a mono track; if only one buffer is present it passes through unchanged.
-fn write_audio_sample(writer: &SharedWriter, tap: Option<&Tap>, sample: &CMSampleBuffer) {
+fn write_audio_sample(writer: &SharedWriter, tap: Option<&Lane>, sample: &CMSampleBuffer) {
     let list = match sample.audio_buffer_list() {
         Some(l) => l,
         None => return,

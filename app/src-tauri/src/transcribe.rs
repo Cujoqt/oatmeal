@@ -98,7 +98,7 @@ pub fn transcribe_samples(
     samples: &[f32],
     language: Option<&str>,
 ) -> Result<Transcript, String> {
-    Transcriber::load(model_path)?.run(samples, language, Quality::Accurate)
+    Transcriber::load(model_path)?.run(samples, language, Quality::Accurate, None)
 }
 
 /// How hard Whisper should work. Loading the model dominates either way; this
@@ -154,11 +154,19 @@ impl Transcriber {
     }
 
     /// Transcribe 16 kHz mono samples.
+    /// Transcribe 16 kHz mono samples, with `context` — usually the text just
+    /// before this audio — as the decoder's starting point.
+    ///
+    /// The live lane decodes a few seconds at a time, so each window arrives with
+    /// no idea what was being said a moment ago. Handing Whisper the previous
+    /// line keeps names and terms spelled consistently across a cut, which is
+    /// where short windows otherwise lose to long ones.
     pub fn run(
         &self,
         samples: &[f32],
         language: Option<&str>,
         quality: Quality,
+        context: Option<&str>,
     ) -> Result<Transcript, String> {
         if samples.is_empty() {
             return Err("no audio samples to transcribe".into());
@@ -183,6 +191,11 @@ impl Transcriber {
             params.set_detect_language(true);
         }
         params.set_n_threads(thread_budget(quality));
+        // A null byte here would panic inside whisper-rs, which on the live worker
+        // thread means no more transcript for the rest of the meeting.
+        if let Some(ctx) = context.filter(|c| !c.trim().is_empty() && !c.contains('\0')) {
+            params.set_initial_prompt(ctx);
+        }
         // Whisper loves to emit "[BLANK_AUDIO]" and hallucinate stock phrases over
         // silence. Suppressing non-speech tokens cuts most of that.
         params.set_suppress_blank(true);

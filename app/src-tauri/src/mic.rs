@@ -19,7 +19,7 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::SampleFormat;
 use hound::{WavSpec, WavWriter};
 
-use crate::live::Tap;
+use crate::live::Lane;
 
 type SharedWriter = Arc<Mutex<Option<WavWriter<std::io::BufWriter<std::fs::File>>>>>;
 
@@ -40,7 +40,7 @@ impl MicRecorder {
 
     /// As `start`, but also mirror the captured audio into `tap` so the live
     /// transcription worker can decode it while the meeting is still running.
-    pub fn start_with_tap(path: PathBuf, tap: Option<Arc<Tap>>) -> Result<Self, String> {
+    pub fn start_with_tap(path: PathBuf, tap: Option<Lane>) -> Result<Self, String> {
         let stop = Arc::new(AtomicBool::new(false));
         // Channel to surface a start-time error (bad device, unbuildable stream)
         // back to the caller synchronously.
@@ -108,7 +108,7 @@ fn run_capture(
     path: PathBuf,
     stop: Arc<AtomicBool>,
     ready: std::sync::mpsc::Sender<Result<(), String>>,
-    tap: Option<Arc<Tap>>,
+    tap: Option<Lane>,
 ) -> Result<(), String> {
     // Anything that fails during setup is reported via `ready` so `start` can
     // return it synchronously; a helper keeps that plumbing tidy.
