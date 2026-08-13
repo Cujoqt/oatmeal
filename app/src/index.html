@@ -432,6 +432,9 @@
       border: 1px solid var(--line-2); background: transparent; color: var(--ink-soft);
       font: 500 12.5px var(--sans); cursor: default;
     }
+    /* `.chip` sets display, which outranks the UA stylesheet's rule for the
+       hidden attribute — without this, hiding a chip does nothing at all. */
+    .chip[hidden] { display: none; }
     .chip.act { cursor: pointer; }
     .chip.act:hover { background: var(--hover); }
     .chip.sel { background: var(--key-bg); border-color: transparent; color: var(--ink); }
@@ -507,6 +510,21 @@
       border-radius: 14px; padding: 4px 11px; font: 500 12px var(--sans); cursor: pointer;
     }
     .qa .copy:hover { border-color: var(--accent); color: var(--accent); }
+
+    /* Library-wide ask, at the top of the dashboard. Borrows `.ask` and `.qa`
+       from the note view's ask bar so there is only one answer style. */
+    .recall { margin-bottom: 22px; }
+    #recallAnswers:empty { display: none; }
+    #recallAnswers { margin-top: 16px; }
+    .qa .cites { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 10px; }
+    .qa .cites button {
+      display: inline-flex; align-items: center; gap: 7px; max-width: 100%; cursor: pointer;
+      border: 1px solid var(--line-2); background: var(--card); color: var(--ink-soft);
+      border-radius: 18px; padding: 5px 12px; font: 500 12.5px var(--sans); text-align: left;
+    }
+    .qa .cites button:hover { border-color: var(--accent); color: var(--accent); }
+    .qa .cites b { font: 600 11px var(--mono); color: var(--accent); flex: none; }
+    .qa .cites span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
     /* ── sidebar collapse ──────────────────────────────────────────────────*/
     #railToggle {
@@ -621,6 +639,50 @@
     .note-row .t { font: 500 14px var(--sans); color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .note-row .s { font: 400 12px var(--sans); color: var(--hint); margin-top: 2px; }
     .notes-empty { text-align: center; color: var(--hint); font-size: 14px; padding: 46px 0; }
+
+    /* "Finish transcribing" on a recording the app died in the middle of. Sits
+       at the far end of its row so it never crowds the title. */
+    .note-row .row-act {
+      margin-left: auto; flex: none; padding: 5px 11px; border-radius: 999px;
+      border: 1px solid var(--accent); background: none; color: var(--accent);
+      font: 500 12px var(--sans); cursor: pointer;
+    }
+    .note-row .row-act:hover { background: var(--accent-wash); }
+
+    /* Notes written before the meeting was continued describe only part of it.
+       Regenerating is a full model run, so this offers the button rather than
+       spending the time unasked. */
+    .stale {
+      display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+      margin: 0 0 18px; padding: 10px 14px; border-radius: 10px;
+      border: 1px solid var(--line-2); background: var(--panel);
+      font: 400 13px var(--sans); color: var(--ink-soft);
+    }
+    .stale button {
+      padding: 5px 12px; border-radius: 999px; border: 1px solid var(--accent);
+      background: none; color: var(--accent); font: 500 12.5px var(--sans); cursor: pointer;
+    }
+    .stale button:hover { background: var(--accent-wash); }
+
+    /* A search result is the same row with the matching text under it, so the
+       list stays the list — no second surface for the router to know about. */
+    .note-row.result { align-items: flex-start; }
+    /* The text span, whichever child it is. Not `:last-child` — an interrupted
+       recording appends a Finish button after it, and the text would silently
+       lose `min-width: 0` and stop shrinking, pushing that button out of the row. */
+    .note-row.result > span:not(.ic) { flex: 1; min-width: 0; }
+    .note-row.result .ic { margin-top: 1px; }
+    .snips { display: flex; flex-direction: column; gap: 5px; margin-top: 7px; }
+    .snip { display: flex; gap: 8px; align-items: baseline; }
+    .snip .src {
+      flex: none; font: 600 9.5px var(--sans); text-transform: uppercase; letter-spacing: .7px;
+      color: var(--hint); background: var(--key-bg); border-radius: 5px; padding: 2px 6px;
+    }
+    .snip .x {
+      min-width: 0; font: 400 12.5px var(--sans); line-height: 1.45; color: var(--ink-soft);
+      white-space: normal; overflow-wrap: anywhere;
+    }
+    .snip mark { background: var(--accent-wash); color: var(--ink); border-radius: 3px; padding: 0 1px; }
 
     .hw-row { display: flex; align-items: center; gap: 10px; padding: 8px 4px; border-bottom: 1px solid var(--line); }
     .hw-row:last-child { border-bottom: 0; }
@@ -819,6 +881,19 @@
             </div>
           </div>
 
+          <!-- Ask across everything already recorded, rather than one meeting
+               you already picked. In flow, like everything else on this page —
+               a floating panel here would sit on the agenda or a note row. -->
+          <div class="recall">
+            <div class="ask">
+              <input id="recallInput" placeholder="Ask across all your meetings — “what did we decide about pricing?”" />
+              <button id="recallSend" title="Ask across all meetings" aria-label="Ask across all meetings">
+                <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h13M13 6l6 6-6 6" /></svg>
+              </button>
+            </div>
+            <div id="recallAnswers"></div>
+          </div>
+
           <div class="agenda"><div class="agenda-scroll" id="agenda"></div></div>
 
           <div class="dash-label">Notes</div>
@@ -899,6 +974,14 @@
             </div>
             <div class="tmpl-chips" id="tmplChips"></div>
             <span class="chip" id="chipWhen"></span>
+            <button class="chip act" id="chipFinish" hidden title="Transcribe the audio this recording never got written up">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a9 9 0 1 1-8.5 6" /><path d="M3 4v5h5" /></svg>
+              Finish transcribing
+            </button>
+            <button class="chip act" id="chipContinue" title="Keep recording into this meeting">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8" /><circle cx="12" cy="12" r="3.4" fill="currentColor" stroke="none" /></svg>
+              Continue recording
+            </button>
             <button class="chip act" id="chipExport" title="Export as Markdown">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v10M8 10l4 4 4-4M5 18h14" /></svg>
               Export

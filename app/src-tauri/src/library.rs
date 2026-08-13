@@ -22,13 +22,21 @@ pub struct Meeting {
     /// Local naive ISO (`YYYY-MM-DDTHH:MM:SS`) so JS `new Date(...)` reads it
     /// as local time, matching the clock the recording was named with.
     pub started_at: String,
-    /// Longest lane's duration in seconds. 0 when no readable audio survives.
+    /// Recorded length in seconds, summed across every take. 0 when no readable
+    /// audio survives.
     pub duration_secs: u64,
     /// Whether `transcript.md` was written (i.e. the meeting finished and was
     /// transcribed, rather than being abandoned mid-recording).
     pub transcribed: bool,
+    /// Segments that hold audio `transcript.md` doesn't cover — the app died
+    /// mid-recording, or a continuation was never stopped cleanly. Non-empty
+    /// means the meeting can be finished with one press.
+    pub pending_segments: Vec<u32>,
     /// Whether the language model has already written notes for this meeting.
     pub has_notes: bool,
+    /// Whether those notes predate audio that has since been added, so they
+    /// describe only part of the meeting.
+    pub notes_stale: bool,
     /// Which note template was used the last time notes were generated, so the
     /// picker reopens on the same choice. Defaults when nothing is recorded yet.
     pub template: crate::chat::Template,
@@ -267,19 +275,79 @@ fn read_meeting(dir: &Path, name: &str, folder: Option<String>) -> Meeting {
         .or_else(|| title_from_slug(name))
         .unwrap_or_else(|| "Untitled meeting".into());
 
-    let duration_secs = wav_secs(&dir.join("mic.wav")).max(wav_secs(&dir.join("system.wav")));
-
     Meeting {
         id: name.to_string(),
         title,
         started_at: parse_stamp(name).unwrap_or_default(),
-        duration_secs,
+        duration_secs: crate::session::total_len_secs(dir),
         transcribed,
+        pending_segments: pending_segments(dir),
         has_notes: has_summary(dir),
+        notes_stale: read_meta(dir)
+            .get("notes_stale")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
         template: meta_template(dir).unwrap_or_default(),
         dir: dir.display().to_string(),
         folder,
     }
+}
+
+/// One meeting by id, wherever it is filed. `folder` is left unset — the folder
+/// is learned from the directory walk, which a single lookup doesn't do.
+pub fn meeting(id: &str) -> Result<Meeting, String> {
+    let dir = meeting_dir(id)?;
+    Ok(read_meeting(&dir, id, None))
+}
+
+/// How many segments `transcript.md` already covers.
+///
+/// Meetings recorded before continuations existed carry no counter, so a
+/// transcript is taken to mean their one and only segment is done — otherwise
+/// every meeting in the library would suddenly offer to be re-transcribed.
+fn transcribed_segments(dir: &Path) -> u32 {
+    if let Some(n) = read_meta(dir)
+        .get("transcribed_segments")
+        .and_then(|v| v.as_u64())
+    {
+        return n as u32;
+    }
+    u32::from(dir.join("transcript.md").is_file())
+}
+
+/// Segments with audio that never made it into `transcript.md`.
+fn pending_segments(dir: &Path) -> Vec<u32> {
+    let done = transcribed_segments(dir);
+    crate::session::recorded_segments(dir)
+        .into_iter()
+        .filter(|n| *n > done)
+        .collect()
+}
+
+/// Record that `transcript.md` now covers every segment up to `n`.
+pub fn record_transcribed_segment(dir: &Path, n: u32) -> Result<(), String> {
+    update_meta(dir, |meta| {
+        let done = meta
+            .get("transcribed_segments")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        if u64::from(n) > done {
+            meta.insert("transcribed_segments".into(), serde_json::json!(n));
+        }
+    })
+}
+
+/// Flag a meeting's model-written notes as describing only part of it, because
+/// audio recorded after they were written has now been transcribed in.
+/// Regenerating is a full model run, so the user is told rather than charged
+/// for it silently. A meeting with no notes has nothing to go stale.
+pub fn mark_notes_stale(dir: &Path) -> Result<(), String> {
+    if !has_summary(dir) {
+        return Ok(());
+    }
+    update_meta(dir, |meta| {
+        meta.insert("notes_stale".into(), serde_json::Value::Bool(true));
+    })
 }
 
 /// Meetings whose title, transcript, or notes contain `query` (case-insensitive
@@ -307,6 +375,164 @@ fn meeting_matches(m: &Meeting, q: &str) -> bool {
         .iter()
         .filter_map(|file| std::fs::read_to_string(dir.join(file)).ok())
         .any(|text| text.to_lowercase().contains(q))
+}
+
+// ── search snippets ─────────────────────────────────────────────────────────
+//
+// Knowing that a meeting matched isn't much help when the transcript is
+// thousands of words long: the useful answer is the sentence the words were
+// said in. These excerpts are bounded on both axes — a fixed context window and
+// a fixed count per meeting — so a one-letter query can't hand the UI a whole
+// transcript to render.
+
+/// Characters of context kept either side of a hit.
+const SNIPPET_CONTEXT: usize = 70;
+
+/// Most snippets returned for one meeting, counting every source together.
+const MAX_SNIPPETS: usize = 3;
+
+/// Which part of a meeting an excerpt came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SnippetSource {
+    Title,
+    /// Either file of notes: what the model wrote, or what the user typed.
+    Notes,
+    Transcript,
+}
+
+/// One excerpt of a meeting, around one occurrence of the query.
+#[derive(Debug, Clone, Serialize)]
+pub struct Snippet {
+    pub source: SnippetSource,
+    /// A single line of context around the hit, elided with `…` where it was
+    /// clipped. Whitespace is collapsed so it reads as one line in a list.
+    pub text: String,
+}
+
+/// A meeting that matched a search, and where it matched.
+#[derive(Debug, Clone, Serialize)]
+pub struct SearchHit {
+    pub meeting: Meeting,
+    pub snippets: Vec<Snippet>,
+}
+
+/// Lowercase one char at a time so the result indexes 1:1 with the original.
+/// `str::to_lowercase` can lengthen the string (`İ` → two chars), which would
+/// slide every index after it and slice the window in the wrong place; keeping
+/// only the first char of such an expansion trades an exotic mismatch for
+/// indices that always line up.
+fn lower_chars(chars: &[char]) -> Vec<char> {
+    chars
+        .iter()
+        .map(|c| c.to_lowercase().next().unwrap_or(*c))
+        .collect()
+}
+
+/// Char index of the first occurrence of `needle` in `hay`, both lowercased.
+fn find_chars(hay: &[char], needle: &[char]) -> Option<usize> {
+    if needle.len() > hay.len() {
+        return None;
+    }
+    (0..=hay.len() - needle.len()).find(|&i| &hay[i..i + needle.len()] == needle)
+}
+
+/// Squash runs of whitespace (newlines included) into single spaces, so an
+/// excerpt spanning a line break still renders as one line.
+fn collapse_ws(chars: &[char]) -> String {
+    chars
+        .iter()
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Excerpts around each occurrence of `needle` (already lowercased) in `text`,
+/// stopping at `limit`. Hits inside a window already emitted are skipped, so a
+/// dense match doesn't return the same sentence three times.
+fn snippets_from(
+    source: SnippetSource,
+    text: &str,
+    needle: &[char],
+    limit: usize,
+) -> Vec<Snippet> {
+    if needle.is_empty() || limit == 0 {
+        return Vec::new();
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let lower = lower_chars(&chars);
+
+    let mut out = Vec::new();
+    let mut from = 0;
+    while out.len() < limit && from < lower.len() {
+        let Some(rel) = find_chars(&lower[from..], needle) else {
+            break;
+        };
+        let at = from + rel;
+        let start = at.saturating_sub(SNIPPET_CONTEXT);
+        let end = (at + needle.len() + SNIPPET_CONTEXT).min(chars.len());
+
+        let mut excerpt = String::new();
+        if start > 0 {
+            excerpt.push('…');
+        }
+        excerpt.push_str(&collapse_ws(&chars[start..end]));
+        if end < chars.len() {
+            excerpt.push('…');
+        }
+        out.push(Snippet { source, text: excerpt });
+
+        from = end.max(at + needle.len());
+    }
+    out
+}
+
+/// Every excerpt worth showing for one meeting: title first, then notes, then
+/// the transcript, capped at `MAX_SNIPPETS` across all of them.
+fn meeting_snippets(m: &Meeting, needle: &[char]) -> Vec<Snippet> {
+    let dir = Path::new(&m.dir);
+    let read = |name: &str| std::fs::read_to_string(dir.join(name)).unwrap_or_default();
+    // The transcript is excerpted from its spoken words, not the raw markdown:
+    // nobody wants `**[0:04]**` in the middle of a quote.
+    let spoken = strip_transcript_markup(&read("transcript.md"));
+
+    let sources = [
+        (SnippetSource::Title, m.title.clone()),
+        (SnippetSource::Notes, read(SUMMARY)),
+        (SnippetSource::Notes, read(TYPED_NOTES)),
+        (SnippetSource::Transcript, spoken),
+    ];
+
+    let mut out: Vec<Snippet> = Vec::new();
+    for (source, text) in sources {
+        if out.len() >= MAX_SNIPPETS {
+            break;
+        }
+        out.extend(snippets_from(source, &text, needle, MAX_SNIPPETS - out.len()));
+    }
+    out
+}
+
+/// Meetings matching `query`, each with the excerpts that made it match.
+///
+/// Matching is the same case-insensitive substring test `search_meetings` uses
+/// — the whole query, spaces and all, so a two-word query is a phrase — because
+/// the caller shows both result sets and they must not disagree. A blank query
+/// isn't a search and has nothing to excerpt, so it returns nothing rather than
+/// every meeting.
+pub fn search_hits(query: &str) -> Vec<SearchHit> {
+    let needle = lower_chars(&query.trim().chars().collect::<Vec<_>>());
+    if needle.is_empty() {
+        return Vec::new();
+    }
+    list_meetings()
+        .into_iter()
+        .filter_map(|m| {
+            let snippets = meeting_snippets(&m, &needle);
+            (!snippets.is_empty()).then_some(SearchHit { meeting: m, snippets })
+        })
+        .collect()
 }
 
 /// `YYYYMMDD-HHMMSS[-slug]` → `YYYY-MM-DDTHH:MM:SS`, or None if the prefix
@@ -431,7 +657,7 @@ fn find_meeting_dir(id: &str) -> Option<std::path::PathBuf> {
     None
 }
 
-fn meeting_dir(id: &str) -> Result<std::path::PathBuf, String> {
+pub fn meeting_dir(id: &str) -> Result<std::path::PathBuf, String> {
     if id.is_empty()
         || id.contains('/')
         || id.contains('\\')
@@ -559,7 +785,7 @@ pub fn transcript_text(id: &str) -> Result<String, String> {
 
 /// Pull the spoken words out of a `transcript.md`, dropping the title, the
 /// recorded-at line, the `## Transcript` heading and the `**[m:ss]**` stamps.
-fn strip_transcript_markup(md: &str) -> String {
+pub(crate) fn strip_transcript_markup(md: &str) -> String {
     let mut out = String::new();
     for line in md.lines() {
         let line = line.trim();
@@ -644,6 +870,9 @@ pub fn write_notes(id: &str, template: crate::chat::Template, force: bool) -> Re
 
     update_meta(&dir, |meta| {
         meta.insert("template".into(), serde_json::to_value(template).unwrap());
+        // These notes were just written from the whole transcript as it stands,
+        // so whatever continuation made the last set stale is now covered.
+        meta.remove("notes_stale");
     })?;
 
     Ok(notes)
@@ -691,18 +920,6 @@ pub fn typed_notes(id: &str) -> Result<String, String> {
         .collect::<Vec<_>>()
         .join("\n");
     Ok(body.trim().to_string())
-}
-
-/// Duration of a WAV in whole seconds, or 0 if it's missing or unreadable.
-fn wav_secs(path: &Path) -> u64 {
-    let Ok(reader) = hound::WavReader::open(path) else {
-        return 0;
-    };
-    let spec = reader.spec();
-    if spec.sample_rate == 0 || spec.channels == 0 {
-        return 0;
-    }
-    u64::from(reader.duration()) / u64::from(spec.sample_rate)
 }
 
 #[cfg(test)]
@@ -928,6 +1145,135 @@ mod tests {
         });
     }
 
+    /// A meeting folder with a chosen title and one line of spoken words, so a
+    /// snippet test can put the hit exactly where it wants it.
+    fn seed_transcript(id: &str, title: &str, body: &str) -> std::path::PathBuf {
+        let dir = recordings_root().join(id);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("transcript.md"),
+            format!("# {title}\n\n_Recorded 2026-07-24 10:33_\n\n## Transcript\n\n**[0:00]** {body}\n"),
+        )
+        .unwrap();
+        dir
+    }
+
+    #[test]
+    fn snippets_reach_the_very_start_and_the_very_end_of_the_text() {
+        with_temp_home(|_| {
+            let filler = "filler ".repeat(80);
+            seed_transcript("20260724-100000-opening", "Opening", &format!("roadmap {filler}"));
+            seed_transcript("20260724-110000-closing", "Closing", &format!("{filler} roadmap"));
+
+            let hits = search_hits("roadmap");
+            assert_eq!(hits.len(), 2);
+            let snips = |id: &str| {
+                hits.iter()
+                    .find(|h| h.meeting.id == id)
+                    .unwrap_or_else(|| panic!("no hit for {id}"))
+                    .snippets
+                    .clone()
+            };
+
+            // A hit at char 0 has nothing to its left, so no leading ellipsis.
+            let opening = snips("20260724-100000-opening");
+            assert_eq!(opening.len(), 1);
+            assert_eq!(opening[0].source, SnippetSource::Transcript);
+            assert!(opening[0].text.starts_with("roadmap"), "got: {:?}", opening[0].text);
+            assert!(opening[0].text.ends_with('…'), "got: {:?}", opening[0].text);
+
+            // ...and a hit on the last word has nothing to its right.
+            let closing = snips("20260724-110000-closing");
+            assert_eq!(closing.len(), 1);
+            assert!(closing[0].text.starts_with('…'), "got: {:?}", closing[0].text);
+            assert!(closing[0].text.ends_with("roadmap"), "got: {:?}", closing[0].text);
+        });
+    }
+
+    #[test]
+    fn snippets_are_capped_per_meeting_and_bounded_in_length() {
+        with_temp_home(|_| {
+            let gap = "filler ".repeat(60);
+            let body = vec!["roadmap"; 6].join(&gap);
+            seed_transcript("20260724-100000-long", "Long", &body);
+
+            let hits = search_hits("roadmap");
+            assert_eq!(hits.len(), 1);
+            let snips = &hits[0].snippets;
+            assert_eq!(snips.len(), MAX_SNIPPETS, "six hits must not all come back");
+            for s in snips {
+                assert!(s.text.to_lowercase().contains("roadmap"), "got: {:?}", s.text);
+                let max = 2 * SNIPPET_CONTEXT + "roadmap".len() + 2;
+                assert!(s.text.chars().count() <= max, "{} chars: {:?}", s.text.chars().count(), s.text);
+            }
+            // Separate windows, not the same sentence three times over.
+            assert_ne!(snips[0].text, snips[1].text);
+
+            // A one-letter query is the worst case for dumping a transcript.
+            let broad = search_hits("a");
+            assert_eq!(broad.len(), 1);
+            assert!(broad[0].snippets.len() <= MAX_SNIPPETS);
+            for s in &broad[0].snippets {
+                assert!(s.text.chars().count() <= 2 * SNIPPET_CONTEXT + 3);
+            }
+        });
+    }
+
+    #[test]
+    fn a_title_only_match_reports_the_title_as_its_source() {
+        with_temp_home(|_| {
+            // No notes.md and no summary.md — a meeting nobody has written up yet.
+            seed_transcript("20260724-100000-acme", "Acme discovery", "we talked about pricing");
+
+            let hits = search_hits("ACME");
+            assert_eq!(hits.len(), 1);
+            assert_eq!(hits[0].snippets.len(), 1);
+            assert_eq!(hits[0].snippets[0].source, SnippetSource::Title);
+            assert_eq!(hits[0].snippets[0].text, "Acme discovery");
+
+            assert!(search_hits("nothing like this").is_empty());
+            assert!(search_hits("   ").is_empty(), "a blank query is not a search");
+        });
+    }
+
+    #[test]
+    fn content_shorter_than_the_window_is_excerpted_whole() {
+        with_temp_home(|_| {
+            let dir = seed_transcript("20260724-100000-standup", "Standup", "nothing relevant here");
+            std::fs::write(dir.join("notes.md"), "ship it").unwrap();
+
+            let hits = search_hits("ship");
+            assert_eq!(hits.len(), 1);
+            let s = &hits[0].snippets[0];
+            assert_eq!(s.source, SnippetSource::Notes);
+            assert_eq!(s.text, "ship it", "text shorter than the window needs no ellipsis");
+        });
+    }
+
+    #[test]
+    fn a_multi_term_query_is_a_phrase_and_sources_serialize_lowercase() {
+        with_temp_home(|_| {
+            seed_transcript(
+                "20260724-100000-standup",
+                "Standup",
+                "we agreed to Ship The Roadmap on Friday",
+            );
+
+            let hits = search_hits("ship the roadmap");
+            assert_eq!(hits.len(), 1);
+            assert!(hits[0].snippets[0].text.contains("Ship The Roadmap"), "got: {:?}", hits[0].snippets[0].text);
+            // Words that never appear together don't match — same rule as
+            // `search_meetings`, so the two result sets can't disagree.
+            assert!(search_hits("roadmap tuesday").is_empty());
+            assert_eq!(search_meetings("ship the roadmap").len(), hits.len());
+
+            // The frontend keys the source badge off these strings.
+            let wire = serde_json::to_value(&hits).unwrap();
+            assert_eq!(wire[0]["snippets"][0]["source"], "transcript");
+            assert_eq!(wire[0]["meeting"]["id"], "20260724-100000-standup");
+        });
+    }
+
     #[test]
     fn recovers_title_from_slug() {
         assert_eq!(
@@ -1089,6 +1435,104 @@ mod tests {
             let id = "20260724-100000-kickoff";
             seed_meeting(id);
             assert!(move_meeting_to_folder(id, Some("Nonexistent")).is_err());
+        });
+    }
+
+    // ── unfinished recordings ────────────────────────────────────────────────
+
+    /// A lane WAV of `frames` silent 16 kHz samples, as a recording leaves behind.
+    fn lane(dir: &Path, name: &str, frames: u32) {
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: 16_000,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut w = hound::WavWriter::create(dir.join(name), spec).unwrap();
+        for _ in 0..frames {
+            w.write_sample(0i16).unwrap();
+        }
+        w.finalize().unwrap();
+    }
+
+    #[test]
+    fn an_interrupted_recording_is_offered_for_finishing() {
+        with_temp_home(|_| {
+            // Oatmeal died mid-meeting: the audio is on disk, nothing ever ran
+            // Whisper over it, and today the meeting is simply stranded.
+            let crashed = recordings_root().join("20260812-090000-crashed");
+            std::fs::create_dir_all(&crashed).unwrap();
+            lane(&crashed, "mic.wav", 16_000 * 42);
+
+            // A lane that opened and captured nothing is not a meeting to
+            // finish — there is no audio in it.
+            let silent = recordings_root().join("20260812-080000-silent");
+            std::fs::create_dir_all(&silent).unwrap();
+            lane(&silent, "mic.wav", 0);
+
+            // And a meeting that finished normally — no `transcribed_segments`
+            // counter, because it predates continuations — must stay finished
+            // rather than offering to be transcribed all over again.
+            let done = seed_meeting("20260812-070000-standup");
+            lane(&done, "mic.wav", 16_000 * 60);
+
+            let listed = list_meetings();
+            let by = |id: &str| listed.iter().find(|m| m.id == id).unwrap().clone();
+
+            let crashed = by("20260812-090000-crashed");
+            assert!(!crashed.transcribed);
+            assert_eq!(crashed.pending_segments, vec![1]);
+            assert_eq!(crashed.duration_secs, 42);
+
+            assert!(by("20260812-080000-silent").pending_segments.is_empty());
+            assert!(by("20260812-070000-standup").pending_segments.is_empty());
+        });
+    }
+
+    #[test]
+    fn a_continuation_that_was_never_transcribed_is_pending_on_its_own() {
+        with_temp_home(|_| {
+            let id = "20260812-100000-acme";
+            let dir = seed_meeting(id);
+            lane(&dir, "mic.wav", 16_000 * 60);
+            record_transcribed_segment(&dir, 1).unwrap();
+            assert!(meeting(id).unwrap().pending_segments.is_empty());
+
+            // The user carried on recording and the app died before that take
+            // was written up. The first take's transcript is still good; only
+            // the new one is outstanding.
+            lane(&dir, "mic.002.wav", 16_000 * 30);
+            let m = meeting(id).unwrap();
+            assert!(m.transcribed);
+            assert_eq!(m.pending_segments, vec![2]);
+            assert_eq!(m.duration_secs, 90, "both takes count towards the length");
+
+            record_transcribed_segment(&dir, 2).unwrap();
+            assert!(meeting(id).unwrap().pending_segments.is_empty());
+        });
+    }
+
+    #[test]
+    fn adding_audio_marks_existing_notes_out_of_date() {
+        with_temp_home(|_| {
+            let id = "20260812-110000-kickoff";
+            let dir = seed_meeting(id);
+
+            // Nothing written up yet — there is nothing to go stale.
+            mark_notes_stale(&dir).unwrap();
+            assert!(!meeting(id).unwrap().notes_stale);
+
+            std::fs::write(dir.join("summary.md"), "## Summary\n\nagreed the budget\n").unwrap();
+            mark_notes_stale(&dir).unwrap();
+            let m = meeting(id).unwrap();
+            assert!(m.has_notes);
+            assert!(m.notes_stale);
+
+            // Stale means "incomplete", not "thrown away": the cached write-up
+            // is still what the note view shows until it is regenerated.
+            assert!(write_notes(id, crate::chat::Template::General, false)
+                .unwrap()
+                .contains("budget"));
         });
     }
 }

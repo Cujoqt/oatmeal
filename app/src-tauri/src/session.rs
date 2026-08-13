@@ -21,6 +21,10 @@ pub struct SessionPaths {
     pub sys_wav: String,
     pub title: String,
     pub slug: String,
+    /// Which take within the meeting this is: 1 for the original recording, 2
+    /// and up for continuations. Decides which lane WAVs are written and where
+    /// the transcript's clock picks up from.
+    pub segment: u32,
 }
 
 /// Result of finishing a meeting: the transcript plus where it was written.
@@ -52,27 +56,161 @@ pub fn new_session(title: &str) -> Result<SessionPaths, String> {
     std::fs::create_dir_all(&dir)
         .map_err(|e| format!("create session dir {}: {e}", dir.display()))?;
 
+    let (mic_wav, sys_wav) = segment_paths(&dir, 1);
     Ok(SessionPaths {
-        mic_wav: dir.join("mic.wav").display().to_string(),
-        sys_wav: dir.join("system.wav").display().to_string(),
+        mic_wav: mic_wav.display().to_string(),
+        sys_wav: sys_wav.display().to_string(),
         dir: dir.display().to_string(),
         title: title.to_string(),
         slug,
+        segment: 1,
     })
 }
 
-/// Mix the two lane WAVs (either may be missing/empty), transcribe the result,
-/// and write `transcript.md` into `dir`. `model_path`/`language` may be empty.
+/// Layout for another take into a meeting that already exists — the user
+/// stopped, deliberately or by accident, and wants to keep going.
+///
+/// The continuation gets its own pair of lane WAVs rather than being appended
+/// into the originals: appending to a WAV means rewriting its RIFF header, and
+/// a crash part-way through that corrupts the audio that had already recorded
+/// fine. Two files can't lose the first one.
+pub fn continue_session(dir: &Path, title: &str) -> Result<SessionPaths, String> {
+    if !dir.is_dir() {
+        return Err(format!("no such meeting folder: {}", dir.display()));
+    }
+    let segment = next_segment(dir);
+    let (mic_wav, sys_wav) = segment_paths(dir, segment);
+    Ok(SessionPaths {
+        mic_wav: mic_wav.display().to_string(),
+        sys_wav: sys_wav.display().to_string(),
+        dir: dir.display().to_string(),
+        title: title.to_string(),
+        slug: slugify(title),
+        segment,
+    })
+}
+
+/// The two lane WAVs for segment `n` of a meeting. Segment 1 keeps the original
+/// `mic.wav` / `system.wav` names, so every meeting recorded before
+/// continuations existed is still laid out exactly as it was.
+pub fn segment_paths(dir: &Path, n: u32) -> (PathBuf, PathBuf) {
+    if n <= 1 {
+        (dir.join("mic.wav"), dir.join("system.wav"))
+    } else {
+        (
+            dir.join(format!("mic.{n:03}.wav")),
+            dir.join(format!("system.{n:03}.wav")),
+        )
+    }
+}
+
+/// Which segment a lane file belongs to, or `None` if it isn't a lane file.
+fn segment_index(name: &str) -> Option<u32> {
+    if name == "mic.wav" || name == "system.wav" {
+        return Some(1);
+    }
+    let rest = name
+        .strip_prefix("mic.")
+        .or_else(|| name.strip_prefix("system."))?;
+    rest.strip_suffix(".wav")?.parse().ok()
+}
+
+/// The segment a continuation should record into: one past the highest whose
+/// files already exist, so a WAV that already holds audio is never reopened for
+/// writing.
+pub fn next_segment(dir: &Path) -> u32 {
+    let mut highest = 0;
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            if let Some(n) = segment_index(&entry.file_name().to_string_lossy()) {
+                highest = highest.max(n);
+            }
+        }
+    }
+    highest + 1
+}
+
+/// Every segment of this meeting that actually captured audio, ascending.
+///
+/// A lane that never opened leaves no file at all; one that opened and captured
+/// nothing leaves a bare zero-frame WAV. Neither is worth handing to Whisper,
+/// and neither should make an abandoned folder look like a recording worth
+/// finishing.
+pub fn recorded_segments(dir: &Path) -> Vec<u32> {
+    let mut found = std::collections::BTreeSet::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    for entry in entries.flatten() {
+        let Some(n) = segment_index(&entry.file_name().to_string_lossy()) else {
+            continue;
+        };
+        if lane_has_audio(&entry.path()) {
+            found.insert(n);
+        }
+    }
+    found.into_iter().collect()
+}
+
+/// Whether a lane WAV holds any frames at all.
+fn lane_has_audio(path: &Path) -> bool {
+    hound::WavReader::open(path)
+        .map(|r| r.duration() > 0)
+        .unwrap_or(false)
+}
+
+/// Length of one lane in centiseconds, or 0 when it's missing or unreadable.
+fn lane_len_cs(path: &Path) -> i64 {
+    let Ok(reader) = hound::WavReader::open(path) else {
+        return 0;
+    };
+    let rate = reader.spec().sample_rate;
+    if rate == 0 {
+        return 0;
+    }
+    i64::from(reader.duration()) * 100 / i64::from(rate)
+}
+
+/// Length of one segment — the longer of its two lanes — in centiseconds.
+pub fn segment_len_cs(dir: &Path, n: u32) -> i64 {
+    let (mic, sys) = segment_paths(dir, n);
+    lane_len_cs(&mic).max(lane_len_cs(&sys))
+}
+
+/// The whole meeting's recorded length in seconds, summed across every segment.
+/// A continuation makes the meeting longer, so the duration the library reports
+/// has to count all the takes, not just the first.
+pub fn total_len_secs(dir: &Path) -> u64 {
+    let cs: i64 = recorded_segments(dir)
+        .into_iter()
+        .map(|n| segment_len_cs(dir, n))
+        .sum();
+    cs.max(0) as u64 / 100
+}
+
+/// Where this segment's transcript clock starts: everything recorded before it.
+fn segment_offset_cs(dir: &Path, segment: u32) -> i64 {
+    (1..segment).map(|n| segment_len_cs(dir, n)).sum()
+}
+
+/// Mix segment `segment`'s two lane WAVs (either may be missing/empty),
+/// transcribe the result, and fold it into `transcript.md` in `dir`.
+/// `model_path`/`language` may be empty.
+///
+/// The first segment writes the file; a continuation appends to it, with its
+/// timestamps shifted past whatever was already recorded. Re-transcribing the
+/// whole meeting to add five minutes to the end would be minutes of Whisper for
+/// no new information.
 pub fn finish(
     dir: &Path,
     title: &str,
-    mic_wav: &Path,
-    sys_wav: &Path,
+    segment: u32,
     model_path: &str,
     language: Option<&str>,
 ) -> Result<MeetingResult, String> {
-    let mic = load_optional(mic_wav);
-    let sys = load_optional(sys_wav);
+    let (mic_wav, sys_wav) = segment_paths(dir, segment);
+    let mic = load_optional(&mic_wav);
+    let sys = load_optional(&sys_wav);
 
     let mixed = mix(&mic, &sys);
     if mixed.is_empty() {
@@ -80,7 +218,7 @@ pub fn finish(
     }
 
     let transcript = transcribe::transcribe_samples(model_path, &mixed, language)?;
-    let path = write_transcript_md(dir, title, &transcript)?;
+    let path = write_transcript_md(dir, title, &transcript, segment_offset_cs(dir, segment))?;
 
     Ok(MeetingResult {
         transcript_path: path.display().to_string(),
@@ -133,23 +271,48 @@ pub fn write_notes(dir: &Path, title: &str, body: &str) -> Result<PathBuf, Strin
 }
 
 /// Write a human-readable transcript markdown with timestamped lines.
-fn write_transcript_md(dir: &Path, title: &str, t: &Transcript) -> Result<PathBuf, String> {
+///
+/// When `transcript.md` already has content this appends to it instead of
+/// replacing it — that is how a continuation lands in the same document as the
+/// take before it. `offset_cs` shifts this segment's timestamps so the clock
+/// keeps running across takes rather than restarting at 0:00.
+///
+/// The whole file is rewritten through `store::write` rather than opened in
+/// append mode: an interrupted append leaves a half-written line in the one
+/// document the recording can't be re-made from.
+fn write_transcript_md(
+    dir: &Path,
+    title: &str,
+    t: &Transcript,
+    offset_cs: i64,
+) -> Result<PathBuf, String> {
+    let path = dir.join("transcript.md");
+    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    let appending = !existing.trim().is_empty();
+
     let mut md = String::new();
-    md.push_str(&format!("# {}\n\n", if title.is_empty() { "Untitled meeting" } else { title }));
-    md.push_str(&format!("_Recorded {}_\n\n", human_now()));
-    md.push_str("## Transcript\n\n");
+    if appending {
+        md.push_str(existing.trim_end());
+        md.push_str("\n\n");
+    } else {
+        md.push_str(&format!("# {}\n\n", if title.is_empty() { "Untitled meeting" } else { title }));
+        md.push_str(&format!("_Recorded {}_\n\n", human_now()));
+        md.push_str("## Transcript\n\n");
+    }
+
+    let mut wrote_any = false;
     for seg in &t.segments {
         let text = seg.text.trim();
         if text.is_empty() {
             continue;
         }
-        md.push_str(&format!("**[{}]** {}\n\n", fmt_cs(seg.start_cs), text));
+        md.push_str(&format!("**[{}]** {}\n\n", fmt_cs(seg.start_cs + offset_cs), text));
+        wrote_any = true;
     }
-    if t.segments.is_empty() {
+    if !wrote_any && !appending {
         md.push_str("_(no speech detected)_\n");
     }
 
-    let path = dir.join("transcript.md");
     crate::store::write(&path, &md)?;
     Ok(path)
 }
@@ -281,5 +444,131 @@ mod tests {
         assert_eq!(fmt_cs(0), "0:00");
         assert_eq!(fmt_cs(500), "0:05"); // 5.00s
         assert_eq!(fmt_cs(6_500), "1:05"); // 65.00s
+    }
+
+    // ── continuations ────────────────────────────────────────────────────────
+
+    /// `store::write` consults a process-global writes-locked flag that the
+    /// store suite flips, so anything writing through it takes the same lock the
+    /// rest of the tests use.
+    use crate::settings::HOME_ENV_LOCK;
+
+    fn with_scratch<T>(f: impl FnOnce(&Path) -> T) -> T {
+        let _guard = HOME_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!(
+            "oatmeal-session-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = f(&dir);
+        let _ = std::fs::remove_dir_all(&dir);
+        out
+    }
+
+    /// A silent 16 kHz lane WAV of `frames` samples — the layout code only ever
+    /// reads the header, so the samples themselves don't have to be anything.
+    fn lane_wav(path: &Path, frames: u32) {
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: 16_000,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut w = hound::WavWriter::create(path, spec).unwrap();
+        for _ in 0..frames {
+            w.write_sample(0i16).unwrap();
+        }
+        w.finalize().unwrap();
+    }
+
+    /// A transcript of `(start_cs, text)` lines, as whisper would hand one back.
+    fn transcript(lines: &[(i64, &str)]) -> Transcript {
+        Transcript {
+            segments: lines
+                .iter()
+                .map(|(cs, text)| transcribe::Segment {
+                    start_cs: *cs,
+                    end_cs: *cs + 100,
+                    text: (*text).to_string(),
+                })
+                .collect(),
+            text: lines.iter().map(|(_, t)| *t).collect::<Vec<_>>().join(" "),
+        }
+    }
+
+    #[test]
+    fn a_continuation_records_into_new_files_beside_the_originals() {
+        with_scratch(|dir| {
+            lane_wav(&dir.join("mic.wav"), 16_000);
+            lane_wav(&dir.join("system.wav"), 16_000);
+
+            let paths = continue_session(dir, "Acme call").unwrap();
+            assert_eq!(paths.segment, 2);
+            assert!(paths.mic_wav.ends_with("/mic.002.wav"), "{}", paths.mic_wav);
+            assert!(paths.sys_wav.ends_with("/system.002.wav"), "{}", paths.sys_wav);
+            // The first take's audio is left exactly where it was: not reopened,
+            // not rewritten, not appended into.
+            assert!(dir.join("mic.wav").is_file());
+            assert!(!dir.join("mic.002.wav").exists(), "nothing is written yet");
+
+            // A third take goes past the second rather than over it.
+            lane_wav(&dir.join("mic.002.wav"), 16_000);
+            assert_eq!(continue_session(dir, "Acme call").unwrap().segment, 3);
+        })
+    }
+
+    #[test]
+    fn a_lane_that_captured_nothing_is_not_a_recording_worth_finishing() {
+        with_scratch(|dir| {
+            // The lane opened but never got a sample — an empty WAV, not audio.
+            lane_wav(&dir.join("mic.wav"), 0);
+            assert!(recorded_segments(dir).is_empty());
+
+            lane_wav(&dir.join("mic.wav"), 8_000);
+            assert_eq!(recorded_segments(dir), vec![1]);
+
+            // Gaps are fine: only the system lane came up for the third take.
+            lane_wav(&dir.join("system.003.wav"), 1_600);
+            assert_eq!(recorded_segments(dir), vec![1, 3]);
+        })
+    }
+
+    #[test]
+    fn a_continuation_appends_to_the_transcript_with_the_clock_carried_over() {
+        with_scratch(|dir| {
+            // Take one: 90 seconds, already written up.
+            lane_wav(&dir.join("mic.wav"), 16_000 * 90);
+            write_transcript_md(dir, "Acme call", &transcript(&[(0, "Morning.")]), 0).unwrap();
+
+            // Take two picks up where take one stopped.
+            lane_wav(&dir.join("mic.002.wav"), 16_000 * 10);
+            let offset = segment_offset_cs(dir, 2);
+            assert_eq!(offset, 9_000, "take two starts 90s into the meeting");
+            write_transcript_md(dir, "Acme call", &transcript(&[(500, "One more thing.")]), offset)
+                .unwrap();
+
+            let md = std::fs::read_to_string(dir.join("transcript.md")).unwrap();
+            assert_eq!(md.matches("# Acme call").count(), 1, "one document, not two: {md}");
+            assert!(md.contains("**[0:00]** Morning."), "{md}");
+            assert!(md.contains("**[1:35]** One more thing."), "{md}");
+            assert!(md.find("Morning.") < md.find("One more thing."), "out of order: {md}");
+
+            // The meeting is as long as everything recorded into it.
+            assert_eq!(total_len_secs(dir), 100);
+        })
+    }
+
+    #[test]
+    fn a_silent_continuation_does_not_stamp_over_what_was_already_transcribed() {
+        with_scratch(|dir| {
+            write_transcript_md(dir, "Acme call", &transcript(&[(0, "Morning.")]), 0).unwrap();
+            write_transcript_md(dir, "Acme call", &transcript(&[]), 500).unwrap();
+
+            let md = std::fs::read_to_string(dir.join("transcript.md")).unwrap();
+            assert!(md.contains("Morning."), "{md}");
+            assert!(!md.contains("no speech detected"), "{md}");
+        })
     }
 }

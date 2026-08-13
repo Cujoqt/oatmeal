@@ -5,6 +5,7 @@ pub mod library;
 pub mod live;
 mod mic;
 pub mod model;
+pub mod recall;
 pub mod session;
 pub mod settings;
 pub mod store;
@@ -209,11 +210,61 @@ fn start_session(
     title: String,
     language: String,
 ) -> Result<session::SessionPaths, String> {
+    let paths = begin_session(&app, state.inner(), &language, || session::new_session(&title))?;
+
+    // Any notes typed before the meeting existed now have a home. Only a *new*
+    // meeting gets them: flushing a stray draft into a continuation would write
+    // it over the notes that meeting already has.
+    if let Ok(mut pending) = state.pending_notes.lock() {
+        if let Some((t, body)) = pending.take() {
+            if let Err(e) = session::write_notes(Path::new(&paths.dir), &t, &body) {
+                eprintln!("[oatmeal] flush pending notes: {e}");
+            }
+        }
+    }
+
+    Ok(paths)
+}
+
+/// Keep recording into a meeting that was already stopped — the user hit stop
+/// by accident, or the conversation carried on after they thought it was over.
+///
+/// The extra audio goes into new segment WAVs in the same folder, and is
+/// appended to the existing transcript when this take stops; the meeting keeps
+/// its id, its notes and its place in the library.
+#[tauri::command(async)]
+fn continue_session(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    id: String,
+    language: String,
+) -> Result<session::SessionPaths, String> {
+    let meeting = library::meeting(&id)?;
+    let dir = PathBuf::from(&meeting.dir);
+    begin_session(&app, state.inner(), &language, || {
+        session::continue_session(&dir, &meeting.title)
+    })
+}
+
+/// Bring a meeting's recording up: both audio lanes into the WAVs `paths`
+/// names, the live transcription worker, and the session state.
+///
+/// Shared by `start_session` and `continue_session` — the only thing that
+/// differs between them is which files they record into, so `paths` is a
+/// closure run under the session lock rather than an argument. Taking the lock
+/// first is what makes "a meeting is already being recorded" reliable: the
+/// record path is `(async)`, so two of these genuinely can overlap.
+fn begin_session(
+    app: &tauri::AppHandle,
+    state: &AppState,
+    language: &str,
+    paths: impl FnOnce() -> Result<session::SessionPaths, String>,
+) -> Result<session::SessionPaths, String> {
     let mut sess = state.session.lock().map_err(|_| "session state poisoned")?;
     if sess.is_some() {
         return Err("a meeting is already being recorded".into());
     }
-    let paths = session::new_session(&title)?;
+    let paths = paths()?;
 
     // Both lanes mirror into one tap, so the live worker hears the room and the
     // call as a single stream — the same mix the final transcript is made from.
@@ -274,15 +325,8 @@ fn start_session(
         }
     }
 
-    // Any notes typed before the meeting existed now have a home.
+    // Notes typed from here on belong next to this meeting's audio.
     *state.last_dir.lock().map_err(|_| "notes state poisoned")? = Some(paths.dir.clone());
-    if let Ok(mut pending) = state.pending_notes.lock() {
-        if let Some((t, body)) = pending.take() {
-            if let Err(e) = session::write_notes(Path::new(&paths.dir), &t, &body) {
-                eprintln!("[oatmeal] flush pending notes: {e}");
-            }
-        }
-    }
 
     *sess = Some(paths.clone());
     Ok(paths)
@@ -437,14 +481,64 @@ fn stop_session(
     } else {
         Some(language.trim())
     };
-    session::finish(
-        Path::new(&paths.dir),
-        &paths.title,
-        Path::new(&paths.mic_wav),
-        Path::new(&paths.sys_wav),
-        &model_path,
-        lang,
-    )
+    let dir = PathBuf::from(&paths.dir);
+    let result = session::finish(&dir, &paths.title, paths.segment, &model_path, lang)?;
+    library::record_transcribed_segment(&dir, paths.segment)?;
+    if paths.segment > 1 {
+        // This take was appended to a transcript the notes were written from,
+        // so those notes no longer describe the whole meeting.
+        library::mark_notes_stale(&dir)?;
+    }
+    Ok(result)
+}
+
+/// Transcribe audio that was recorded but never written up, and fold it into
+/// the meeting's `transcript.md`.
+///
+/// This is how a meeting survives the app dying mid-recording: the lane WAVs are
+/// on disk, but nothing ever ran Whisper over them. Deliberately user-triggered
+/// — transcription is the heaviest thing the app does, and doing it unasked at
+/// launch would spend somebody's battery on a meeting they may not want.
+#[tauri::command(async)]
+fn finish_meeting(
+    state: tauri::State<'_, AppState>,
+    id: String,
+    model_path: String,
+    language: String,
+) -> Result<library::Meeting, String> {
+    let meeting = library::meeting(&id)?;
+    let dir = PathBuf::from(&meeting.dir);
+
+    // The WAVs of a running recording are still being written to; handing them
+    // to Whisper would transcribe a prefix of a meeting that hasn't ended.
+    if is_recording_into(state.inner(), &dir) {
+        return Err("that meeting is still recording — stop it first".into());
+    }
+    if meeting.pending_segments.is_empty() {
+        return Err("this meeting has already been transcribed".into());
+    }
+
+    let lang = if language.trim().is_empty() {
+        None
+    } else {
+        Some(language.trim())
+    };
+
+    for n in &meeting.pending_segments {
+        session::finish(&dir, &meeting.title, *n, &model_path, lang)?;
+        library::record_transcribed_segment(&dir, *n)?;
+        library::mark_notes_stale(&dir)?;
+    }
+
+    library::meeting(&id)
+}
+
+/// Whether this run is currently recording into `dir`.
+fn is_recording_into(state: &AppState, dir: &Path) -> bool {
+    let sess = state.session.lock().unwrap_or_else(|e| e.into_inner());
+    sess.as_ref()
+        .map(|paths| Path::new(&paths.dir) == dir)
+        .unwrap_or(false)
 }
 
 /// Every past meeting on disk, newest first — drives the home screen's recent
@@ -459,6 +553,15 @@ fn list_meetings() -> Vec<library::Meeting> {
 #[tauri::command]
 fn search_meetings(query: String) -> Vec<library::Meeting> {
     library::search_meetings(&query)
+}
+
+/// The same matches, each carrying a few excerpts of the text that matched, so
+/// the dashboard can show *where* a meeting matched rather than only that it
+/// did. This reads and scans every meeting's transcript and notes on each
+/// (debounced) keystroke, so it runs off the main thread.
+#[tauri::command(async)]
+fn search_snippets(query: String) -> Vec<library::SearchHit> {
+    library::search_hits(&query)
 }
 
 // ── Local language model — notes and recaps ─────────────────────────────────
@@ -523,6 +626,14 @@ fn ask_meeting(
 
     let path = model::ensure_chat_model()?;
     chat::recap(&path, &transcript, &question, &mut chat_token_sink(app))
+}
+
+/// Answer a question from every meeting in the library, rather than from one
+/// the user has already picked. Streams the same `CHAT_TOKEN_EVENT` tokens as
+/// `ask_meeting`, and names the meetings it drew on so the UI can link to them.
+#[tauri::command(async)]
+fn ask_library(app: tauri::AppHandle, question: String) -> Result<recall::LibraryAnswer, String> {
+    recall::answer(&question, &mut chat_token_sink(app))
 }
 
 /// Sink that forwards generated tokens to the window as they arrive: a local
@@ -740,11 +851,14 @@ pub fn run() {
             default_model_path,
             ensure_model,
             start_session,
+            continue_session,
             stop_session,
+            finish_meeting,
             is_session_active,
             session_elapsed_ms,
             list_meetings,
             search_meetings,
+            search_snippets,
             live_lines,
             save_notes,
             set_transcript_window_visible,
@@ -755,6 +869,7 @@ pub fn run() {
             meeting_segments,
             meeting_typed_notes,
             ask_meeting,
+            ask_library,
             draft_followup,
             unload_chat_model,
             rename_meeting,
@@ -825,13 +940,17 @@ mod tests {
         for name in [
             "ensure_model",
             "start_session",
+            "continue_session",
             "stop_session",
+            "finish_meeting",
             "ensure_chat_model",
             "write_notes",
             "ask_meeting",
+            "ask_library",
             "draft_followup",
             "check_for_update",
             "open_update_download",
+            "search_snippets",
         ] {
             let decl = format!("fn {name}(");
             let at = src
@@ -844,5 +963,40 @@ mod tests {
                  main thread freezes the UI"
             );
         }
+    }
+
+    /// Finishing an abandoned recording runs Whisper over the lane WAVs as they
+    /// sit on disk. Doing that to a meeting *this run is still recording into*
+    /// would transcribe a prefix of a file that is still growing, and hand back
+    /// a "final" transcript of half a meeting.
+    #[test]
+    fn a_meeting_being_recorded_right_now_is_not_offered_for_transcription() {
+        use std::path::Path;
+
+        let state = crate::AppState::default();
+        let live = "/tmp/oatmeal-recording-guard/20260812-120000-live";
+        let paths = crate::session::SessionPaths {
+            dir: live.into(),
+            mic_wav: format!("{live}/mic.wav"),
+            sys_wav: format!("{live}/system.wav"),
+            title: "Live".into(),
+            slug: "live".into(),
+            segment: 1,
+        };
+
+        assert!(
+            !crate::is_recording_into(&state, Path::new(live)),
+            "nothing is recording yet"
+        );
+
+        *state.session.lock().unwrap() = Some(paths);
+        assert!(crate::is_recording_into(&state, Path::new(live)));
+        assert!(
+            !crate::is_recording_into(
+                &state,
+                Path::new("/tmp/oatmeal-recording-guard/20260812-110000-other")
+            ),
+            "a different meeting is still fair game"
+        );
     }
 }
