@@ -22,13 +22,21 @@ pub struct Meeting {
     /// Local naive ISO (`YYYY-MM-DDTHH:MM:SS`) so JS `new Date(...)` reads it
     /// as local time, matching the clock the recording was named with.
     pub started_at: String,
-    /// Longest lane's duration in seconds. 0 when no readable audio survives.
+    /// Recorded length in seconds, summed across every take. 0 when no readable
+    /// audio survives.
     pub duration_secs: u64,
     /// Whether `transcript.md` was written (i.e. the meeting finished and was
     /// transcribed, rather than being abandoned mid-recording).
     pub transcribed: bool,
+    /// Segments that hold audio `transcript.md` doesn't cover — the app died
+    /// mid-recording, or a continuation was never stopped cleanly. Non-empty
+    /// means the meeting can be finished with one press.
+    pub pending_segments: Vec<u32>,
     /// Whether the language model has already written notes for this meeting.
     pub has_notes: bool,
+    /// Whether those notes predate audio that has since been added, so they
+    /// describe only part of the meeting.
+    pub notes_stale: bool,
     /// Which note template was used the last time notes were generated, so the
     /// picker reopens on the same choice. Defaults when nothing is recorded yet.
     pub template: crate::chat::Template,
@@ -267,19 +275,79 @@ fn read_meeting(dir: &Path, name: &str, folder: Option<String>) -> Meeting {
         .or_else(|| title_from_slug(name))
         .unwrap_or_else(|| "Untitled meeting".into());
 
-    let duration_secs = wav_secs(&dir.join("mic.wav")).max(wav_secs(&dir.join("system.wav")));
-
     Meeting {
         id: name.to_string(),
         title,
         started_at: parse_stamp(name).unwrap_or_default(),
-        duration_secs,
+        duration_secs: crate::session::total_len_secs(dir),
         transcribed,
+        pending_segments: pending_segments(dir),
         has_notes: has_summary(dir),
+        notes_stale: read_meta(dir)
+            .get("notes_stale")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
         template: meta_template(dir).unwrap_or_default(),
         dir: dir.display().to_string(),
         folder,
     }
+}
+
+/// One meeting by id, wherever it is filed. `folder` is left unset — the folder
+/// is learned from the directory walk, which a single lookup doesn't do.
+pub fn meeting(id: &str) -> Result<Meeting, String> {
+    let dir = meeting_dir(id)?;
+    Ok(read_meeting(&dir, id, None))
+}
+
+/// How many segments `transcript.md` already covers.
+///
+/// Meetings recorded before continuations existed carry no counter, so a
+/// transcript is taken to mean their one and only segment is done — otherwise
+/// every meeting in the library would suddenly offer to be re-transcribed.
+fn transcribed_segments(dir: &Path) -> u32 {
+    if let Some(n) = read_meta(dir)
+        .get("transcribed_segments")
+        .and_then(|v| v.as_u64())
+    {
+        return n as u32;
+    }
+    u32::from(dir.join("transcript.md").is_file())
+}
+
+/// Segments with audio that never made it into `transcript.md`.
+fn pending_segments(dir: &Path) -> Vec<u32> {
+    let done = transcribed_segments(dir);
+    crate::session::recorded_segments(dir)
+        .into_iter()
+        .filter(|n| *n > done)
+        .collect()
+}
+
+/// Record that `transcript.md` now covers every segment up to `n`.
+pub fn record_transcribed_segment(dir: &Path, n: u32) -> Result<(), String> {
+    update_meta(dir, |meta| {
+        let done = meta
+            .get("transcribed_segments")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        if u64::from(n) > done {
+            meta.insert("transcribed_segments".into(), serde_json::json!(n));
+        }
+    })
+}
+
+/// Flag a meeting's model-written notes as describing only part of it, because
+/// audio recorded after they were written has now been transcribed in.
+/// Regenerating is a full model run, so the user is told rather than charged
+/// for it silently. A meeting with no notes has nothing to go stale.
+pub fn mark_notes_stale(dir: &Path) -> Result<(), String> {
+    if !has_summary(dir) {
+        return Ok(());
+    }
+    update_meta(dir, |meta| {
+        meta.insert("notes_stale".into(), serde_json::Value::Bool(true));
+    })
 }
 
 /// Meetings whose title, transcript, or notes contain `query` (case-insensitive
@@ -431,7 +499,7 @@ fn find_meeting_dir(id: &str) -> Option<std::path::PathBuf> {
     None
 }
 
-fn meeting_dir(id: &str) -> Result<std::path::PathBuf, String> {
+pub fn meeting_dir(id: &str) -> Result<std::path::PathBuf, String> {
     if id.is_empty()
         || id.contains('/')
         || id.contains('\\')
@@ -644,6 +712,9 @@ pub fn write_notes(id: &str, template: crate::chat::Template, force: bool) -> Re
 
     update_meta(&dir, |meta| {
         meta.insert("template".into(), serde_json::to_value(template).unwrap());
+        // These notes were just written from the whole transcript as it stands,
+        // so whatever continuation made the last set stale is now covered.
+        meta.remove("notes_stale");
     })?;
 
     Ok(notes)
@@ -691,18 +762,6 @@ pub fn typed_notes(id: &str) -> Result<String, String> {
         .collect::<Vec<_>>()
         .join("\n");
     Ok(body.trim().to_string())
-}
-
-/// Duration of a WAV in whole seconds, or 0 if it's missing or unreadable.
-fn wav_secs(path: &Path) -> u64 {
-    let Ok(reader) = hound::WavReader::open(path) else {
-        return 0;
-    };
-    let spec = reader.spec();
-    if spec.sample_rate == 0 || spec.channels == 0 {
-        return 0;
-    }
-    u64::from(reader.duration()) / u64::from(spec.sample_rate)
 }
 
 #[cfg(test)]
@@ -1089,6 +1148,104 @@ mod tests {
             let id = "20260724-100000-kickoff";
             seed_meeting(id);
             assert!(move_meeting_to_folder(id, Some("Nonexistent")).is_err());
+        });
+    }
+
+    // ── unfinished recordings ────────────────────────────────────────────────
+
+    /// A lane WAV of `frames` silent 16 kHz samples, as a recording leaves behind.
+    fn lane(dir: &Path, name: &str, frames: u32) {
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: 16_000,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut w = hound::WavWriter::create(dir.join(name), spec).unwrap();
+        for _ in 0..frames {
+            w.write_sample(0i16).unwrap();
+        }
+        w.finalize().unwrap();
+    }
+
+    #[test]
+    fn an_interrupted_recording_is_offered_for_finishing() {
+        with_temp_home(|_| {
+            // Oatmeal died mid-meeting: the audio is on disk, nothing ever ran
+            // Whisper over it, and today the meeting is simply stranded.
+            let crashed = recordings_root().join("20260812-090000-crashed");
+            std::fs::create_dir_all(&crashed).unwrap();
+            lane(&crashed, "mic.wav", 16_000 * 42);
+
+            // A lane that opened and captured nothing is not a meeting to
+            // finish — there is no audio in it.
+            let silent = recordings_root().join("20260812-080000-silent");
+            std::fs::create_dir_all(&silent).unwrap();
+            lane(&silent, "mic.wav", 0);
+
+            // And a meeting that finished normally — no `transcribed_segments`
+            // counter, because it predates continuations — must stay finished
+            // rather than offering to be transcribed all over again.
+            let done = seed_meeting("20260812-070000-standup");
+            lane(&done, "mic.wav", 16_000 * 60);
+
+            let listed = list_meetings();
+            let by = |id: &str| listed.iter().find(|m| m.id == id).unwrap().clone();
+
+            let crashed = by("20260812-090000-crashed");
+            assert!(!crashed.transcribed);
+            assert_eq!(crashed.pending_segments, vec![1]);
+            assert_eq!(crashed.duration_secs, 42);
+
+            assert!(by("20260812-080000-silent").pending_segments.is_empty());
+            assert!(by("20260812-070000-standup").pending_segments.is_empty());
+        });
+    }
+
+    #[test]
+    fn a_continuation_that_was_never_transcribed_is_pending_on_its_own() {
+        with_temp_home(|_| {
+            let id = "20260812-100000-acme";
+            let dir = seed_meeting(id);
+            lane(&dir, "mic.wav", 16_000 * 60);
+            record_transcribed_segment(&dir, 1).unwrap();
+            assert!(meeting(id).unwrap().pending_segments.is_empty());
+
+            // The user carried on recording and the app died before that take
+            // was written up. The first take's transcript is still good; only
+            // the new one is outstanding.
+            lane(&dir, "mic.002.wav", 16_000 * 30);
+            let m = meeting(id).unwrap();
+            assert!(m.transcribed);
+            assert_eq!(m.pending_segments, vec![2]);
+            assert_eq!(m.duration_secs, 90, "both takes count towards the length");
+
+            record_transcribed_segment(&dir, 2).unwrap();
+            assert!(meeting(id).unwrap().pending_segments.is_empty());
+        });
+    }
+
+    #[test]
+    fn adding_audio_marks_existing_notes_out_of_date() {
+        with_temp_home(|_| {
+            let id = "20260812-110000-kickoff";
+            let dir = seed_meeting(id);
+
+            // Nothing written up yet — there is nothing to go stale.
+            mark_notes_stale(&dir).unwrap();
+            assert!(!meeting(id).unwrap().notes_stale);
+
+            std::fs::write(dir.join("summary.md"), "## Summary\n\nagreed the budget\n").unwrap();
+            mark_notes_stale(&dir).unwrap();
+            let m = meeting(id).unwrap();
+            assert!(m.has_notes);
+            assert!(m.notes_stale);
+
+            // Stale means "incomplete", not "thrown away": the cached write-up
+            // is still what the note view shows until it is regenerated.
+            assert!(write_notes(id, crate::chat::Template::General, false)
+                .unwrap()
+                .contains("budget"));
         });
     }
 }

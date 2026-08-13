@@ -432,6 +432,9 @@
       border: 1px solid var(--line-2); background: transparent; color: var(--ink-soft);
       font: 500 12.5px var(--sans); cursor: default;
     }
+    /* `.chip` sets display, which outranks the UA stylesheet's rule for the
+       hidden attribute — without this, hiding a chip does nothing at all. */
+    .chip[hidden] { display: none; }
     .chip.act { cursor: pointer; }
     .chip.act:hover { background: var(--hover); }
     .chip.sel { background: var(--key-bg); border-color: transparent; color: var(--ink); }
@@ -621,6 +624,30 @@
     .note-row .t { font: 500 14px var(--sans); color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .note-row .s { font: 400 12px var(--sans); color: var(--hint); margin-top: 2px; }
     .notes-empty { text-align: center; color: var(--hint); font-size: 14px; padding: 46px 0; }
+
+    /* "Finish transcribing" on a recording the app died in the middle of. Sits
+       at the far end of its row so it never crowds the title. */
+    .note-row .row-act {
+      margin-left: auto; flex: none; padding: 5px 11px; border-radius: 999px;
+      border: 1px solid var(--accent); background: none; color: var(--accent);
+      font: 500 12px var(--sans); cursor: pointer;
+    }
+    .note-row .row-act:hover { background: var(--accent-wash); }
+
+    /* Notes written before the meeting was continued describe only part of it.
+       Regenerating is a full model run, so this offers the button rather than
+       spending the time unasked. */
+    .stale {
+      display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+      margin: 0 0 18px; padding: 10px 14px; border-radius: 10px;
+      border: 1px solid var(--line-2); background: var(--panel);
+      font: 400 13px var(--sans); color: var(--ink-soft);
+    }
+    .stale button {
+      padding: 5px 12px; border-radius: 999px; border: 1px solid var(--accent);
+      background: none; color: var(--accent); font: 500 12.5px var(--sans); cursor: pointer;
+    }
+    .stale button:hover { background: var(--accent-wash); }
 
     .hw-row { display: flex; align-items: center; gap: 10px; padding: 8px 4px; border-bottom: 1px solid var(--line); }
     .hw-row:last-child { border-bottom: 0; }
@@ -899,6 +926,14 @@
             </div>
             <div class="tmpl-chips" id="tmplChips"></div>
             <span class="chip" id="chipWhen"></span>
+            <button class="chip act" id="chipFinish" hidden title="Transcribe the audio this recording never got written up">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a9 9 0 1 1-8.5 6" /><path d="M3 4v5h5" /></svg>
+              Finish transcribing
+            </button>
+            <button class="chip act" id="chipContinue" title="Keep recording into this meeting">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8" /><circle cx="12" cy="12" r="3.4" fill="currentColor" stroke="none" /></svg>
+              Continue recording
+            </button>
             <button class="chip act" id="chipExport" title="Export as Markdown">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v10M8 10l4 4 4-4M5 18h14" /></svg>
               Export

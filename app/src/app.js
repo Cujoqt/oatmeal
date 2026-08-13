@@ -69,6 +69,8 @@ const viewNote = $('viewNote')
 const noteTitle = $('noteTitle')
 const noteBody = $('noteBody')
 const chipWhen = $('chipWhen')
+const chipFinish = $('chipFinish')
+const chipContinue = $('chipContinue')
 const chipExport = $('chipExport')
 const chipFollowup = $('chipFollowup')
 const chipDelete = $('chipDelete')
@@ -127,6 +129,11 @@ let liveLines = []
 let saveTimer = null
 let hintTimer = null
 let sessionDir = ''
+/// The meeting a continuation is recording into, or null when the take in
+/// progress (if any) is a brand-new meeting. Stopping has to know: a
+/// continuation's folder already holds that meeting's typed notes, which the
+/// draft on the new-note page must not be written over.
+let continuingId = null
 /// Element a streamed chat answer is being written into, or null between asks.
 let streamingAnswer = null
 let homework = []
@@ -320,6 +327,36 @@ async function startRecording() {
   }
 }
 
+/// Keep recording into a meeting that was already stopped. The new audio lands
+/// in fresh lane files in the same folder and is appended to that meeting's
+/// transcript when this take stops, so the meeting keeps its id and its notes.
+async function continueRecording(id) {
+  busy = true
+  try {
+    setStatus('Preparing the transcription model (first run downloads it once)…')
+    await invoke('ensure_model')
+
+    setStatus('Starting capture…')
+    const paths = await invoke('continue_session', { id, language: getLang() })
+    sessionDir = paths.dir
+    continuingId = id
+    liveLines = []
+
+    recording = true
+    startTimer()
+    toStopButton()
+    emit(EVENTS.session, { active: true })
+    showTranscriptWindow(true)
+    setStatus('Recording again into this meeting.')
+  } catch (e) {
+    setStatus(String(e), true)
+    toRecordButton()
+  } finally {
+    busy = false
+    renderNoteActions()
+  }
+}
+
 async function stopRecording() {
   busy = true
   btn.disabled = true
@@ -329,26 +366,55 @@ async function stopRecording() {
 
   emit(EVENTS.state, { state: 'finishing', message: 'Writing the final transcript…' })
 
-  let landedId = null
+  // A continuation is recording into a meeting that already exists, so the
+  // draft sitting on the new-note page is somebody else's writing: saving it
+  // would overwrite that meeting's notes.md, and clearing it would throw away
+  // a draft the user never finished.
+  const continued = continuingId
+  let landedId = continued
   try {
-    await invoke('save_notes', draft()).catch(() => {})
+    if (!continued) await invoke('save_notes', draft()).catch(() => {})
     const res = await invoke('stop_session', { modelPath: '', language: getLang() })
-    landedId = (res.dir || '').split('/').pop()
+    if (!continued) landedId = (res.dir || '').split('/').pop()
     setStatus('Done. Notes saved locally.')
   } catch (e) {
     setStatus(String(e), true)
   } finally {
     recording = false
+    continuingId = null
     liveLines = []
-    titleEl.textContent = ''
-    notesEl.textContent = ''
-    localStorage.removeItem(DRAFT_KEY)
+    if (!continued) {
+      titleEl.textContent = ''
+      notesEl.textContent = ''
+      localStorage.removeItem(DRAFT_KEY)
+    }
     emit(EVENTS.session, { active: false })
     toRecordButton()
     busy = false
     await loadMeetings()
     // Land in the note that was just recorded — that's the thing worth reading.
     if (landedId && meetings.some((m) => m.id === landedId)) openNote(landedId)
+  }
+}
+
+/// Transcribe audio that was recorded but never written up — Oatmeal was killed
+/// mid-meeting, or a continuation never got stopped cleanly. Always a deliberate
+/// press: Whisper is the heaviest thing the app does.
+async function finishMeeting(id) {
+  if (busy) return
+  busy = true
+  setStatus('Transcribing the rest of this recording on-device — this can take a moment…')
+  setModelChip('busy', 'Transcribing…')
+  try {
+    await invoke('finish_meeting', { id, modelPath: '', language: getLang() })
+    await loadMeetings()
+    setStatus('Transcript written.')
+    if (openId === id) openNote(id)
+  } catch (e) {
+    setStatus(String(e), true)
+  } finally {
+    busy = false
+    refreshModelChip()
   }
 }
 
@@ -913,8 +979,39 @@ async function openNote(id) {
   noteTitle.value = m.title
   chipWhen.textContent = [fmtWhen(new Date(m.started_at)), fmtDuration(m.duration_secs)].filter(Boolean).join(' · ')
   renderTemplateChips()
+  renderNoteActions()
   setTab('notes')
 }
+
+/// The two chips whose labels depend on what is happening right now: whether
+/// this meeting has audio nobody has transcribed, and whether it is the one
+/// being recorded into.
+function renderNoteActions() {
+  const m = currentMeeting()
+  if (!m) return
+  const pending = (m.pending_segments || []).length > 0
+  const live = continuingId === m.id
+
+  // Never while anything is recording: those lane WAVs are still being written,
+  // and after a relaunch mid-meeting the UI cannot tell which meeting that is.
+  // (`finish_meeting` refuses it in Rust too — this only keeps it off screen.)
+  chipFinish.hidden = !pending || recording
+  // While another meeting is recording there is no second session to offer.
+  chipContinue.hidden = recording && !live
+  chipContinue.lastChild.textContent = live ? ' Stop recording' : ' Continue recording'
+  chipContinue.classList.toggle('danger', live)
+}
+
+chipContinue.addEventListener('click', () => {
+  const m = currentMeeting()
+  if (!m || busy) return
+  continuingId === m.id ? stopRecording() : continueRecording(m.id)
+})
+
+chipFinish.addEventListener('click', () => {
+  const m = currentMeeting()
+  if (m) finishMeeting(m.id)
+})
 
 /// Which shape of notes to write, remembered per meeting in `meta.json` once
 /// generated. Picking a different template on a meeting that already has notes
@@ -1012,6 +1109,10 @@ async function renderNotes(force = false, regenerate = false) {
     return
   }
 
+  // Whether the model actually ran decides whether the "these notes are out of
+  // date" flag has been cleared on disk: a cached write-up comes back untouched.
+  const wasMissing = !m.has_notes
+
   if (!m.has_notes && !force) {
     // Don't silently kick off a multi-gigabyte download or a long generation:
     // make it a deliberate press.
@@ -1039,11 +1140,13 @@ async function renderNotes(force = false, regenerate = false) {
   try {
     const md = await invoke('write_notes', { id: m.id, template: m.template || 'general', force: regenerate })
     m.has_notes = true
+    if (regenerate || wasMissing) m.notes_stale = false
     renderSidebar()
     renderNotesList()
     // The user may have opened a different meeting while this was generating.
     if (openId !== asked || noteTab !== 'notes') return
     renderMarkdown(md, noteBody)
+    if (m.notes_stale) noteBody.prepend(staleBanner())
     await appendTypedNotes(asked)
   } catch (e) {
     noteBody.innerHTML = ''
@@ -1054,6 +1157,18 @@ async function renderNotes(force = false, regenerate = false) {
   } finally {
     refreshModelChip()
   }
+}
+
+/// Audio was recorded into this meeting after the model wrote it up, so the
+/// notes on screen describe only part of it. Rewriting them is a full model run,
+/// so this says so and offers the button rather than spending the time unasked.
+function staleBanner() {
+  const wrap = el('div', 'stale')
+  wrap.append(el('span', '', 'More audio was recorded after these notes were written.'))
+  const go = el('button', '', 'Regenerate')
+  go.addEventListener('click', () => renderNotes(true, true))
+  wrap.append(go)
+  return wrap
 }
 
 // Rename from the note view's title field.
@@ -1524,6 +1639,14 @@ function renderNotesList() {
       el('div', 's', [fmtWhen(new Date(m.started_at)), fmtDuration(m.duration_secs)].filter(Boolean).join(' · '))
     )
     row.append(ic, txt)
+    // A recording Oatmeal died in the middle of is stranded until somebody asks
+    // for it to be transcribed — so ask here, where the meeting is listed.
+    if ((m.pending_segments || []).length && !recording) {
+      const fin = el('button', 'row-act', 'Finish transcribing')
+      fin.title = 'Transcribe the audio this recording never got written up'
+      fin.addEventListener('click', (e) => { e.stopPropagation(); finishMeeting(m.id) })
+      row.append(fin)
+    }
     row.addEventListener('click', () => openNote(m.id))
     notesListEl.appendChild(row)
   }
