@@ -25,12 +25,12 @@ use llama_cpp_2::sampling::LlamaSampler;
 
 /// Context window. Long meetings are summarized in chunks rather than by
 /// growing this — 8k keeps the KV cache small enough to stay quick.
-const N_CTX: u32 = 8192;
+pub(crate) const N_CTX: u32 = 8192;
 /// Cap on generated tokens, so a degenerate loop can't run forever.
-const MAX_TOKENS: usize = 1024;
+pub(crate) const MAX_TOKENS: usize = 1024;
 /// Roughly four characters per token; used to decide when a transcript needs
 /// chunking rather than tokenizing it twice to find out.
-const CHARS_PER_TOKEN: usize = 4;
+pub(crate) const CHARS_PER_TOKEN: usize = 4;
 
 /// llama.cpp's backend may only be initialized once per process.
 fn backend() -> Result<&'static LlamaBackend, String> {
@@ -224,6 +224,19 @@ Answer in two or three sentences unless the question demands more. Be concrete a
 specifics from the transcript where they help. If the transcript does not contain the \
 answer, say so — do not guess.";
 
+const LIBRARY_SYSTEM: &str = "\
+You answer questions about someone's past meetings, using only the numbered excerpts you \
+are given. Each excerpt is one meeting, headed by its number, title and date; some are \
+written-up notes and some are raw speech recognition output, so expect errors and no \
+speaker labels.
+
+Answer in a short paragraph unless the question demands more. Cite the meetings you used \
+by their number, like [1] or [2], next to the claim they support. Do not cite an excerpt \
+you did not use.
+
+Use nothing but the excerpts. If they do not answer the question, say so plainly and stop \
+— never fill the gap with something plausible.";
+
 const CHUNK_SYSTEM: &str = "\
 You are condensing one part of a long transcript so it can be summarized as a whole. \
 Capture every substantive point, decision, name, number and commitment in compact prose. \
@@ -348,6 +361,20 @@ pub fn recap(
 
     let user = format!("Transcript:\n{context}\n\nQuestion: {question}");
     complete_streaming(model_path, RECAP_SYSTEM, &user, on_token)
+}
+
+/// Answer a question from excerpts of several meetings, streaming the reply as
+/// it is generated. `context` is already sized to the window by `recall.rs`,
+/// which also guarantees it is never empty — the model is not asked anything it
+/// has no material for.
+pub fn answer_from_library(
+    model_path: &Path,
+    context: &str,
+    question: &str,
+    on_token: &mut dyn FnMut(&str),
+) -> Result<String, String> {
+    let user = format!("Meeting excerpts:\n\n{context}\nQuestion: {question}");
+    complete_streaming(model_path, LIBRARY_SYSTEM, &user, on_token)
 }
 
 /// Draft a follow-up message from a meeting's notes, streaming the reply as it
