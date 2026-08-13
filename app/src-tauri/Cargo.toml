@@ -1,6 +1,6 @@
 [package]
 name = "oatmeal-app"
-version = "1.4.0"
+version = "1.5.0"
 description = "Oatmeal — local meeting recorder, invisible to screen sharing"
 authors = ["Oatmeal"]
 edition = "2021"
@@ -21,7 +21,18 @@ cpal = "0.15"
 hound = "3.5"
 screencapturekit = "8.0.1"
 whisper-rs = { version = "0.16.0", default-features = false, features = ["metal"] }
-llama-cpp-2 = { version = "0.1.152", default-features = false, features = ["metal"] }
+# Pinned to 0.1.141, the newest release whose vendored ggml is ABI-compatible
+# with whisper-rs-sys's. Both crates statically link their own ggml and export
+# ~795 identical symbols, so the linker resolves each name once and splits the
+# implementation across the two copies. From 0.1.142 on, llama's ggml inserts
+# set_tensor_2d/get_tensor_2d into the middle of ggml_backend_buffer_i and
+# appends uid to ggml_cgraph — so llama allocated graphs with whisper's layout
+# and read them back with its own, on every decode. At 0.1.141 the layouts are
+# identical (ggml-backend-impl.h matches exactly; ggml-impl.h differs only by a
+# static inline helper), so the split is harmless.
+# Do not bump without re-checking those two headers against whisper-rs-sys.
+# The `=` is load-bearing: a caret requirement would happily resolve to 0.1.152.
+llama-cpp-2 = { version = "=0.1.141", default-features = false, features = ["metal"] }
 encoding_rs = "0.8.35"
 objc2-event-kit = { version = "0.3", features = ["EKEventStore", "EKEvent", "EKCalendarItem", "EKCalendar", "EKParticipant", "block2"] }
 objc2 = "0.6"

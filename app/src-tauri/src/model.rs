@@ -9,6 +9,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Mutex, OnceLock};
 
 use crate::transcribe::{model_dir, resolve_model_path};
 
@@ -111,34 +112,110 @@ pub fn is_present(p: &Path) -> bool {
     file_len(p) > 1_000_000
 }
 
+/// Serialises downloads. Five commands can reach `ensure_chat_model` at once
+/// (the chip, notes, recap, follow-up and library recall), and without a lock
+/// they race on one `.part`: curl resumes with `O_APPEND`, so the loser keeps
+/// writing into the inode the winner has already renamed into place. Both curls
+/// exit 0, so nothing downstream notices the model is now interleaved garbage —
+/// and `is_present`'s 1 MB floor calls it valid forever after.
+fn download_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+/// What the server says the file should weigh, via a HEAD request. `None` when
+/// it won't say, which just means we can't size-check this one.
+fn remote_size(url: &str) -> Option<u64> {
+    let out = Command::new("curl")
+        .arg("-sfIL")
+        .arg("--connect-timeout")
+        .arg("30")
+        .arg(url)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    // Redirects mean several header blocks; the last Content-Length is the one
+    // describing the body we'd actually receive.
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|l| l.split_once(':'))
+        .filter(|(k, _)| k.trim().eq_ignore_ascii_case("content-length"))
+        .filter_map(|(_, v)| v.trim().parse::<u64>().ok())
+        .last()
+}
+
 fn download_to(dest: &Path, url: &str) -> Result<(), String> {
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("create models dir {}: {e}", parent.display()))?;
     }
+
+    let _guard = download_lock()
+        .lock()
+        .map_err(|_| "model download state poisoned".to_string())?;
+
+    // Whoever held the lock may have just finished the very file we want.
+    if is_present(dest) {
+        return Ok(());
+    }
+
     let part = dest.with_extension("part");
+    let expected = remote_size(url);
+
+    // A `.part` at or past the full size makes curl's resume ask for a range the
+    // server can't satisfy. It answers 416, and curl treats that as "already
+    // complete" and exits 0 *even under -f* — promoting a stale or truncated
+    // file to a real model. Start that one over instead.
+    if let Some(exp) = expected {
+        if file_len(&part) >= exp {
+            let _ = std::fs::remove_file(&part);
+        }
+    }
 
     let status = Command::new("curl")
         .arg("-L") // follow redirects (HF serves a CDN redirect)
         .arg("-f") // fail on HTTP errors instead of writing an error body
         .arg("-C")
         .arg("-") // resume a partial download if one exists
+        .arg("--connect-timeout")
+        .arg("30")
+        // Without these a stalled transfer — dead CDN node, captive portal,
+        // laptop asleep — hangs the command forever with no way to cancel.
+        .arg("--speed-limit")
+        .arg("1024")
+        .arg("--speed-time")
+        .arg("120")
         .arg("-o")
         .arg(&part)
         .arg(url)
         .status()
         .map_err(|e| format!("spawn curl: {e}"))?;
 
+    // Every failure below removes the `.part`. Leaving it behind orphaned
+    // gigabytes the user couldn't find, and wedged every retry at the same
+    // offset — a Range-stripping proxy made that unrecoverable without deleting
+    // the file by hand.
     if !status.success() {
+        let _ = std::fs::remove_file(&part);
         return Err(format!(
             "curl exited with {} while downloading the model",
             status.code().unwrap_or(-1)
         ));
     }
-    if file_len(&part) < 1_000_000 {
+    let got = file_len(&part);
+    if got < 1_000_000 {
         let _ = std::fs::remove_file(&part);
         return Err("downloaded model looks truncated".into());
     }
+    if let Some(exp) = expected {
+        if got != exp {
+            let _ = std::fs::remove_file(&part);
+            return Err(format!("downloaded model is {got} bytes, expected {exp}"));
+        }
+    }
+
     std::fs::rename(&part, dest)
         .map_err(|e| format!("finalize model file {}: {e}", dest.display()))?;
     Ok(())
@@ -146,4 +223,167 @@ fn download_to(dest: &Path, url: &str) -> Result<(), String> {
 
 fn file_len(p: &Path) -> u64 {
     std::fs::metadata(p).map(|m| m.len()).unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    /// Bodies have to clear `is_present`'s 1 MB floor to be treated as a model.
+    const BODY: usize = 2 * 1024 * 1024;
+
+    #[derive(Clone, Copy)]
+    enum Mode {
+        /// Serves the whole body, honouring `Range` like HuggingFace does.
+        Full,
+        /// Refuses with a 500, the way an expired CDN signature does.
+        Fail500,
+        /// Advertises the full length but hangs up halfway — a truncated body
+        /// that still claims to be complete.
+        Short,
+    }
+
+    /// A range-capable HTTP server on an ephemeral port. Enough of the protocol
+    /// to exercise `download_to`'s real curl invocation without the network.
+    fn serve(mode: Mode) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        std::thread::spawn(move || {
+            let body = vec![b'x'; BODY];
+            for stream in listener.incoming() {
+                let Ok(mut s) = stream else { continue };
+                let mut buf = Vec::new();
+                let mut tmp = [0u8; 1024];
+                while let Ok(n) = s.read(&mut tmp) {
+                    if n == 0 {
+                        break;
+                    }
+                    buf.extend_from_slice(&tmp[..n]);
+                    if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let req = String::from_utf8_lossy(&buf).to_string();
+                let is_head = req.starts_with("HEAD");
+                let start = req
+                    .lines()
+                    .find(|l| l.to_ascii_lowercase().starts_with("range:"))
+                    .and_then(|l| l.split("bytes=").nth(1))
+                    .and_then(|r| r.trim().trim_end_matches('-').parse::<usize>().ok())
+                    .unwrap_or(0)
+                    .min(body.len());
+
+                if matches!(mode, Mode::Fail500) {
+                    let _ = s.write_all(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n");
+                    continue;
+                }
+
+                let rest = &body[start..];
+                let head = if start > 0 {
+                    format!(
+                        "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes {}-{}/{}\r\nAccept-Ranges: bytes\r\n\r\n",
+                        rest.len(), start, body.len() - 1, body.len()
+                    )
+                } else {
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\n\r\n",
+                        rest.len()
+                    )
+                };
+                if s.write_all(head.as_bytes()).is_err() {
+                    continue;
+                }
+                if is_head {
+                    continue;
+                }
+                let send = match mode {
+                    Mode::Short => &rest[..rest.len() / 2],
+                    _ => rest,
+                };
+                let _ = s.write_all(send);
+                let _ = s.flush();
+            }
+        });
+        format!("http://127.0.0.1:{port}/model.bin")
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("oatmeal-model-test-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).expect("scratch dir");
+        d.join("ggml-test.bin")
+    }
+
+    /// Two callers racing on one destination must not interleave into the same
+    /// `.part`. Before the lock, curl resumed with `O_APPEND` and the loser kept
+    /// writing into the file the winner had already renamed — both exited 0, and
+    /// the result was a model of the wrong size that `is_present` blessed forever.
+    #[test]
+    fn concurrent_downloads_produce_one_valid_file() {
+        let url = serve(Mode::Full);
+        let dest = scratch("concurrent");
+
+        let handles: Vec<_> = (0..2)
+            .map(|_| {
+                let (d, u) = (dest.clone(), url.clone());
+                std::thread::spawn(move || download_to(&d, &u))
+            })
+            .collect();
+        for h in handles {
+            h.join().expect("thread").expect("download should succeed");
+        }
+
+        assert_eq!(
+            file_len(&dest),
+            BODY as u64,
+            "final model is not exactly the served size — the downloads interleaved"
+        );
+        assert!(
+            !dest.with_extension("part").exists(),
+            "a .part survived a successful download"
+        );
+    }
+
+    /// A failed download used to leave its `.part` behind: gigabytes the user
+    /// couldn't find, and — because curl resumes from whatever is there — every
+    /// retry wedged at the same offset. A Range-stripping proxy made that
+    /// unrecoverable without deleting the file by hand.
+    ///
+    /// Seeded with a leftover `.part` because that is the state the bug actually
+    /// produces; an unseeded 500 never creates one, so it would pass either way.
+    #[test]
+    fn a_failed_download_leaves_no_part_file() {
+        let url = serve(Mode::Fail500);
+        let dest = scratch("failed");
+        let part = dest.with_extension("part");
+        std::fs::write(&part, vec![b'x'; 4096]).expect("seed a stale .part");
+
+        assert!(download_to(&dest, &url).is_err(), "a 500 must not succeed");
+        assert!(
+            !part.exists(),
+            ".part orphaned after a failed download — the next retry will resume from it"
+        );
+        assert!(!dest.exists(), "a failed download must not produce a model");
+    }
+
+    /// A body shorter than advertised must never be renamed into place. The old
+    /// code trusted curl's exit status plus a 1 MB floor, so a truncated file
+    /// well over 1 MB became the model.
+    #[test]
+    fn a_short_download_is_rejected_before_rename() {
+        let url = serve(Mode::Short);
+        let dest = scratch("short");
+
+        assert!(
+            download_to(&dest, &url).is_err(),
+            "a truncated body must be rejected"
+        );
+        assert!(!dest.exists(), "a truncated body was renamed into place");
+        assert!(
+            !dest.with_extension("part").exists(),
+            ".part orphaned after a truncated download"
+        );
+    }
 }
