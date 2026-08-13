@@ -461,6 +461,15 @@ fn search_meetings(query: String) -> Vec<library::Meeting> {
     library::search_meetings(&query)
 }
 
+/// The same matches, each carrying a few excerpts of the text that matched, so
+/// the dashboard can show *where* a meeting matched rather than only that it
+/// did. This reads and scans every meeting's transcript and notes on each
+/// (debounced) keystroke, so it runs off the main thread.
+#[tauri::command(async)]
+fn search_snippets(query: String) -> Vec<library::SearchHit> {
+    library::search_hits(&query)
+}
+
 // ── Local language model — notes and recaps ─────────────────────────────────
 
 /// Ensure the chat model is downloaded. Separate from `ensure_model` because
@@ -745,6 +754,7 @@ pub fn run() {
             session_elapsed_ms,
             list_meetings,
             search_meetings,
+            search_snippets,
             live_lines,
             save_notes,
             set_transcript_window_visible,
@@ -832,6 +842,7 @@ mod tests {
             "draft_followup",
             "check_for_update",
             "open_update_download",
+            "search_snippets",
         ] {
             let decl = format!("fn {name}(");
             let at = src
