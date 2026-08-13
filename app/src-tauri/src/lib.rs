@@ -695,7 +695,9 @@ fn chat_token_sink(app: tauri::AppHandle) -> impl FnMut(&str) {
 fn draft_followup(app: tauri::AppHandle, id: String) -> Result<String, String> {
     let notes = library::followup_source(&id)?;
     let path = model::ensure_chat_model()?;
-    chat::draft_followup(&path, &notes, &mut chat_token_sink(app))
+    let cfg = settings::load();
+    let style = chat::FollowupStyle::from_settings(&cfg.followup_style, &cfg.followup_custom);
+    chat::draft_followup(&path, &notes, &style, &mut chat_token_sink(app))
 }
 
 /// Free the chat model's memory.
@@ -774,8 +776,15 @@ fn get_settings() -> settings::Settings {
 fn save_settings(
     display_name: String,
     language: String,
+    followup_style: String,
+    followup_custom: String,
 ) -> Result<settings::Settings, String> {
-    settings::save(&display_name, &language)
+    settings::save(
+        &display_name,
+        &language,
+        &followup_style,
+        &followup_custom,
+    )
 }
 
 /// Whether macOS has granted calendar access, without prompting.

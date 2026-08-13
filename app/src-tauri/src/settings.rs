@@ -52,6 +52,11 @@ pub struct Settings {
     pub display_name: String,
     /// Whisper language code; empty means auto-detect.
     pub language: String,
+    /// Shape of a drafted follow-up message: `brief`, `detailed`, `bullets`, or
+    /// `custom`. Empty means `brief`, which is what it always used to do.
+    pub followup_style: String,
+    /// The instruction to use when `followup_style` is `custom`.
+    pub followup_custom: String,
 }
 
 pub fn load() -> Settings {
@@ -59,17 +64,26 @@ pub fn load() -> Settings {
     Settings {
         display_name: str_field(&doc, "displayName"),
         language: str_field(&doc, "language"),
+        followup_style: str_field(&doc, "followupStyle"),
+        followup_custom: str_field(&doc, "followupCustom"),
     }
 }
 
 /// Save the editable fields.
-pub fn save(display_name: &str, language: &str) -> Result<Settings, String> {
+pub fn save(
+    display_name: &str,
+    language: &str,
+    followup_style: &str,
+    followup_custom: &str,
+) -> Result<Settings, String> {
     let mut doc = read_raw();
     let obj = doc
         .as_object_mut()
         .ok_or("config file is not a JSON object")?;
     obj.insert("displayName".into(), display_name.trim().into());
     obj.insert("language".into(), language.trim().into());
+    obj.insert("followupStyle".into(), followup_style.trim().into());
+    obj.insert("followupCustom".into(), followup_custom.trim().into());
     write(&doc)?;
     Ok(load())
 }

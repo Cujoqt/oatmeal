@@ -61,6 +61,9 @@ const greetingEl = $('greeting')
 const chipWhoEl = $('chipWho')
 const calNote = $('calNote')
 const languageEl = $('language')
+const followupStyleEl = $('followupStyle')
+const followupCustomEl = $('followupCustom')
+const followupCustomField = $('followupCustomField')
 const modelPathEl = $('modelPath')
 const settingsNote = $('settingsNote')
 const acctEl = $('acct')
@@ -384,6 +387,17 @@ async function stopRecording() {
     const res = await invoke('stop_session', { modelPath: '', language: getLang() })
     if (!continued) landedId = (res.dir || '').split('/').pop()
     setStatus('Done. Notes saved locally.')
+    // Start writing the notes now rather than when the meeting is next opened.
+    // Deliberately not awaited: the transcript is already saved, so this is
+    // ahead-of-time work, and a failure here is not a failed recording — the
+    // note view asks for the same thing again and will surface it there.
+    //
+    // Only for a meeting that just started life, where General is by definition
+    // the right template. A continuation already has one chosen, and picking it
+    // wrong here would spend a model run on notes nobody asked for.
+    if (landedId && !continued) {
+      invoke('write_notes', { id: landedId, template: 'general', force: false }).catch(() => {})
+    }
   } catch (e) {
     setStatus(String(e), true)
   } finally {
@@ -1818,6 +1832,9 @@ async function loadSettings() {
     // The recorder reads the language from localStorage (both windows do); the
     // copy in the config is what survives a reinstall.
     languageEl.value = getLang() || s.language || ''
+    followupStyleEl.value = s.followupStyle || 'brief'
+    followupCustomEl.value = s.followupCustom || ''
+    renderFollowupStyle()
   } catch (e) {
     note(settingsNote, String(e), 'err')
   }
@@ -1905,12 +1922,24 @@ hwAddBtn.addEventListener('click', async () => {
   }
 })
 
+/// The custom instruction box is only meaningful for the custom style. An
+/// unknown value (a config from a newer build) leaves the select showing
+/// nothing, so fall back rather than present an empty control.
+function renderFollowupStyle() {
+  if (!followupStyleEl.value) followupStyleEl.value = 'brief'
+  followupCustomField.hidden = followupStyleEl.value !== 'custom'
+}
+
+followupStyleEl.addEventListener('change', renderFollowupStyle)
+
 $('saveSettings').addEventListener('click', async () => {
   note(settingsNote, 'Saving…')
   try {
     const saved = await invoke('save_settings', {
       displayName: displayNameEl.value.trim(),
       language: languageEl.value.trim(),
+      followupStyle: followupStyleEl.value,
+      followupCustom: followupCustomEl.value.trim(),
     })
     setLang(languageEl.value.trim())
     displayName = saved.displayName || ''

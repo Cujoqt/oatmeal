@@ -426,7 +426,13 @@
       color: var(--ink); background: transparent; border: 0; outline: none; width: 100%;
       padding: 0 0 8px;
     }
-    .chips { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 20px; }
+    .chips { display: flex; flex-wrap: wrap; gap: 8px; }
+    /* Two real sections, not one wrapping row: `.chips-top` picks how the note
+       is rendered (Enhanced/Transcript, template); `.chips-bottom` is metadata
+       and actions. Siblings rather than flex order so the split holds at every
+       window width. */
+    .chips-top { margin-bottom: 8px; }
+    .chips-bottom { margin-bottom: 20px; }
     .chip {
       display: inline-flex; align-items: center; gap: 7px; padding: 6px 12px; border-radius: 20px;
       border: 1px solid var(--line-2); background: transparent; color: var(--ink-soft);
@@ -715,11 +721,14 @@
       display: block; font: 600 10.5px var(--sans); text-transform: uppercase;
       letter-spacing: .8px; color: var(--faint); margin-bottom: 6px;
     }
-    .field input {
+    .field input, .field select {
       width: 100%; background: var(--panel); border: 1px solid var(--line-2); border-radius: 9px;
       padding: 9px 12px; font: 400 13.5px var(--sans); color: var(--ink); outline: none;
     }
-    .field input:focus { border-color: var(--accent); }
+    /* The stock macOS control paints its own light background regardless of the
+       page's theme, so the appearance has to be reset before the tokens apply. */
+    .field select { appearance: none; -webkit-appearance: none; cursor: pointer; }
+    .field input:focus, .field select:focus { border-color: var(--accent); }
     .field input::placeholder { color: var(--faint); }
     .field .hint { font: 400 12px/1.5 var(--sans); color: var(--hint); margin-top: 6px; word-break: break-all; }
     #hwDatePicker { position: relative; }
@@ -964,7 +973,7 @@
       <section class="view" id="viewNote">
         <div class="note-wrap">
           <input class="note-title" id="noteTitle" />
-          <div class="chips">
+          <div class="chips chips-top">
             <div class="seg-toggle">
               <button id="tabNotes" class="on">
                 <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.6 4.4L18 9l-4.4 1.6L12 15l-1.6-4.4L6 9l4.4-1.6z" /></svg>
@@ -973,6 +982,8 @@
               <button id="tabRaw">Transcript</button>
             </div>
             <div class="tmpl-chips" id="tmplChips"></div>
+          </div>
+          <div class="chips chips-bottom">
             <span class="chip" id="chipWhen"></span>
             <button class="chip act" id="chipFinish" hidden title="Transcribe the audio this recording never got written up">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a9 9 0 1 1-8.5 6" /><path d="M3 4v5h5" /></svg>
@@ -1024,6 +1035,25 @@
             <div class="field">
               <label for="displayName">Your name</label>
               <input id="displayName" placeholder="Dylan" autocomplete="off" spellcheck="false" maxlength="40" />
+            </div>
+          </div>
+
+          <div class="set-card">
+            <h2>Follow-up messages</h2>
+            <p>How “Draft follow-up” should write. Whatever you pick, it only ever uses what is in the notes — it will not invent anything that was not said.</p>
+            <div class="field">
+              <label for="followupStyle">Style</label>
+              <select id="followupStyle">
+                <option value="brief">Brief — a short paragraph or two</option>
+                <option value="detailed">Detailed — full explanation and reasoning</option>
+                <option value="bullets">Bullets — one point per line</option>
+                <option value="custom">Custom — describe it yourself</option>
+              </select>
+            </div>
+            <div class="field" id="followupCustomField" hidden>
+              <label for="followupCustom">Your instructions</label>
+              <input id="followupCustom" placeholder="Two sentences, no greeting, end with the next step" autocomplete="off" maxlength="300" />
+              <div class="hint">Describe the length and formatting you want.</div>
             </div>
           </div>
 
