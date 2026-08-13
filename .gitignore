@@ -17,13 +17,16 @@ oatmeal.config.json
 *.log
 
 # ── agent + tooling scratch, not part of the product ─────────────────────────
+# This repository is public. Agent instructions and working notes are local
+# tooling, not the product, and CLAUDE.md carried a personal Apple signing
+# identity — so none of it belongs in a public history.
 memory.md
+CLAUDE.md
+.claude/
 docs/superpowers/
 .gstack/
 .gstack-*
 .impeccable/
-.claude/skills/gstack/
-.claude/worktrees/
 graphify-out/
 *.vsix
 
