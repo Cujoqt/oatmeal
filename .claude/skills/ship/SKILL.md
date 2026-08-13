@@ -110,14 +110,30 @@ git checkout main
 git fetch origin
 git merge --ff-only origin/main
 
-# 2. Confirm main really has the bump commit BEFORE tagging
-git log --oneline -1          # must be the "Bump version to X.Y.Z" commit
+# 2. Confirm main really carries the new version BEFORE tagging.
+#    Check the CONTENT, not the commit subject: when the branch lands through a
+#    PR, HEAD is "Merge pull request #N", so looking for the bump commit at the
+#    tip proves nothing either way.
+grep -m1 '"version"' app/src-tauri/tauri.conf.json   # must be the new version
+grep -m1 '^version' app/src-tauri/Cargo.toml         # must match it
 
 # 3. Tag it, verify the tag, then push the tag
 git tag vX.Y.Z
-git log --oneline -1 vX.Y.Z   # must show the bump commit, not an older one
+git show vX.Y.Z:app/src-tauri/Cargo.toml | grep -m1 '^version'   # must be X.Y.Z
 git push origin vX.Y.Z
 ```
+
+**Tagging a commit that lacks the bump is the worst outcome on this list**, and
+it fails quietly. CI names the DMG from `tauri.conf.json`, so you get
+`Oatmeal-<old>-apple-silicon.dmg` attached to a release tagged `v<new>`. Worse,
+the shipped app reports `CARGO_PKG_VERSION` as the old version while the newest
+tag is the new one — so `update.rs` tells **every user, including someone who
+just installed it,** that an update is available, forever, with no way to
+satisfy the prompt. Check the file contents, not the log.
+
+A concrete way this happens: two PRs are open from the same branch, an earlier
+one gets merged, and the bump is still sitting in the later one. `main` looks
+updated — the features are all there — and the version is silently still old.
 
 ## Step 6 — Optional: make the release mandatory
 
