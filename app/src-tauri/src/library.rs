@@ -226,11 +226,30 @@ pub fn move_meeting_to_folder(id: &str, folder: Option<&str>) -> Result<(), Stri
 /// `session::write_notes`.
 const TYPED_NOTES: &str = "notes.md";
 
-/// The model's write-up of the transcript. Separate from `TYPED_NOTES` because
-/// both used to land in the same file: whatever you typed made the app believe
-/// notes had been generated, the Enhanced tab showed your own typing back to you,
-/// and generating for real would have overwritten it.
+/// The model's write-up of the transcript, under the `General` template — and
+/// also the legacy filename from before each template got its own cache file,
+/// which is why `cached_notes` and `migrate_legacy_cache` below treat it
+/// specially. Separate from `TYPED_NOTES` because both used to land in the
+/// same file: whatever you typed made the app believe notes had been
+/// generated, the Enhanced tab showed your own typing back to you, and
+/// generating for real would have overwritten it.
 const SUMMARY: &str = "summary.md";
+
+/// Filename holding one template's cached notes. `General` keeps the original
+/// `summary.md` name; the rest get their own file so switching templates can
+/// never overwrite another template's notes. Fixed strings, not built from
+/// anything a caller controls, so a filename can't collide with another
+/// meeting file or escape the meeting directory. The match is exhaustive on
+/// purpose: a new `Template` variant fails to compile here until it's given a
+/// file of its own.
+fn summary_filename(template: crate::chat::Template) -> &'static str {
+    match template {
+        crate::chat::Template::General => SUMMARY,
+        crate::chat::Template::Standup => "summary-standup.md",
+        crate::chat::Template::OneOnOne => "summary-one-on-one.md",
+        crate::chat::Template::Interview => "summary-interview.md",
+    }
+}
 
 /// Whether `notes.md` holds typed notes rather than an older build's model output.
 /// `session::write_notes` stamps every file it writes with a `_Written …_` line.
@@ -252,9 +271,76 @@ fn migrate_legacy_summary(dir: &Path) -> Option<String> {
     Some(text)
 }
 
-/// Whether a meeting already has a model-written summary.
+/// The first time we see a meeting from before per-template caching, copy its
+/// `summary.md` into the dedicated file for the template `meta.json` says it
+/// was generated under. Without this, generating notes under a *different*
+/// template later would overwrite `summary.md` (that other template's
+/// dedicated file, per `summary_filename`) and destroy the only copy of the
+/// original notes.
+///
+/// `summary.md` itself is left exactly where it is — this only ever creates a
+/// second copy, never removes anything. A no-op once that dedicated file
+/// exists, or for a meeting whose recorded (or defaulted) template is
+/// `General`, since `summary.md` already *is* General's file.
+fn migrate_legacy_cache(dir: &Path) {
+    let template = meta_template(dir).unwrap_or_default();
+    if template == crate::chat::Template::General {
+        return;
+    }
+    let dedicated = dir.join(summary_filename(template));
+    if dedicated.is_file() {
+        return;
+    }
+    if let Ok(text) = std::fs::read_to_string(dir.join(SUMMARY)) {
+        if !text.trim().is_empty() {
+            let _ = crate::store::write(&dedicated, &text);
+        }
+    }
+}
+
+/// The cached notes for `template`, if this meeting has any: its dedicated
+/// file first, then `summary.md` as a fallback for a meeting that predates
+/// per-template caching and whose `meta.json` says `summary.md` is that
+/// template's notes. `General`'s dedicated file *is* `summary.md`, so it only
+/// ever goes through that same gated fallback check — otherwise a legacy
+/// meeting generated under, say, Interview would have its notes handed back
+/// for a `General` request too, just because they happen to share a filename.
+fn cached_notes(dir: &Path, template: crate::chat::Template) -> Option<String> {
+    if template != crate::chat::Template::General {
+        if let Ok(text) = std::fs::read_to_string(dir.join(summary_filename(template))) {
+            if !text.trim().is_empty() {
+                return Some(text);
+            }
+        }
+    }
+    if meta_template(dir).unwrap_or_default() == template {
+        if let Ok(text) = std::fs::read_to_string(dir.join(SUMMARY)) {
+            if !text.trim().is_empty() {
+                return Some(text);
+            }
+        }
+    }
+    None
+}
+
+/// The cached notes for whichever template this meeting is currently showing
+/// (`meta.json`'s `template`, defaulting like the picker does). Read-only —
+/// never generates and never migrates — so callers that just want to display
+/// or search a meeting's notes (export, search) can call it on every meeting
+/// without risking a model run or a write.
+fn selected_notes(dir: &Path) -> String {
+    cached_notes(dir, meta_template(dir).unwrap_or_default()).unwrap_or_default()
+}
+
+/// Whether a meeting already has a model-written summary, under any template.
 fn has_summary(dir: &Path) -> bool {
-    if dir.join(SUMMARY).is_file() {
+    let templates = [
+        crate::chat::Template::General,
+        crate::chat::Template::Standup,
+        crate::chat::Template::OneOnOne,
+        crate::chat::Template::Interview,
+    ];
+    if templates.iter().any(|t| dir.join(summary_filename(*t)).is_file()) {
         return true;
     }
     // A legacy notes.md that isn't typed notes still counts — it is a summary,
@@ -371,7 +457,10 @@ fn meeting_matches(m: &Meeting, q: &str) -> bool {
         return true;
     }
     let dir = Path::new(&m.dir);
-    ["transcript.md", TYPED_NOTES, SUMMARY]
+    if selected_notes(dir).to_lowercase().contains(q) {
+        return true;
+    }
+    ["transcript.md", TYPED_NOTES]
         .iter()
         .filter_map(|file| std::fs::read_to_string(dir.join(file)).ok())
         .any(|text| text.to_lowercase().contains(q))
@@ -499,7 +588,7 @@ fn meeting_snippets(m: &Meeting, needle: &[char]) -> Vec<Snippet> {
 
     let sources = [
         (SnippetSource::Title, m.title.clone()),
-        (SnippetSource::Notes, read(SUMMARY)),
+        (SnippetSource::Notes, selected_notes(dir)),
         (SnippetSource::Notes, read(TYPED_NOTES)),
         (SnippetSource::Transcript, spoken),
     ];
@@ -735,7 +824,7 @@ pub fn export_meeting(id: &str) -> Result<String, String> {
     let meeting = read_meeting(&dir, id, None);
 
     let sections = [
-        ("Notes", std::fs::read_to_string(dir.join(SUMMARY)).unwrap_or_default()),
+        ("Notes", selected_notes(&dir)),
         ("Your notes", typed_notes(id).unwrap_or_default()),
         ("Transcript", transcript_text(id).unwrap_or_default()),
     ];
@@ -842,23 +931,40 @@ pub fn transcript_lines(id: &str) -> Result<Vec<TranscriptLine>, String> {
     Ok(out)
 }
 
-/// Write structured notes for a meeting, caching them as `summary.md` beside the
-/// transcript. Returns the cached copy unless `force` asks for a rewrite —
-/// generation takes real time and the result doesn't change on its own.
+/// Cache freshly generated notes for `template` in its dedicated file, and
+/// record it as the meeting's current template. Split out from `write_notes`
+/// so the on-disk half of "generate" — the part that must only ever touch the
+/// requested template's file — is testable without running the model.
+fn store_generated_notes(dir: &Path, template: crate::chat::Template, notes: &str) -> Result<(), String> {
+    crate::store::write(&dir.join(summary_filename(template)), notes)?;
+    update_meta(dir, |meta| {
+        meta.insert("template".into(), serde_json::to_value(template).unwrap());
+        // These notes were just written from the whole transcript as it stands,
+        // so whatever continuation made the last set stale is now covered.
+        meta.remove("notes_stale");
+    })
+}
+
+/// Write structured notes for a meeting under `template`, caching them in that
+/// template's own file so switching templates and back doesn't lose or
+/// regenerate the others. Returns the cached copy unless `force` asks for a
+/// rewrite of *this* template — generation takes real time and the result
+/// doesn't change on its own.
 ///
-/// This never touches `notes.md`: that file belongs to whoever was typing during
-/// the meeting.
+/// This never touches `notes.md`: that file belongs to whoever was typing
+/// during the meeting.
 pub fn write_notes(id: &str, template: crate::chat::Template, force: bool) -> Result<String, String> {
     let dir = meeting_dir(id)?;
-    let summary_path = dir.join(SUMMARY);
+    migrate_legacy_cache(&dir);
+
     if !force {
-        if let Ok(existing) = std::fs::read_to_string(&summary_path) {
-            if !existing.trim().is_empty() {
-                return Ok(existing);
-            }
+        if let Some(existing) = cached_notes(&dir, template) {
+            return Ok(existing);
         }
-        if let Some(migrated) = migrate_legacy_summary(&dir) {
-            return Ok(migrated);
+        if template == crate::chat::Template::General {
+            if let Some(migrated) = migrate_legacy_summary(&dir) {
+                return Ok(migrated);
+            }
         }
     }
 
@@ -866,14 +972,7 @@ pub fn write_notes(id: &str, template: crate::chat::Template, force: bool) -> Re
     let model = crate::model::ensure_chat_model()?;
     let notes = crate::chat::write_notes(&model, &transcript, template)?;
 
-    crate::store::write(&summary_path, &notes)?;
-
-    update_meta(&dir, |meta| {
-        meta.insert("template".into(), serde_json::to_value(template).unwrap());
-        // These notes were just written from the whole transcript as it stands,
-        // so whatever continuation made the last set stale is now covered.
-        meta.remove("notes_stale");
-    })?;
+    store_generated_notes(&dir, template, &notes)?;
 
     Ok(notes)
 }
@@ -883,11 +982,14 @@ pub fn write_notes(id: &str, template: crate::chat::Template, force: bool) -> Re
 /// user typed by hand if there's no transcript to summarize. Never the raw
 /// transcript — a follow-up should read like the notes, not the ASR output.
 ///
-/// The template only decides how notes are *written*, and a meeting that
-/// already has notes gets the cached copy back untouched, so the default is all
-/// this path can meaningfully ask for.
+/// Uses whichever template the meeting is currently showing (`meta.json`'s
+/// `template`, same default the picker uses), so a meeting that's been
+/// written up as an Interview gets a follow-up drafted from its Interview
+/// notes rather than triggering a fresh General generation.
 pub fn followup_source(id: &str) -> Result<String, String> {
-    match write_notes(id, crate::chat::Template::default(), false) {
+    let dir = meeting_dir(id)?;
+    let template = meta_template(&dir).unwrap_or_default();
+    match write_notes(id, template, false) {
         Ok(notes) => Ok(notes),
         Err(_) => {
             let typed = typed_notes(id)?;
@@ -1097,6 +1199,101 @@ mod tests {
                 "## Summary\n\ncached"
             );
             assert!(list_meetings()[0].has_notes);
+        });
+    }
+
+    #[test]
+    fn notes_for_one_template_survive_generating_another() {
+        with_temp_home(|_| {
+            let id = "20260724-110000-interview";
+            let dir = seed_meeting(id);
+            // Pre-seed both caches directly, so neither `write_notes` call below
+            // is a cache miss and the (absent) model is never reached.
+            std::fs::write(dir.join("summary.md"), "## General\n\ngeneral notes").unwrap();
+            std::fs::write(dir.join("summary-interview.md"), "## Interview\n\ninterview notes").unwrap();
+
+            assert_eq!(
+                write_notes(id, crate::chat::Template::General, false).unwrap(),
+                "## General\n\ngeneral notes"
+            );
+            assert_eq!(
+                write_notes(id, crate::chat::Template::Interview, false).unwrap(),
+                "## Interview\n\ninterview notes"
+            );
+            // Switching back to General doesn't disturb Interview's file, or vice
+            // versa — this is the bug report: picking a different template must
+            // not "forget" what the other one had.
+            assert_eq!(
+                write_notes(id, crate::chat::Template::General, false).unwrap(),
+                "## General\n\ngeneral notes"
+            );
+            assert_eq!(
+                std::fs::read_to_string(dir.join("summary-interview.md")).unwrap(),
+                "## Interview\n\ninterview notes"
+            );
+        });
+    }
+
+    #[test]
+    fn legacy_summary_is_returned_for_the_template_it_was_generated_under() {
+        with_temp_home(|_| {
+            let id = "20260724-120000-legacy";
+            let dir = seed_meeting(id);
+            // As a pre-fix meeting would look: one summary.md, and meta.json
+            // recording which template it was written under.
+            std::fs::write(dir.join("summary.md"), "## Summary\n\nwritten before templates existed").unwrap();
+            update_meta(&dir, |meta| {
+                meta.insert(
+                    "template".into(),
+                    serde_json::to_value(crate::chat::Template::Interview).unwrap(),
+                );
+            })
+            .unwrap();
+
+            // Asking for the template it was actually generated under returns it
+            // as-is — no model, no regeneration.
+            let notes = write_notes(id, crate::chat::Template::Interview, false).unwrap();
+            assert_eq!(notes, "## Summary\n\nwritten before templates existed");
+
+            // It's been given its own dedicated file, so a later switch away and
+            // back no longer depends on meta.json's `template` field to find it.
+            assert_eq!(
+                std::fs::read_to_string(dir.join("summary-interview.md")).unwrap(),
+                "## Summary\n\nwritten before templates existed"
+            );
+            // And summary.md itself is untouched — nothing here deletes it.
+            assert!(dir.join("summary.md").is_file());
+        });
+    }
+
+    #[test]
+    fn regenerating_one_template_leaves_the_others_untouched() {
+        with_temp_home(|_| {
+            let id = "20260724-130000-panel";
+            let dir = seed_meeting(id);
+            std::fs::write(dir.join("summary.md"), "## General\n\noriginal").unwrap();
+            std::fs::write(dir.join("summary-standup.md"), "## Standup\n\noriginal").unwrap();
+
+            // This is exactly what `write_notes` does after the model returns —
+            // exercised directly so `force`'s isolation is verified without
+            // running the (multi-gigabyte, slow) local model.
+            store_generated_notes(&dir, crate::chat::Template::Interview, "## Interview\n\nfresh").unwrap();
+
+            assert_eq!(
+                std::fs::read_to_string(dir.join("summary.md")).unwrap(),
+                "## General\n\noriginal",
+                "regenerating Interview must not touch General's file"
+            );
+            assert_eq!(
+                std::fs::read_to_string(dir.join("summary-standup.md")).unwrap(),
+                "## Standup\n\noriginal",
+                "regenerating Interview must not touch Standup's file"
+            );
+            assert_eq!(
+                std::fs::read_to_string(dir.join("summary-interview.md")).unwrap(),
+                "## Interview\n\nfresh"
+            );
+            assert_eq!(meta_template(&dir), Some(crate::chat::Template::Interview));
         });
     }
 
