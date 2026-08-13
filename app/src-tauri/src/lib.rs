@@ -575,7 +575,7 @@ fn ensure_chat_model() -> Result<String, String> {
 
 /// Whether the chat model is on disk, and whether it's already resident in
 /// memory — the UI uses this to warn before a multi-gigabyte download.
-#[tauri::command]
+#[tauri::command(async)]
 fn chat_model_status() -> serde_json::Value {
     let path = model::chat_model_path();
     serde_json::json!({
@@ -661,7 +661,7 @@ fn draft_followup(app: tauri::AppHandle, id: String) -> Result<String, String> {
 }
 
 /// Free the chat model's memory.
-#[tauri::command]
+#[tauri::command(async)]
 fn unload_chat_model() {
     chat::unload();
 }
@@ -951,6 +951,8 @@ mod tests {
             "check_for_update",
             "open_update_download",
             "search_snippets",
+            "chat_model_status",
+            "unload_chat_model",
         ] {
             let decl = format!("fn {name}(");
             let at = src
