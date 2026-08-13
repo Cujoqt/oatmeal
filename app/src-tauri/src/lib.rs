@@ -40,6 +40,15 @@ pub struct AppState {
     pub sysaudio: Mutex<Option<SysAudioRecorder>>,
     /// Paths for the in-progress meeting, if a session is running.
     pub session: Mutex<Option<session::SessionPaths>>,
+    /// When the take now recording started, for the on-screen clock.
+    ///
+    /// Deliberately not the meeting folder's creation date: continuing a meeting
+    /// records into the folder it already had, so that date is when the meeting
+    /// was *first* started — a day ago, if it was yesterday's — and the clock
+    /// would open at that. This is only ever read while a session is live, and a
+    /// session cannot outlive the process holding it, so there is nothing to
+    /// recover after a restart.
+    pub take_started: Mutex<Option<std::time::Instant>>,
     /// Live transcription worker for the in-progress meeting.
     pub live: Mutex<Option<LiveSession>>,
     /// Notes typed before any meeting existed, flushed to disk once one does.
@@ -64,6 +73,7 @@ impl Default for AppState {
             mic: Mutex::new(None),
             sysaudio: Mutex::new(None),
             session: Mutex::new(None),
+            take_started: Mutex::new(None),
             live: Mutex::new(None),
             pending_notes: Mutex::new(None),
             last_dir: Mutex::new(None),
@@ -340,6 +350,10 @@ fn begin_session(
     *state.last_dir.lock().map_err(|_| "notes state poisoned")? = Some(paths.dir.clone());
 
     *sess = Some(paths.clone());
+    // The clock runs from here, not from whenever this meeting's folder was made.
+    if let Ok(mut started) = state.take_started.lock() {
+        *started = Some(std::time::Instant::now());
+    }
     Ok(paths)
 }
 
@@ -424,17 +438,16 @@ fn is_transcript_window_visible(app: tauri::AppHandle) -> bool {
 /// The session folder's creation time is the start time.
 #[tauri::command]
 fn session_elapsed_ms(state: tauri::State<'_, AppState>) -> Option<u64> {
-    let dir = state
-        .session
-        .lock()
-        .ok()?
-        .as_ref()
-        .map(|paths| paths.dir.clone())?;
-    let created = std::fs::metadata(dir).ok()?.created().ok()?;
-    std::time::SystemTime::now()
-        .duration_since(created)
-        .ok()
-        .map(|since| since.as_millis() as u64)
+    elapsed_ms(&state)
+}
+
+/// How long the current take has been running, or `None` if nothing is.
+fn elapsed_ms(state: &AppState) -> Option<u64> {
+    // Only meaningful while something is actually recording; the clock is hidden
+    // otherwise, and a stale start time would seed it with a wrong number.
+    state.session.lock().ok()?.as_ref()?;
+    let started = (*state.take_started.lock().ok()?)?;
+    Some(started.elapsed().as_millis() as u64)
 }
 
 /// Whether a meeting is currently being recorded.
@@ -459,6 +472,9 @@ fn stop_session(
         let mut sess = state.session.lock().map_err(|_| "session state poisoned")?;
         sess.take().ok_or("no meeting is being recorded")?
     };
+    if let Ok(mut started) = state.take_started.lock() {
+        *started = None;
+    }
 
     // Stop the live worker first: it holds its own copy of the Whisper model,
     // and releasing it before the accurate pass keeps peak memory down.
@@ -1004,6 +1020,42 @@ mod tests {
                  main thread freezes the UI"
             );
         }
+    }
+
+    /// The clock on screen counts this take, not the meeting. Continuing a
+    /// meeting records into the folder it already had, so anything derived from
+    /// that folder — its creation date, which is what this used to read — starts
+    /// the clock at whenever the meeting was *first* recorded. Continue
+    /// yesterday's meeting and it opened at 24 hours.
+    #[test]
+    fn the_clock_counts_the_current_take_not_the_whole_meeting() {
+        use std::time::{Duration, Instant};
+
+        let state = crate::AppState::default();
+        let dir = "/tmp/oatmeal-elapsed/20260812-110000-standup";
+
+        // Nothing recording: no clock, whatever start time is lying around.
+        *state.take_started.lock().unwrap() = Some(Instant::now());
+        assert_eq!(crate::elapsed_ms(&state), None, "no session means no clock");
+
+        // Continuing a meeting first recorded a day ago: the folder is old, the
+        // take is seconds old, and the clock must show the take.
+        *state.session.lock().unwrap() = Some(crate::session::SessionPaths {
+            dir: dir.into(),
+            mic_wav: format!("{dir}/mic.002.wav"),
+            sys_wav: format!("{dir}/system.002.wav"),
+            title: "Standup".into(),
+            slug: "standup".into(),
+            segment: 2,
+        });
+        *state.take_started.lock().unwrap() =
+            Some(Instant::now() - Duration::from_secs(90));
+
+        let elapsed = crate::elapsed_ms(&state).expect("a running take has a clock");
+        assert!(
+            (90_000..91_000).contains(&elapsed),
+            "expected ~90s for this take, got {elapsed} ms"
+        );
     }
 
     /// Finishing an abandoned recording runs Whisper over the lane WAVs as they
