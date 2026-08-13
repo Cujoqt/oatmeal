@@ -119,6 +119,10 @@ let filter = ''
 /// back to a title-only match until it does, so typing never shows an empty
 /// list while the backend scan is in flight.
 let searchResults = null
+/// `id → [{ source, text }]` for the same results: the excerpts that made each
+/// meeting match. Set from the same reply as `searchResults`, so the sidebar's
+/// filter and the dashboard's result list can never disagree about what matched.
+let searchHits = null
 let searchTimer = null
 let searchSeq = 0
 let folders = []
@@ -665,19 +669,23 @@ function visibleMeetings() {
   return currentFolder ? list.filter((m) => m.folder === currentFolder) : list
 }
 
-/// Runs `filter` against transcript and notes content too, not just titles.
+/// Runs `filter` against transcript and notes content too, not just titles, and
+/// keeps the excerpts that matched so the dashboard can show them.
 /// Debounced so a full scan doesn't happen on every keystroke.
 async function runSearch() {
   const q = filter
   const seq = ++searchSeq
-  let results
+  let hits
   try {
-    results = await invoke('search_meetings', { query: q })
-  } catch {
+    hits = await invoke('search_snippets', { query: q })
+  } catch (e) {
+    // A search that fails silently looks exactly like a search with no matches.
+    if (seq === searchSeq) setStatus(`Search failed: ${e}`, true)
     return
   }
   if (seq !== searchSeq || q !== filter) return
-  searchResults = results
+  searchResults = hits.map((h) => h.meeting)
+  searchHits = new Map(hits.map((h) => [h.meeting.id, h.snippets]))
   renderSidebar()
   renderNotesList()
 }
@@ -870,6 +878,7 @@ meetingsLabel.addEventListener('drop', (e) => {
 searchEl.addEventListener('input', () => {
   filter = searchEl.value.trim()
   searchResults = null
+  searchHits = null
   renderSidebar()
   renderNotesList()
   clearTimeout(searchTimer)
@@ -1620,6 +1629,49 @@ agNext.addEventListener('click', () => {
 
 const PAGE_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3h7l5 5v13H6z" /><path d="M13 3v5h5" /></svg>'
 
+const SNIPPET_LABELS = { title: 'Title', notes: 'Notes', transcript: 'Transcript' }
+
+/// A snippet as text nodes, with each occurrence of `query` wrapped in `<mark>`.
+/// Built node by node deliberately: a snippet is a slice of somebody's
+/// transcript, and `innerHTML` would run whatever markup happened to be in it.
+/// `indexOf`, not a regex, so a query full of `.*` matches literally.
+function highlighted(text, query) {
+  const frag = document.createDocumentFragment()
+  const hay = text.toLowerCase()
+  const needle = query.toLowerCase()
+  // A lowercase form of a different length (exotic scripts) would slide every
+  // index; plain text beats a misplaced highlight.
+  if (!needle || hay.length !== text.length || needle.length !== query.length) {
+    frag.appendChild(document.createTextNode(text))
+    return frag
+  }
+  let from = 0
+  for (let at = hay.indexOf(needle); at !== -1; at = hay.indexOf(needle, from)) {
+    if (at > from) frag.appendChild(document.createTextNode(text.slice(from, at)))
+    const mark = document.createElement('mark')
+    mark.textContent = text.slice(at, at + needle.length)
+    frag.appendChild(mark)
+    from = at + needle.length
+  }
+  frag.appendChild(document.createTextNode(text.slice(from)))
+  return frag
+}
+
+/// The matching excerpts under a search result, each labelled with where it
+/// came from.
+function snippetLines(snippets, query) {
+  const wrap = el('div', 'snips')
+  for (const s of snippets) {
+    const line = el('div', 'snip')
+    line.appendChild(el('span', 'src', SNIPPET_LABELS[s.source] || s.source))
+    const body = el('span', 'x')
+    body.appendChild(highlighted(s.text, query))
+    line.append(body)
+    wrap.appendChild(line)
+  }
+  return wrap
+}
+
 function renderNotesList() {
   const list = visibleMeetings()
   notesListEl.innerHTML = ''
@@ -1638,6 +1690,13 @@ function renderNotesList() {
       el('div', 't', m.title),
       el('div', 's', [fmtWhen(new Date(m.started_at)), fmtDuration(m.duration_secs)].filter(Boolean).join(' · '))
     )
+    // While a search is on, the list becomes results: same rows, plus the text
+    // that matched. No new view and no router change — this is still the list.
+    const snippets = filter && searchHits ? searchHits.get(m.id) : null
+    if (snippets && snippets.length) {
+      row.classList.add('result')
+      txt.appendChild(snippetLines(snippets, filter))
+    }
     row.append(ic, txt)
     // A recording Oatmeal died in the middle of is stranded until somebody asks
     // for it to be transcribed — so ask here, where the meeting is listed.

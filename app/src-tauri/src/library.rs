@@ -377,6 +377,164 @@ fn meeting_matches(m: &Meeting, q: &str) -> bool {
         .any(|text| text.to_lowercase().contains(q))
 }
 
+// ── search snippets ─────────────────────────────────────────────────────────
+//
+// Knowing that a meeting matched isn't much help when the transcript is
+// thousands of words long: the useful answer is the sentence the words were
+// said in. These excerpts are bounded on both axes — a fixed context window and
+// a fixed count per meeting — so a one-letter query can't hand the UI a whole
+// transcript to render.
+
+/// Characters of context kept either side of a hit.
+const SNIPPET_CONTEXT: usize = 70;
+
+/// Most snippets returned for one meeting, counting every source together.
+const MAX_SNIPPETS: usize = 3;
+
+/// Which part of a meeting an excerpt came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SnippetSource {
+    Title,
+    /// Either file of notes: what the model wrote, or what the user typed.
+    Notes,
+    Transcript,
+}
+
+/// One excerpt of a meeting, around one occurrence of the query.
+#[derive(Debug, Clone, Serialize)]
+pub struct Snippet {
+    pub source: SnippetSource,
+    /// A single line of context around the hit, elided with `…` where it was
+    /// clipped. Whitespace is collapsed so it reads as one line in a list.
+    pub text: String,
+}
+
+/// A meeting that matched a search, and where it matched.
+#[derive(Debug, Clone, Serialize)]
+pub struct SearchHit {
+    pub meeting: Meeting,
+    pub snippets: Vec<Snippet>,
+}
+
+/// Lowercase one char at a time so the result indexes 1:1 with the original.
+/// `str::to_lowercase` can lengthen the string (`İ` → two chars), which would
+/// slide every index after it and slice the window in the wrong place; keeping
+/// only the first char of such an expansion trades an exotic mismatch for
+/// indices that always line up.
+fn lower_chars(chars: &[char]) -> Vec<char> {
+    chars
+        .iter()
+        .map(|c| c.to_lowercase().next().unwrap_or(*c))
+        .collect()
+}
+
+/// Char index of the first occurrence of `needle` in `hay`, both lowercased.
+fn find_chars(hay: &[char], needle: &[char]) -> Option<usize> {
+    if needle.len() > hay.len() {
+        return None;
+    }
+    (0..=hay.len() - needle.len()).find(|&i| &hay[i..i + needle.len()] == needle)
+}
+
+/// Squash runs of whitespace (newlines included) into single spaces, so an
+/// excerpt spanning a line break still renders as one line.
+fn collapse_ws(chars: &[char]) -> String {
+    chars
+        .iter()
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Excerpts around each occurrence of `needle` (already lowercased) in `text`,
+/// stopping at `limit`. Hits inside a window already emitted are skipped, so a
+/// dense match doesn't return the same sentence three times.
+fn snippets_from(
+    source: SnippetSource,
+    text: &str,
+    needle: &[char],
+    limit: usize,
+) -> Vec<Snippet> {
+    if needle.is_empty() || limit == 0 {
+        return Vec::new();
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let lower = lower_chars(&chars);
+
+    let mut out = Vec::new();
+    let mut from = 0;
+    while out.len() < limit && from < lower.len() {
+        let Some(rel) = find_chars(&lower[from..], needle) else {
+            break;
+        };
+        let at = from + rel;
+        let start = at.saturating_sub(SNIPPET_CONTEXT);
+        let end = (at + needle.len() + SNIPPET_CONTEXT).min(chars.len());
+
+        let mut excerpt = String::new();
+        if start > 0 {
+            excerpt.push('…');
+        }
+        excerpt.push_str(&collapse_ws(&chars[start..end]));
+        if end < chars.len() {
+            excerpt.push('…');
+        }
+        out.push(Snippet { source, text: excerpt });
+
+        from = end.max(at + needle.len());
+    }
+    out
+}
+
+/// Every excerpt worth showing for one meeting: title first, then notes, then
+/// the transcript, capped at `MAX_SNIPPETS` across all of them.
+fn meeting_snippets(m: &Meeting, needle: &[char]) -> Vec<Snippet> {
+    let dir = Path::new(&m.dir);
+    let read = |name: &str| std::fs::read_to_string(dir.join(name)).unwrap_or_default();
+    // The transcript is excerpted from its spoken words, not the raw markdown:
+    // nobody wants `**[0:04]**` in the middle of a quote.
+    let spoken = strip_transcript_markup(&read("transcript.md"));
+
+    let sources = [
+        (SnippetSource::Title, m.title.clone()),
+        (SnippetSource::Notes, read(SUMMARY)),
+        (SnippetSource::Notes, read(TYPED_NOTES)),
+        (SnippetSource::Transcript, spoken),
+    ];
+
+    let mut out: Vec<Snippet> = Vec::new();
+    for (source, text) in sources {
+        if out.len() >= MAX_SNIPPETS {
+            break;
+        }
+        out.extend(snippets_from(source, &text, needle, MAX_SNIPPETS - out.len()));
+    }
+    out
+}
+
+/// Meetings matching `query`, each with the excerpts that made it match.
+///
+/// Matching is the same case-insensitive substring test `search_meetings` uses
+/// — the whole query, spaces and all, so a two-word query is a phrase — because
+/// the caller shows both result sets and they must not disagree. A blank query
+/// isn't a search and has nothing to excerpt, so it returns nothing rather than
+/// every meeting.
+pub fn search_hits(query: &str) -> Vec<SearchHit> {
+    let needle = lower_chars(&query.trim().chars().collect::<Vec<_>>());
+    if needle.is_empty() {
+        return Vec::new();
+    }
+    list_meetings()
+        .into_iter()
+        .filter_map(|m| {
+            let snippets = meeting_snippets(&m, &needle);
+            (!snippets.is_empty()).then_some(SearchHit { meeting: m, snippets })
+        })
+        .collect()
+}
+
 /// `YYYYMMDD-HHMMSS[-slug]` → `YYYY-MM-DDTHH:MM:SS`, or None if the prefix
 /// isn't a timestamp.
 fn parse_stamp(name: &str) -> Option<String> {
@@ -984,6 +1142,135 @@ mod tests {
             assert!(search_meetings("nonexistent query").is_empty());
             // Blank query behaves like list_meetings.
             assert_eq!(search_meetings("   ").len(), 3);
+        });
+    }
+
+    /// A meeting folder with a chosen title and one line of spoken words, so a
+    /// snippet test can put the hit exactly where it wants it.
+    fn seed_transcript(id: &str, title: &str, body: &str) -> std::path::PathBuf {
+        let dir = recordings_root().join(id);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("transcript.md"),
+            format!("# {title}\n\n_Recorded 2026-07-24 10:33_\n\n## Transcript\n\n**[0:00]** {body}\n"),
+        )
+        .unwrap();
+        dir
+    }
+
+    #[test]
+    fn snippets_reach_the_very_start_and_the_very_end_of_the_text() {
+        with_temp_home(|_| {
+            let filler = "filler ".repeat(80);
+            seed_transcript("20260724-100000-opening", "Opening", &format!("roadmap {filler}"));
+            seed_transcript("20260724-110000-closing", "Closing", &format!("{filler} roadmap"));
+
+            let hits = search_hits("roadmap");
+            assert_eq!(hits.len(), 2);
+            let snips = |id: &str| {
+                hits.iter()
+                    .find(|h| h.meeting.id == id)
+                    .unwrap_or_else(|| panic!("no hit for {id}"))
+                    .snippets
+                    .clone()
+            };
+
+            // A hit at char 0 has nothing to its left, so no leading ellipsis.
+            let opening = snips("20260724-100000-opening");
+            assert_eq!(opening.len(), 1);
+            assert_eq!(opening[0].source, SnippetSource::Transcript);
+            assert!(opening[0].text.starts_with("roadmap"), "got: {:?}", opening[0].text);
+            assert!(opening[0].text.ends_with('…'), "got: {:?}", opening[0].text);
+
+            // ...and a hit on the last word has nothing to its right.
+            let closing = snips("20260724-110000-closing");
+            assert_eq!(closing.len(), 1);
+            assert!(closing[0].text.starts_with('…'), "got: {:?}", closing[0].text);
+            assert!(closing[0].text.ends_with("roadmap"), "got: {:?}", closing[0].text);
+        });
+    }
+
+    #[test]
+    fn snippets_are_capped_per_meeting_and_bounded_in_length() {
+        with_temp_home(|_| {
+            let gap = "filler ".repeat(60);
+            let body = vec!["roadmap"; 6].join(&gap);
+            seed_transcript("20260724-100000-long", "Long", &body);
+
+            let hits = search_hits("roadmap");
+            assert_eq!(hits.len(), 1);
+            let snips = &hits[0].snippets;
+            assert_eq!(snips.len(), MAX_SNIPPETS, "six hits must not all come back");
+            for s in snips {
+                assert!(s.text.to_lowercase().contains("roadmap"), "got: {:?}", s.text);
+                let max = 2 * SNIPPET_CONTEXT + "roadmap".len() + 2;
+                assert!(s.text.chars().count() <= max, "{} chars: {:?}", s.text.chars().count(), s.text);
+            }
+            // Separate windows, not the same sentence three times over.
+            assert_ne!(snips[0].text, snips[1].text);
+
+            // A one-letter query is the worst case for dumping a transcript.
+            let broad = search_hits("a");
+            assert_eq!(broad.len(), 1);
+            assert!(broad[0].snippets.len() <= MAX_SNIPPETS);
+            for s in &broad[0].snippets {
+                assert!(s.text.chars().count() <= 2 * SNIPPET_CONTEXT + 3);
+            }
+        });
+    }
+
+    #[test]
+    fn a_title_only_match_reports_the_title_as_its_source() {
+        with_temp_home(|_| {
+            // No notes.md and no summary.md — a meeting nobody has written up yet.
+            seed_transcript("20260724-100000-acme", "Acme discovery", "we talked about pricing");
+
+            let hits = search_hits("ACME");
+            assert_eq!(hits.len(), 1);
+            assert_eq!(hits[0].snippets.len(), 1);
+            assert_eq!(hits[0].snippets[0].source, SnippetSource::Title);
+            assert_eq!(hits[0].snippets[0].text, "Acme discovery");
+
+            assert!(search_hits("nothing like this").is_empty());
+            assert!(search_hits("   ").is_empty(), "a blank query is not a search");
+        });
+    }
+
+    #[test]
+    fn content_shorter_than_the_window_is_excerpted_whole() {
+        with_temp_home(|_| {
+            let dir = seed_transcript("20260724-100000-standup", "Standup", "nothing relevant here");
+            std::fs::write(dir.join("notes.md"), "ship it").unwrap();
+
+            let hits = search_hits("ship");
+            assert_eq!(hits.len(), 1);
+            let s = &hits[0].snippets[0];
+            assert_eq!(s.source, SnippetSource::Notes);
+            assert_eq!(s.text, "ship it", "text shorter than the window needs no ellipsis");
+        });
+    }
+
+    #[test]
+    fn a_multi_term_query_is_a_phrase_and_sources_serialize_lowercase() {
+        with_temp_home(|_| {
+            seed_transcript(
+                "20260724-100000-standup",
+                "Standup",
+                "we agreed to Ship The Roadmap on Friday",
+            );
+
+            let hits = search_hits("ship the roadmap");
+            assert_eq!(hits.len(), 1);
+            assert!(hits[0].snippets[0].text.contains("Ship The Roadmap"), "got: {:?}", hits[0].snippets[0].text);
+            // Words that never appear together don't match — same rule as
+            // `search_meetings`, so the two result sets can't disagree.
+            assert!(search_hits("roadmap tuesday").is_empty());
+            assert_eq!(search_meetings("ship the roadmap").len(), hits.len());
+
+            // The frontend keys the source badge off these strings.
+            let wire = serde_json::to_value(&hits).unwrap();
+            assert_eq!(wire[0]["snippets"][0]["source"], "transcript");
+            assert_eq!(wire[0]["meeting"]["id"], "20260724-100000-standup");
         });
     }
 
