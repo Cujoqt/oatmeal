@@ -838,6 +838,21 @@ fn data_status() -> serde_json::Value {
 pub fn run() {
     tauri::Builder::default()
         .manage(AppState::default())
+        // Closing the main window destroys it, but macOS keeps the process
+        // alive — so the app sat in the Dock with nothing to show, and
+        // relaunching only re-activated that windowless process. From the
+        // outside it looked like Oatmeal refused to open a second time.
+        // Hide the window instead and bring it back on reopen. Hiding also
+        // means closing the window can't silently end a recording that is
+        // still running; ⌘Q still quits for real.
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() == "main" {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             set_hidden_from_capture,
             is_hidden_from_capture,
@@ -923,8 +938,21 @@ pub fn run() {
             }
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running Oatmeal");
+        .build(tauri::generate_context!())
+        .expect("error while running Oatmeal")
+        .run(|_app, _event| {
+            // Clicking the Dock icon, or launching Oatmeal again while it is
+            // already running, raises this rather than starting a new process.
+            // Without it the hidden window above would never come back.
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen { .. } = _event {
+                if let Some(win) = _app.get_webview_window("main") {
+                    let _ = win.show();
+                    let _ = win.unminimize();
+                    let _ = win.set_focus();
+                }
+            }
+        });
 }
 
 #[cfg(test)]
