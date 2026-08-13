@@ -40,6 +40,15 @@ pub struct AppState {
     pub sysaudio: Mutex<Option<SysAudioRecorder>>,
     /// Paths for the in-progress meeting, if a session is running.
     pub session: Mutex<Option<session::SessionPaths>>,
+    /// When the take now recording started, for the on-screen clock.
+    ///
+    /// Deliberately not the meeting folder's creation date: continuing a meeting
+    /// records into the folder it already had, so that date is when the meeting
+    /// was *first* started — a day ago, if it was yesterday's — and the clock
+    /// would open at that. This is only ever read while a session is live, and a
+    /// session cannot outlive the process holding it, so there is nothing to
+    /// recover after a restart.
+    pub take_started: Mutex<Option<std::time::Instant>>,
     /// Live transcription worker for the in-progress meeting.
     pub live: Mutex<Option<LiveSession>>,
     /// Notes typed before any meeting existed, flushed to disk once one does.
@@ -64,6 +73,7 @@ impl Default for AppState {
             mic: Mutex::new(None),
             sysaudio: Mutex::new(None),
             session: Mutex::new(None),
+            take_started: Mutex::new(None),
             live: Mutex::new(None),
             pending_notes: Mutex::new(None),
             last_dir: Mutex::new(None),
@@ -266,36 +276,47 @@ fn begin_session(
     }
     let paths = paths()?;
 
-    // Both lanes mirror into one tap, so the live worker hears the room and the
-    // call as a single stream — the same mix the final transcript is made from.
-    let tap = std::sync::Arc::new(Tap::default());
+    // Each recorder mirrors into its own lane of one tap, which sums them — the
+    // same mix the final transcript is made from. A lane whose recorder never
+    // starts is retired so the tap doesn't sit waiting on a buffer that will
+    // never fill.
+    let (tap, mut lanes) = Tap::with_lanes(2);
+    let sys_lane = lanes.pop();
+    let mic_lane = lanes.pop();
 
     let mut any = false;
     {
         let mut m = state.mic.lock().map_err(|_| "mic state poisoned")?;
         if m.is_none() {
-            match MicRecorder::start_with_tap(PathBuf::from(&paths.mic_wav), Some(tap.clone())) {
+            match MicRecorder::start_with_tap(PathBuf::from(&paths.mic_wav), mic_lane) {
                 Ok(r) => {
                     *m = Some(r);
                     any = true;
                 }
-                Err(e) => eprintln!("[oatmeal] mic lane did not start: {e}"),
+                Err(e) => {
+                    eprintln!("[oatmeal] mic lane did not start: {e}");
+                    tap.retire(0);
+                }
             }
+        } else {
+            tap.retire(0);
         }
     }
     {
         let mut s = state.sysaudio.lock().map_err(|_| "sysaudio state poisoned")?;
         if s.is_none() {
-            match SysAudioRecorder::start_with_tap(
-                PathBuf::from(&paths.sys_wav),
-                Some(tap.clone()),
-            ) {
+            match SysAudioRecorder::start_with_tap(PathBuf::from(&paths.sys_wav), sys_lane) {
                 Ok(r) => {
                     *s = Some(r);
                     any = true;
                 }
-                Err(e) => eprintln!("[oatmeal] system-audio lane did not start: {e}"),
+                Err(e) => {
+                    eprintln!("[oatmeal] system-audio lane did not start: {e}");
+                    tap.retire(1);
+                }
             }
+        } else {
+            tap.retire(1);
         }
     }
 
@@ -329,6 +350,10 @@ fn begin_session(
     *state.last_dir.lock().map_err(|_| "notes state poisoned")? = Some(paths.dir.clone());
 
     *sess = Some(paths.clone());
+    // The clock runs from here, not from whenever this meeting's folder was made.
+    if let Ok(mut started) = state.take_started.lock() {
+        *started = Some(std::time::Instant::now());
+    }
     Ok(paths)
 }
 
@@ -413,17 +438,16 @@ fn is_transcript_window_visible(app: tauri::AppHandle) -> bool {
 /// The session folder's creation time is the start time.
 #[tauri::command]
 fn session_elapsed_ms(state: tauri::State<'_, AppState>) -> Option<u64> {
-    let dir = state
-        .session
-        .lock()
-        .ok()?
-        .as_ref()
-        .map(|paths| paths.dir.clone())?;
-    let created = std::fs::metadata(dir).ok()?.created().ok()?;
-    std::time::SystemTime::now()
-        .duration_since(created)
-        .ok()
-        .map(|since| since.as_millis() as u64)
+    elapsed_ms(&state)
+}
+
+/// How long the current take has been running, or `None` if nothing is.
+fn elapsed_ms(state: &AppState) -> Option<u64> {
+    // Only meaningful while something is actually recording; the clock is hidden
+    // otherwise, and a stale start time would seed it with a wrong number.
+    state.session.lock().ok()?.as_ref()?;
+    let started = (*state.take_started.lock().ok()?)?;
+    Some(started.elapsed().as_millis() as u64)
 }
 
 /// Whether a meeting is currently being recorded.
@@ -448,12 +472,19 @@ fn stop_session(
         let mut sess = state.session.lock().map_err(|_| "session state poisoned")?;
         sess.take().ok_or("no meeting is being recorded")?
     };
-
-    // Stop the live worker first: it holds its own copy of the Whisper model,
-    // and releasing it before the accurate pass keeps peak memory down.
-    if let Some(live) = state.live.lock().map_err(|_| "live state poisoned")?.take() {
-        live.stop();
+    if let Ok(mut started) = state.take_started.lock() {
+        *started = None;
     }
+
+    // Stop the live worker first and collect whatever its background pass
+    // already transcribed properly. Releasing it before the final pass also
+    // keeps peak memory down — it holds the Whisper model both share.
+    let progress = state
+        .live
+        .lock()
+        .map_err(|_| "live state poisoned")?
+        .take()
+        .map(|live| live.finish());
 
     if let Some(r) = state
         .mic
@@ -482,7 +513,14 @@ fn stop_session(
         Some(language.trim())
     };
     let dir = PathBuf::from(&paths.dir);
-    let result = session::finish(&dir, &paths.title, paths.segment, &model_path, lang)?;
+    let result = session::finish_from_blocks(
+        &dir,
+        &paths.title,
+        paths.segment,
+        &model_path,
+        lang,
+        progress,
+    )?;
     library::record_transcribed_segment(&dir, paths.segment)?;
     if paths.segment > 1 {
         // This take was appended to a transcript the notes were written from,
@@ -657,7 +695,9 @@ fn chat_token_sink(app: tauri::AppHandle) -> impl FnMut(&str) {
 fn draft_followup(app: tauri::AppHandle, id: String) -> Result<String, String> {
     let notes = library::followup_source(&id)?;
     let path = model::ensure_chat_model()?;
-    chat::draft_followup(&path, &notes, &mut chat_token_sink(app))
+    let cfg = settings::load();
+    let style = chat::FollowupStyle::from_settings(&cfg.followup_style, &cfg.followup_custom);
+    chat::draft_followup(&path, &notes, &style, &mut chat_token_sink(app))
 }
 
 /// Free the chat model's memory.
@@ -736,8 +776,15 @@ fn get_settings() -> settings::Settings {
 fn save_settings(
     display_name: String,
     language: String,
+    followup_style: String,
+    followup_custom: String,
 ) -> Result<settings::Settings, String> {
-    settings::save(&display_name, &language)
+    settings::save(
+        &display_name,
+        &language,
+        &followup_style,
+        &followup_custom,
+    )
 }
 
 /// Whether macOS has granted calendar access, without prompting.
@@ -993,6 +1040,42 @@ mod tests {
                  main thread freezes the UI"
             );
         }
+    }
+
+    /// The clock on screen counts this take, not the meeting. Continuing a
+    /// meeting records into the folder it already had, so anything derived from
+    /// that folder — its creation date, which is what this used to read — starts
+    /// the clock at whenever the meeting was *first* recorded. Continue
+    /// yesterday's meeting and it opened at 24 hours.
+    #[test]
+    fn the_clock_counts_the_current_take_not_the_whole_meeting() {
+        use std::time::{Duration, Instant};
+
+        let state = crate::AppState::default();
+        let dir = "/tmp/oatmeal-elapsed/20260812-110000-standup";
+
+        // Nothing recording: no clock, whatever start time is lying around.
+        *state.take_started.lock().unwrap() = Some(Instant::now());
+        assert_eq!(crate::elapsed_ms(&state), None, "no session means no clock");
+
+        // Continuing a meeting first recorded a day ago: the folder is old, the
+        // take is seconds old, and the clock must show the take.
+        *state.session.lock().unwrap() = Some(crate::session::SessionPaths {
+            dir: dir.into(),
+            mic_wav: format!("{dir}/mic.002.wav"),
+            sys_wav: format!("{dir}/system.002.wav"),
+            title: "Standup".into(),
+            slug: "standup".into(),
+            segment: 2,
+        });
+        *state.take_started.lock().unwrap() =
+            Some(Instant::now() - Duration::from_secs(90));
+
+        let elapsed = crate::elapsed_ms(&state).expect("a running take has a clock");
+        assert!(
+            (90_000..91_000).contains(&elapsed),
+            "expected ~90s for this take, got {elapsed} ms"
+        );
     }
 
     /// Finishing an abandoned recording runs Whisper over the lane WAVs as they

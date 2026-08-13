@@ -228,6 +228,71 @@ pub fn finish(
     })
 }
 
+/// Finish a segment using the blocks the background pass already transcribed
+/// while the meeting was running, falling back to the full pass over the WAVs
+/// when there aren't any usable ones.
+///
+/// This is what makes stopping a long meeting quick: the work is the same, it
+/// was just started an hour earlier. The fallback is not a nicety — the WAVs are
+/// the only complete record, so anything short of blocks covering the whole take
+/// has to go back to them rather than write a transcript with a hole in it.
+pub fn finish_from_blocks(
+    dir: &Path,
+    title: &str,
+    segment: u32,
+    model_path: &str,
+    language: Option<&str>,
+    progress: Option<crate::live::Progress>,
+) -> Result<MeetingResult, String> {
+    let usable = progress.filter(|p| p.complete && !p.blocks.is_empty());
+    let Some(progress) = usable else {
+        return finish(dir, title, segment, model_path, language);
+    };
+
+    let transcript = join_blocks(&progress.blocks);
+    if transcript.segments.is_empty() {
+        // Nothing was actually said, or every block came back empty. Let the
+        // WAV path have its say rather than writing an empty transcript.
+        return finish(dir, title, segment, model_path, language);
+    }
+
+    let path = write_transcript_md(dir, title, &transcript, segment_offset_cs(dir, segment))?;
+    Ok(MeetingResult {
+        transcript_path: path.display().to_string(),
+        dir: dir.display().to_string(),
+        text: transcript.text,
+        segments: transcript.segments,
+    })
+}
+
+/// Splice separately-transcribed blocks back into one transcript, moving each
+/// block's timestamps to where that block actually sits in the meeting.
+///
+/// Each block was decoded on its own, so its timestamps start again from zero;
+/// without the shift every block would claim to be the first ten minutes.
+fn join_blocks(blocks: &[(usize, transcribe::Transcript)]) -> Transcript {
+    let mut segments = Vec::new();
+    let mut text = String::new();
+    for (offset_samples, block) in blocks {
+        let offset_cs = (*offset_samples as i64 * 100) / transcribe::WHISPER_RATE as i64;
+        for seg in &block.segments {
+            segments.push(transcribe::Segment {
+                start_cs: seg.start_cs + offset_cs,
+                end_cs: seg.end_cs + offset_cs,
+                text: seg.text.clone(),
+            });
+        }
+        let trimmed = block.text.trim();
+        if !trimmed.is_empty() {
+            if !text.is_empty() {
+                text.push(' ');
+            }
+            text.push_str(trimmed);
+        }
+    }
+    Transcript { segments, text }
+}
+
 /// Load a lane WAV as 16 kHz mono, or an empty vec if it's missing/unreadable.
 /// A lane failing (denied permission, no device) must not sink the whole meeting.
 fn load_optional(path: &Path) -> Vec<f32> {
@@ -484,6 +549,58 @@ mod tests {
     }
 
     /// A transcript of `(start_cs, text)` lines, as whisper would hand one back.
+    /// Each block is decoded on its own and so starts its clock again from zero.
+    /// Splicing them has to put every block back where it belongs, or a two-hour
+    /// meeting ends up as several transcripts all claiming the first ten minutes.
+    #[test]
+    fn spliced_blocks_keep_their_place_in_the_meeting() {
+        let rate = transcribe::WHISPER_RATE as usize;
+        let blocks = vec![
+            (0usize, transcript(&[(0, "Morning."), (500, "Let us start.")])),
+            // Second block starts ten minutes in, and its own clock restarts.
+            (600 * rate, transcript(&[(0, "Halfway."), (300, "Still going.")])),
+            (1200 * rate, transcript(&[(0, "That is everything.")])),
+        ];
+
+        let joined = super::join_blocks(&blocks);
+
+        let starts: Vec<i64> = joined.segments.iter().map(|s| s.start_cs).collect();
+        // 10 min = 60_000 cs, 20 min = 120_000 cs.
+        assert_eq!(starts, vec![0, 500, 60_000, 60_300, 120_000]);
+        assert!(
+            joined.segments.windows(2).all(|w| w[0].start_cs <= w[1].start_cs),
+            "spliced segments must run forwards: {starts:?}"
+        );
+        assert_eq!(
+            joined.text,
+            "Morning. Let us start. Halfway. Still going. That is everything."
+        );
+    }
+
+    /// The blocks come from the live lane's in-memory audio. If any of it was
+    /// dropped they describe a meeting with a hole in it, and the WAVs — which
+    /// are complete however far behind the decoder fell — have to be used
+    /// instead, however much slower that is.
+    #[test]
+    fn incomplete_blocks_are_refused_in_favour_of_the_recordings() {
+        let dir = std::env::temp_dir().join(format!("oatmeal-blocks-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let progress = crate::live::Progress {
+            blocks: vec![(0, transcript(&[(0, "Only half the meeting.")]))],
+            complete: false,
+        };
+        let err = super::finish_from_blocks(&dir, "Standup", 1, "", None, Some(progress))
+            .expect_err("dropped audio must not be written up from the blocks");
+        std::fs::remove_dir_all(&dir).ok();
+
+        // It fell through to the WAV path, which has no WAVs here to read.
+        assert!(
+            err.contains("audio lanes were empty"),
+            "expected the recordings path to be taken, got: {err}"
+        );
+    }
+
     fn transcript(lines: &[(i64, &str)]) -> Transcript {
         Transcript {
             segments: lines
