@@ -5,6 +5,7 @@ pub mod library;
 pub mod live;
 mod mic;
 pub mod model;
+pub mod recall;
 pub mod session;
 pub mod settings;
 pub mod store;
@@ -525,6 +526,14 @@ fn ask_meeting(
     chat::recap(&path, &transcript, &question, &mut chat_token_sink(app))
 }
 
+/// Answer a question from every meeting in the library, rather than from one
+/// the user has already picked. Streams the same `CHAT_TOKEN_EVENT` tokens as
+/// `ask_meeting`, and names the meetings it drew on so the UI can link to them.
+#[tauri::command(async)]
+fn ask_library(app: tauri::AppHandle, question: String) -> Result<recall::LibraryAnswer, String> {
+    recall::answer(&question, &mut chat_token_sink(app))
+}
+
 /// Sink that forwards generated tokens to the window as they arrive: a local
 /// model takes seconds to write a paragraph, and a silent wait reads as a hang.
 /// `seq` lets the UI tell the first token from the rest.
@@ -755,6 +764,7 @@ pub fn run() {
             meeting_segments,
             meeting_typed_notes,
             ask_meeting,
+            ask_library,
             draft_followup,
             unload_chat_model,
             rename_meeting,
@@ -829,6 +839,7 @@ mod tests {
             "ensure_chat_model",
             "write_notes",
             "ask_meeting",
+            "ask_library",
             "draft_followup",
             "check_for_update",
             "open_update_download",

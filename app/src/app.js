@@ -52,6 +52,9 @@ const rangeEl = $('agRange')
 const agPrev = $('agPrev')
 const agNext = $('agNext')
 const notesListEl = $('notesList')
+const recallInput = $('recallInput')
+const recallSend = $('recallSend')
+const recallAnswers = $('recallAnswers')
 const newNoteBtn = $('newNote')
 const displayNameEl = $('displayName')
 const greetingEl = $('greeting')
@@ -1167,10 +1170,15 @@ async function draftFollowup() {
   a.after(copy)
 }
 
-/// Add a prompt and its pending answer to the list, run `generate` against the
+/// Add a prompt and its pending answer to a list, run `generate` against the
 /// local model with the chat controls disabled, and stream the reply into the
 /// answer. Returns the answer element, or null if the model failed.
-async function runChat(prompt, pending, generate) {
+///
+/// `into` and `disable` are what the dashboard's library-wide ask varies: a
+/// different answers list and a different send button. Everything else — the
+/// pending placeholder, the token stream, the model chip, re-enabling on
+/// failure — is identical, and there is deliberately only one copy of it.
+async function runChat(prompt, pending, generate, { into = answersEl, disable = [askSend, chipFollowup] } = {}) {
   const qa = document.createElement('div')
   qa.className = 'qa'
   const q = document.createElement('div')
@@ -1180,11 +1188,10 @@ async function runChat(prompt, pending, generate) {
   a.className = 'a thinking'
   a.textContent = pending
   qa.append(q, a)
-  answersEl.appendChild(qa)
+  into.appendChild(qa)
   qa.scrollIntoView({ behavior: 'smooth', block: 'end' })
 
-  askSend.disabled = true
-  chipFollowup.disabled = true
+  for (const el of disable) el.disabled = true
   streamingAnswer = a
   setModelChip('busy', pending)
   try {
@@ -1198,10 +1205,68 @@ async function runChat(prompt, pending, generate) {
   } finally {
     a.classList.remove('thinking')
     streamingAnswer = null
-    askSend.disabled = false
-    chipFollowup.disabled = false
+    for (const el of disable) el.disabled = false
     refreshModelChip()
   }
+}
+
+// ── ask across the whole library ─────────────────────────────────────────────
+//
+// The question people actually have is "what did we decide about pricing?" —
+// they don't know which meeting holds the answer, which is the one thing the
+// per-meeting ask above cannot help with. Rust picks the meetings and streams
+// the reply through the same event, so this only has to render the citations.
+
+recallSend.addEventListener('click', () => askLibrary())
+recallInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') askLibrary() })
+
+async function askLibrary() {
+  const question = recallInput.value.trim()
+  if (!question) return
+  recallInput.value = ''
+
+  let result = null
+  let failure = null
+  const a = await runChat(
+    question,
+    'Searching your meetings…',
+    async () => {
+      try {
+        result = await invoke('ask_library', { question })
+        return result.answer
+      } catch (e) {
+        // runChat renders this into the answer, but the reason is worth a
+        // toast too — the dashboard scrolls, and the answer may be off-screen.
+        failure = e
+        throw e
+      }
+    },
+    { into: recallAnswers, disable: [recallSend] }
+  )
+  if (failure) {
+    setStatus(String(failure), true)
+    return
+  }
+  if (a && result.sources.length) renderCitations(a, result.sources)
+}
+
+/// Chips naming the meetings behind an answer. Titles are user- and
+/// transcript-derived text, so they go in through textContent, never markup.
+function renderCitations(answerEl, sources) {
+  const cites = document.createElement('div')
+  cites.className = 'cites'
+  sources.forEach((s, i) => {
+    const b = document.createElement('button')
+    const n = document.createElement('b')
+    n.textContent = `[${i + 1}]`
+    const label = document.createElement('span')
+    label.textContent = s.title
+    b.append(n, label)
+    b.title = `Open “${s.title}”`
+    b.addEventListener('click', () => openNote(s.id))
+    cites.appendChild(b)
+  })
+  answerEl.after(cites)
 }
 
 chipFollowup.addEventListener('click', draftFollowup)

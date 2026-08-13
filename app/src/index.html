@@ -508,6 +508,21 @@
     }
     .qa .copy:hover { border-color: var(--accent); color: var(--accent); }
 
+    /* Library-wide ask, at the top of the dashboard. Borrows `.ask` and `.qa`
+       from the note view's ask bar so there is only one answer style. */
+    .recall { margin-bottom: 22px; }
+    #recallAnswers:empty { display: none; }
+    #recallAnswers { margin-top: 16px; }
+    .qa .cites { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 10px; }
+    .qa .cites button {
+      display: inline-flex; align-items: center; gap: 7px; max-width: 100%; cursor: pointer;
+      border: 1px solid var(--line-2); background: var(--card); color: var(--ink-soft);
+      border-radius: 18px; padding: 5px 12px; font: 500 12.5px var(--sans); text-align: left;
+    }
+    .qa .cites button:hover { border-color: var(--accent); color: var(--accent); }
+    .qa .cites b { font: 600 11px var(--mono); color: var(--accent); flex: none; }
+    .qa .cites span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
     /* ── sidebar collapse ──────────────────────────────────────────────────*/
     #railToggle {
       display: inline-flex; align-items: center; justify-content: center;
@@ -817,6 +832,19 @@
               New note
             </button>
             </div>
+          </div>
+
+          <!-- Ask across everything already recorded, rather than one meeting
+               you already picked. In flow, like everything else on this page —
+               a floating panel here would sit on the agenda or a note row. -->
+          <div class="recall">
+            <div class="ask">
+              <input id="recallInput" placeholder="Ask across all your meetings — “what did we decide about pricing?”" />
+              <button id="recallSend" title="Ask across all meetings" aria-label="Ask across all meetings">
+                <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h13M13 6l6 6-6 6" /></svg>
+              </button>
+            </div>
+            <div id="recallAnswers"></div>
           </div>
 
           <div class="agenda"><div class="agenda-scroll" id="agenda"></div></div>

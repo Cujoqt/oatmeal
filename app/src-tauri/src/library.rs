@@ -559,7 +559,7 @@ pub fn transcript_text(id: &str) -> Result<String, String> {
 
 /// Pull the spoken words out of a `transcript.md`, dropping the title, the
 /// recorded-at line, the `## Transcript` heading and the `**[m:ss]**` stamps.
-fn strip_transcript_markup(md: &str) -> String {
+pub(crate) fn strip_transcript_markup(md: &str) -> String {
     let mut out = String::new();
     for line in md.lines() {
         let line = line.trim();
