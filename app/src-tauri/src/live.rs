@@ -98,6 +98,13 @@ pub struct LiveLine {
 /// one stream, which stretches the audio and chops words across the seams.
 pub struct Tap {
     lanes: Vec<LaneBuf>,
+    /// Set if a lane's backlog ever overflowed and audio was thrown away.
+    ///
+    /// Losing audio is survivable for the live panel, which is a convenience.
+    /// It is not survivable for a transcript built from this same audio, so
+    /// anything doing that has to be able to ask, and fall back to the WAVs —
+    /// which are complete no matter how far behind the decoder fell.
+    dropped: AtomicBool,
 }
 
 #[derive(Default)]
@@ -126,6 +133,7 @@ impl Tap {
                     live: AtomicBool::new(true),
                 })
                 .collect(),
+            dropped: AtomicBool::new(false),
         });
         let handles = (0..lanes)
             .map(|index| Lane {
@@ -134,6 +142,13 @@ impl Tap {
             })
             .collect();
         (tap, handles)
+    }
+
+    /// Whether any audio was thrown away because the decoder fell too far
+    /// behind. If this is true, nothing derived from this tap is a complete
+    /// record of the meeting.
+    pub fn dropped_audio(&self) -> bool {
+        self.dropped.load(Ordering::SeqCst)
     }
 
     /// Mark a lane as never going to deliver, because its recorder failed to
@@ -183,6 +198,7 @@ impl Tap {
             if buf.len() > MAX_TAP_SAMPLES {
                 let overflow = buf.len() - MAX_TAP_SAMPLES;
                 buf.drain(..overflow);
+                self.dropped.store(true, Ordering::SeqCst);
             }
         }
     }
@@ -238,12 +254,55 @@ impl Lane {
     }
 }
 
+/// How much audio the background accurate pass takes at a time.
+///
+/// Ten minutes is long enough that the per-call overhead is noise and Whisper
+/// has plenty of context, and short enough that finishing a meeting only ever
+/// leaves the last few minutes to do. Blocks are cut where the live lane already
+/// found a phrase boundary, so no block ever starts mid-word.
+const BLOCK_SECS: f32 = 600.0;
+
+/// Audio banked for the background accurate pass, and what it has produced.
+///
+/// The live lane has already mixed the capture lanes and resampled them to what
+/// Whisper wants, so the accurate pass reads the same stream rather than going
+/// back to the WAVs. That is the whole saving: by the time someone finishes a
+/// meeting, everything but the last block has already been transcribed properly.
+#[derive(Default)]
+struct Bank {
+    /// Mixed audio the accurate pass has not taken yet.
+    pending: Mutex<Vec<f32>>,
+    /// Finished blocks in order, each with where it starts in the meeting.
+    done: Mutex<Vec<(usize, crate::transcribe::Transcript)>>,
+    /// Set once the live worker has exited and no more audio can arrive.
+    ///
+    /// The stop flag alone is not enough to tell the block worker it is done:
+    /// the live worker decodes its last window *after* that flag goes up, so a
+    /// block worker that quit on an empty backlog the moment it saw the flag
+    /// would drop whatever was said last.
+    sealed: AtomicBool,
+}
+
+/// What the background pass managed to finish, handed over when a meeting stops.
+pub struct Progress {
+    /// Transcribed blocks, in order, each with its start offset in samples.
+    pub blocks: Vec<(usize, crate::transcribe::Transcript)>,
+    /// Whether these blocks cover the meeting with nothing missing. False if the
+    /// tap ever dropped audio, in which case the WAVs are the only complete
+    /// record and this must not be used.
+    pub complete: bool,
+}
+
 /// A running live-transcription worker. Dropping it stops the worker.
 pub struct LiveSession {
     stop: Arc<AtomicBool>,
     handle: Option<JoinHandle<()>>,
     /// Every line emitted so far, so a recap can be asked for mid-meeting.
     lines: Arc<Mutex<Vec<LiveLine>>>,
+    /// The background accurate pass, and what it has banked so far.
+    bank: Arc<Bank>,
+    block_handle: Option<JoinHandle<()>>,
+    tap: Arc<Tap>,
 }
 
 impl LiveSession {
@@ -257,25 +316,70 @@ impl LiveSession {
     ) -> Result<Self, String> {
         // Load the model up front so a missing/corrupt model fails the start call
         // rather than silently producing no live text.
-        let transcriber = Transcriber::load(&model_path)?;
+        // One model, two readers. `WhisperContext` is `Send + Sync` and each
+        // decode makes its own state, so the live lane and the background pass
+        // share it rather than each holding half a gigabyte.
+        let transcriber = Arc::new(Transcriber::load(&model_path)?);
 
         let stop = Arc::new(AtomicBool::new(false));
         let lines: Arc<Mutex<Vec<LiveLine>>> = Arc::new(Mutex::new(Vec::new()));
+        let bank = Arc::new(Bank::default());
 
         let worker_stop = stop.clone();
         let worker_lines = lines.clone();
+        let worker_tap = tap.clone();
+        let worker_bank = bank.clone();
+        let worker_model = transcriber.clone();
+        let worker_lang = language.clone();
         let handle = std::thread::Builder::new()
             .name("oatmeal-live".into())
             .spawn(move || {
-                run(tap, transcriber, language, worker_stop, worker_lines, emit);
+                run(
+                    worker_tap,
+                    worker_model,
+                    worker_lang,
+                    worker_stop,
+                    worker_lines,
+                    worker_bank,
+                    emit,
+                );
             })
             .map_err(|e| format!("spawn live thread: {e}"))?;
+
+        let block_bank = bank.clone();
+        let block_handle = std::thread::Builder::new()
+            .name("oatmeal-blocks".into())
+            .spawn(move || {
+                run_blocks(transcriber, language, block_bank);
+            })
+            .map_err(|e| format!("spawn block thread: {e}"))?;
 
         Ok(Self {
             stop,
             handle: Some(handle),
             lines,
+            bank,
+            block_handle: Some(block_handle),
+            tap,
         })
+    }
+
+    /// Stop everything and hand back what the background pass finished.
+    ///
+    /// The live worker is joined first so the last of the audio reaches the bank
+    /// before the block worker is asked to flush it.
+    pub fn finish(mut self) -> Progress {
+        self.signal_and_join();
+        let blocks = self
+            .bank
+            .done
+            .lock()
+            .map(|mut d| std::mem::take(&mut *d))
+            .unwrap_or_default();
+        Progress {
+            complete: !self.tap.dropped_audio(),
+            blocks,
+        }
     }
 
     /// Every line emitted so far.
@@ -293,6 +397,14 @@ impl LiveSession {
         if let Some(h) = self.handle.take() {
             let _ = h.join();
         }
+        // Only now can no more audio arrive — the live worker has exited, however
+        // it exited. Sealing here rather than at the end of the worker itself
+        // means a panicking live thread still releases the block worker instead
+        // of leaving it spinning for the life of the process.
+        self.bank.sealed.store(true, Ordering::SeqCst);
+        if let Some(h) = self.block_handle.take() {
+            let _ = h.join();
+        }
     }
 }
 
@@ -302,12 +414,76 @@ impl Drop for LiveSession {
     }
 }
 
+/// Transcribe banked audio properly, a block at a time, while the meeting runs.
+///
+/// Same decoding the final pass uses, just on fewer cores and started early. The
+/// work is not extra — it is the work finishing a meeting would have done
+/// anyway, moved to while there is nothing else to wait for.
+fn run_blocks(transcriber: Arc<Transcriber>, language: Option<String>, bank: Arc<Bank>) {
+    let block = (BLOCK_SECS * WHISPER_RATE as f32) as usize;
+    // Where the next block starts, in samples from the beginning of the meeting.
+    let mut offset = 0usize;
+
+    loop {
+        // Read `sealed` before draining, never after: if the live worker seals
+        // between the drain and the check, the next pass still sees the flag and
+        // an empty backlog, which is the correct place to stop.
+        let sealed = bank.sealed.load(Ordering::SeqCst);
+
+        let taken = {
+            let mut pending = match bank.pending.lock() {
+                Ok(p) => p,
+                Err(_) => return,
+            };
+            if pending.len() >= block {
+                Some(pending.drain(..block).collect::<Vec<f32>>())
+            } else if sealed && !pending.is_empty() {
+                // Last call: take whatever is left, however short.
+                Some(std::mem::take(&mut *pending))
+            } else {
+                None
+            }
+        };
+
+        let Some(audio) = taken else {
+            // Nothing to take. Only actually finished if no more can arrive.
+            if sealed {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            continue;
+        };
+
+        let len = audio.len();
+        match transcriber.run(&audio, language.as_deref(), Quality::Background, None) {
+            Ok(t) => {
+                if let Ok(mut done) = bank.done.lock() {
+                    done.push((offset, t));
+                }
+            }
+            // A block that fails is not fatal on its own, but it does leave a
+            // hole, and a transcript with a silent hole in it is worse than a
+            // slow one. Drop everything banked so the caller falls back to the
+            // WAVs, which are complete.
+            Err(e) => {
+                eprintln!("[oatmeal] background block: {e}");
+                if let Ok(mut done) = bank.done.lock() {
+                    done.clear();
+                }
+                return;
+            }
+        }
+        offset += len;
+    }
+}
+
 fn run(
     tap: Arc<Tap>,
-    transcriber: Transcriber,
+    transcriber: Arc<Transcriber>,
     language: Option<String>,
     stop: Arc<AtomicBool>,
     lines: Arc<Mutex<Vec<LiveLine>>>,
+    bank: Arc<Bank>,
     emit: impl Fn(LiveLine),
 ) {
     let rate = WHISPER_RATE as f32;
@@ -355,6 +531,14 @@ fn run(
         let mut window: Vec<f32> = pending.drain(..cut).collect();
         let at_ms = (elapsed_samples as f64 / rate as f64 * 1000.0) as u64;
         elapsed_samples += window.len();
+
+        // Bank the audio before it is levelled, and whether or not it turns out
+        // to be silence: the background pass needs an unbroken timeline, and a
+        // per-window gain would leave it with audio that jumps in level at every
+        // phrase boundary.
+        if let Ok(mut b) = bank.pending.lock() {
+            b.extend_from_slice(&window);
+        }
 
         if !is_silent(&window) {
             normalize(&mut window);

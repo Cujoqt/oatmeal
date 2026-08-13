@@ -476,11 +476,15 @@ fn stop_session(
         *started = None;
     }
 
-    // Stop the live worker first: it holds its own copy of the Whisper model,
-    // and releasing it before the accurate pass keeps peak memory down.
-    if let Some(live) = state.live.lock().map_err(|_| "live state poisoned")?.take() {
-        live.stop();
-    }
+    // Stop the live worker first and collect whatever its background pass
+    // already transcribed properly. Releasing it before the final pass also
+    // keeps peak memory down — it holds the Whisper model both share.
+    let progress = state
+        .live
+        .lock()
+        .map_err(|_| "live state poisoned")?
+        .take()
+        .map(|live| live.finish());
 
     if let Some(r) = state
         .mic
@@ -509,7 +513,14 @@ fn stop_session(
         Some(language.trim())
     };
     let dir = PathBuf::from(&paths.dir);
-    let result = session::finish(&dir, &paths.title, paths.segment, &model_path, lang)?;
+    let result = session::finish_from_blocks(
+        &dir,
+        &paths.title,
+        paths.segment,
+        &model_path,
+        lang,
+        progress,
+    )?;
     library::record_transcribed_segment(&dir, paths.segment)?;
     if paths.segment > 1 {
         // This take was appended to a transcript the notes were written from,

@@ -142,6 +142,11 @@ struct Run {
     /// The worker's final timestamp over the real audio duration; 1.0 is correct.
     timeline_ratio: f64,
     lines: usize,
+    /// Accuracy of the background accurate pass, which is what the saved
+    /// transcript is now built from.
+    block_accuracy: f64,
+    blocks: usize,
+    blocks_complete: bool,
     heard: String,
     /// (audio position, wall clock, text) per emitted line.
     timings: Vec<(u64, u64, String)>,
@@ -192,7 +197,10 @@ fn run_scenario(lanes: &[Vec<f32>]) -> Run {
     let audio_done_ms = started.elapsed().as_millis() as u64;
     let audio_secs = longest as f64 / WHISPER_RATE as f64;
 
-    session.stop();
+    // `finish` also hands back what the background accurate pass got through
+    // while this was running — the work that used to happen only after someone
+    // stopped the meeting.
+    let progress = session.finish();
 
     let lines = observed.lock().unwrap();
     let heard = lines
@@ -216,8 +224,18 @@ fn run_scenario(lanes: &[Vec<f32>]) -> Run {
         .max()
         .unwrap_or(i64::MAX);
 
+    let banked = progress
+        .blocks
+        .iter()
+        .map(|(_, t)| t.text.trim())
+        .collect::<Vec<_>>()
+        .join(" ");
+
     let spoken = SCRIPT.join(" ");
     Run {
+        block_accuracy: accuracy(&spoken, &banked),
+        blocks: progress.blocks.len(),
+        blocks_complete: progress.complete,
         accuracy: accuracy(&spoken, &heard),
         first_text_ms: first_text.load(Ordering::SeqCst),
         tail_lag_ms: last_wall as i64 - audio_done_ms as i64,
@@ -273,6 +291,12 @@ fn report(name: &str, run: &Run) {
         run.lines,
         run.heard
     );
+    println!(
+        "  background pass: {:.1}% over {} block(s), complete={}",
+        run.block_accuracy * 100.0,
+        run.blocks,
+        run.blocks_complete
+    );
     println!("  {:>9}  {:>9}  {:>7}  text", "audio at", "shown at", "behind");
     for (at_ms, wall_ms, text) in &run.timings {
         println!(
@@ -306,6 +330,21 @@ fn check(name: &str, run: &Run, failures: &mut Vec<String>) {
         failures.push(format!(
             "{name}: slowest phrase took {} ms to appear > {} ms",
             run.worst_phrase_lag_ms, TARGET_PHRASE_LAG_MS
+        ));
+    }
+    // The saved transcript is built from these, so they matter more than the
+    // live lines do — and being beam search over the same audio, they should be
+    // at least as good.
+    if run.blocks == 0 || !run.blocks_complete {
+        failures.push(format!(
+            "{name}: background pass banked {} block(s), complete={}",
+            run.blocks, run.blocks_complete
+        ));
+    } else if run.block_accuracy < TARGET_ACCURACY {
+        failures.push(format!(
+            "{name}: background pass accuracy {:.1}% < {:.0}%",
+            run.block_accuracy * 100.0,
+            TARGET_ACCURACY * 100.0
         ));
     }
     if run.timeline_ratio > TARGET_TIMELINE_AHEAD {

@@ -108,6 +108,12 @@ pub enum Quality {
     /// Beam search — the final pass over a finished recording, where a few extra
     /// seconds buy noticeably fewer errors on names and technical vocabulary.
     Accurate,
+    /// Beam search, but sharing the machine. The same decoding as `Accurate`, run
+    /// on a block of a meeting that is *still recording*, so it has to leave the
+    /// live lane enough cores to keep up with the speaker. It has ten minutes of
+    /// wall clock to chew through ten minutes of audio, so it can afford to be
+    /// slow; live transcription falling behind is what cannot be afforded.
+    Background,
     /// Greedy — the live pass, which has to keep ahead of the speaker.
     Fast,
 }
@@ -134,6 +140,9 @@ fn thread_budget(quality: Quality) -> i32 {
         .unwrap_or(4) as i32;
     match quality {
         Quality::Fast => (cores - 2).max(2),
+        // Runs *alongside* the live lane, so it takes what is left over rather
+        // than what it would like.
+        Quality::Background => (cores / 3).max(1),
         Quality::Accurate => (cores - 1).max(2),
     }
 }
@@ -178,7 +187,7 @@ impl Transcriber {
             .map_err(|e| format!("create whisper state: {e}"))?;
 
         let strategy = match quality {
-            Quality::Accurate => SamplingStrategy::BeamSearch {
+            Quality::Accurate | Quality::Background => SamplingStrategy::BeamSearch {
                 beam_size: 5,
                 patience: 0.0,
             },
@@ -299,12 +308,23 @@ mod tests {
             .unwrap_or(4) as i32;
         let fast = thread_budget(Quality::Fast);
         let accurate = thread_budget(Quality::Accurate);
+        let background = thread_budget(Quality::Background);
 
         // Never all of them, never fewer than two, and the live lane is the more
         // frugal of the pair.
         assert!(fast >= 2 && fast < cores.max(3), "fast budget {fast} of {cores}");
         assert!(accurate >= 2 && accurate < cores.max(3), "accurate budget {accurate}");
         assert!(fast <= accurate);
+
+        // The background pass shares the machine with the live lane, so between
+        // them they must not ask for every core — that is the whole reason it is
+        // a separate setting and not just `Accurate`.
+        assert!(background >= 1, "background budget {background}");
+        assert!(background < accurate, "background must yield to the final pass");
+        assert!(
+            background + fast <= cores.max(3),
+            "live ({fast}) + background ({background}) would oversubscribe {cores} cores"
+        );
     }
 
     #[test]
