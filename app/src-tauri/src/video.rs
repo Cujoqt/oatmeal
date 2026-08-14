@@ -3,6 +3,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use serde::Serialize;
 
 /// The stretch of a video to transcribe, in seconds from its start.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -205,6 +206,81 @@ fn make_executable(p: &Path) -> Result<(), String> {
     std::fs::set_permissions(p, perms).map_err(|e| format!("chmod {}: {e}", p.display()))
 }
 
+/// What a probe learned about a video, before anything is downloaded.
+#[derive(Debug, Clone, Serialize)]
+pub struct VideoInfo {
+    pub id: String,
+    pub title: String,
+    pub duration_secs: f64,
+}
+
+/// Ask yt-dlp what a URL is, without downloading it.
+///
+/// This exists to catch a range typed against the wrong video — or past the end
+/// of the right one — before several minutes are spent transcribing silence.
+pub fn probe(url: &str) -> Result<VideoInfo, String> {
+    let id = video_id(url)?;
+    let exe = ensure_yt_dlp()?;
+    let out = Command::new(&exe)
+        .arg("--dump-json")
+        .arg("--no-playlist")
+        .arg("--no-warnings")
+        .arg(format!("https://www.youtube.com/watch?v={id}"))
+        .output()
+        .map_err(|e| format!("couldn't run the YouTube helper: {e}"))?;
+
+    if !out.status.success() {
+        return Err(yt_dlp_error(&String::from_utf8_lossy(&out.stderr)));
+    }
+    parse_probe_json(&String::from_utf8_lossy(&out.stdout))
+}
+
+fn parse_probe_json(json: &str) -> Result<VideoInfo, String> {
+    let v: serde_json::Value =
+        serde_json::from_str(json.trim()).map_err(|_| "couldn't read that video's details".to_string())?;
+    let duration = v
+        .get("duration")
+        .and_then(|d| d.as_f64())
+        .filter(|d| *d > 0.0)
+        .ok_or("that video has no length Oatmeal can read — live streams can't be imported")?;
+    Ok(VideoInfo {
+        id: v.get("id").and_then(|s| s.as_str()).unwrap_or_default().to_string(),
+        title: v
+            .get("title")
+            .and_then(|s| s.as_str())
+            .unwrap_or("Untitled video")
+            .to_string(),
+        duration_secs: duration,
+    })
+}
+
+/// Turn yt-dlp's stderr into something worth showing a person.
+///
+/// Every one of these is a different fix, so a generic failure would send the
+/// user looking in the wrong place. An extractor failure names the real cause:
+/// the pinned yt-dlp has aged out, which only a new Oatmeal release fixes.
+fn yt_dlp_error(stderr: &str) -> String {
+    let low = stderr.to_lowercase();
+    if low.contains("private video") {
+        "that video is private".into()
+    } else if low.contains("sign in to confirm your age") || low.contains("age-restricted") {
+        "that video is age-restricted, so Oatmeal can't read it".into()
+    } else if low.contains("video unavailable") || low.contains("removed") {
+        "that video isn't available".into()
+    } else if low.contains("not available in your country") || low.contains("geo") {
+        "that video isn't available in your region".into()
+    } else if low.contains("unable to extract") || low.contains("nsig") || low.contains("player response") {
+        "YouTube changed something Oatmeal's helper doesn't understand yet — updating Oatmeal should fix it".into()
+    } else {
+        let tail = stderr.trim().lines().last().unwrap_or("").trim();
+        if tail.is_empty() {
+            "couldn't read that video".into()
+        } else {
+            format!("couldn't read that video: {tail}")
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -298,5 +374,36 @@ mod tests {
         let p = yt_dlp_path();
         assert!(p.ends_with("bin/yt-dlp"), "unexpected path {}", p.display());
         assert!(p.to_string_lossy().contains("dev.oatmeal.app"));
+    }
+
+    #[test]
+    fn reads_title_and_duration_out_of_a_probe() {
+        let json = r#"{"id":"dQw4w9WgXcQ","title":"Lecture 4 — Ecology","duration":3672.0,"other":"ignored"}"#;
+        let info = parse_probe_json(json).unwrap();
+        assert_eq!(info.id, "dQw4w9WgXcQ");
+        assert_eq!(info.title, "Lecture 4 — Ecology");
+        assert_eq!(info.duration_secs, 3672.0);
+    }
+
+    #[test]
+    fn accepts_an_integer_duration() {
+        // yt-dlp emits duration as a bare integer for most videos.
+        let json = r#"{"id":"dQw4w9WgXcQ","title":"T","duration":212}"#;
+        assert_eq!(parse_probe_json(json).unwrap().duration_secs, 212.0);
+    }
+
+    #[test]
+    fn refuses_a_probe_with_no_usable_duration() {
+        // A live stream has a null duration. There is no range to pick inside
+        // something that has not finished, and the spec puts live streams out of
+        // scope — so this must fail rather than transcribe an arbitrary prefix.
+        for json in [
+            r#"{"id":"x","title":"Live now","duration":null}"#,
+            r#"{"id":"x","title":"No duration"}"#,
+            r#"{"id":"x","title":"Zero","duration":0}"#,
+            "not json at all",
+        ] {
+            assert!(parse_probe_json(json).is_err(), "should have rejected {json}");
+        }
     }
 }
