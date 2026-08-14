@@ -45,6 +45,7 @@ const hwNoteInputEl = $('hwNoteInput')
 const hwAddBtn = $('hwAdd')
 const hwStatusEl = $('hwStatus')
 const hwListEl = $('hwList')
+const hwCountEl = $('hwCount')
 const railToggle = $('railToggle')
 const viewDash = $('viewDash')
 const viewSettings = $('viewSettings')
@@ -2023,6 +2024,10 @@ async function loadHomework() {
 }
 
 function renderHomework() {
+  const open = homework.filter((item) => !item.done).length
+  hwCountEl.textContent = String(open)
+  hwCountEl.hidden = open === 0
+
   hwListEl.innerHTML = ''
   if (!homework.length) {
     hwListEl.appendChild(el('div', 'notes-empty', 'No homework yet — add something above.'))
@@ -2191,6 +2196,7 @@ async function boot() {
   refreshModelChip()
   await loadMeetings()
   await loadFolders()
+  await loadHomework()
   showHome()
   loadAgenda()
   setInterval(loadAgenda, AGENDA_REFRESH_MS)
