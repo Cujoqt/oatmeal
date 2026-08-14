@@ -1,6 +1,9 @@
 //! YouTube as a source for a note: fetch a video's audio, transcribe the
 //! stretch the user watched, and file it beside the meeting's own transcript.
 
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
 /// The stretch of a video to transcribe, in seconds from its start.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Range {
@@ -133,6 +136,75 @@ fn human(secs: f64) -> String {
     }
 }
 
+/// Pinned on purpose. `latest` would self-heal when YouTube changes something,
+/// but it would also mean Oatmeal downloads and runs a build nobody here chose.
+/// When YouTube breaks this one, bump the constant and ship a release — the
+/// import error says exactly that rather than blaming the video.
+const YT_DLP_VERSION: &str = "2025.09.26";
+
+/// Where the downloaded yt-dlp lives.
+pub fn yt_dlp_path() -> PathBuf {
+    crate::settings::support_root().join("bin").join("yt-dlp")
+}
+
+/// Ensure yt-dlp is present, downloading it on first use. Blocking.
+///
+/// The download is its own small function rather than a reuse of `model.rs`'s:
+/// that one's "already present" check is about model files (size thresholds,
+/// `.part` promotion against a known content length), and generalising it to
+/// cover a 30 MB executable would make both callers harder to read than two
+/// short functions are.
+pub fn ensure_yt_dlp() -> Result<PathBuf, String> {
+    let dest = yt_dlp_path();
+    if dest.is_file() {
+        return Ok(dest);
+    }
+    let dir = dest.parent().expect("yt_dlp_path always has a parent");
+    std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+    crate::settings::restrict_dir(dir);
+
+    let url = format!(
+        "https://github.com/yt-dlp/yt-dlp/releases/download/{YT_DLP_VERSION}/yt-dlp_macos"
+    );
+    let part = dest.with_extension("part");
+    let status = Command::new("curl")
+        .arg("-L") // GitHub serves a CDN redirect
+        .arg("-f") // fail on HTTP errors instead of saving an error page
+        .arg("--connect-timeout")
+        .arg("30")
+        // Without these a stalled transfer hangs forever with no way to cancel.
+        .arg("--speed-limit")
+        .arg("1024")
+        .arg("--speed-time")
+        .arg("120")
+        .arg("-o")
+        .arg(&part)
+        .arg(&url)
+        .status()
+        .map_err(|e| format!("couldn't run curl: {e}"))?;
+    if !status.success() {
+        let _ = std::fs::remove_file(&part);
+        return Err(
+            "couldn't download the YouTube helper — check your connection and try again".into(),
+        );
+    }
+
+    // Only after a clean download does the real name appear, so an interrupted
+    // fetch can never be mistaken for a working binary.
+    std::fs::rename(&part, &dest).map_err(|e| format!("install yt-dlp: {e}"))?;
+    make_executable(&dest)?;
+    Ok(dest)
+}
+
+fn make_executable(p: &Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    let mut perms = std::fs::metadata(p)
+        .map_err(|e| format!("stat {}: {e}", p.display()))?
+        .permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(p, perms).map_err(|e| format!("chmod {}: {e}", p.display()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -219,5 +291,12 @@ mod tests {
         assert!(parse_range("5:00", "5:00", 600.0).is_err());
         // Under a second of audio is not worth loading Whisper for.
         assert!(parse_range("5:00", "5:00.5", 600.0).is_err());
+    }
+
+    #[test]
+    fn the_yt_dlp_path_sits_under_the_support_root() {
+        let p = yt_dlp_path();
+        assert!(p.ends_with("bin/yt-dlp"), "unexpected path {}", p.display());
+        assert!(p.to_string_lossy().contains("dev.oatmeal.app"));
     }
 }
