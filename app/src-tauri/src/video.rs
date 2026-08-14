@@ -424,6 +424,71 @@ fn decode_m4a(path: &Path) -> Result<(Vec<f32>, u32), String> {
     Ok((samples, rate))
 }
 
+/// The next free `video-N.md` in a meeting folder.
+pub fn next_video_path(dir: &Path) -> PathBuf {
+    for n in 1..u32::MAX {
+        let p = dir.join(format!("video-{n}.md"));
+        if !p.exists() {
+            return p;
+        }
+    }
+    unreachable!("a meeting will not hold four billion videos")
+}
+
+/// The file that gets written beside the meeting's own transcript.
+///
+/// Shaped like `transcript.md` on purpose: the heading and the `_italic_`
+/// provenance line are exactly what `strip_transcript_markup` drops, so the
+/// model reads the spoken words and not the URL.
+pub fn render_markdown(
+    info: &VideoInfo,
+    range: Range,
+    transcript: &crate::transcribe::Transcript,
+) -> String {
+    format!(
+        "# {title}\n\n_From https://www.youtube.com/watch?v={id} — {start} to {end}_\n\n\
+         ## Transcript\n\n{text}\n",
+        title = info.title,
+        id = info.id,
+        start = human(range.start_secs),
+        end = human(range.end_secs),
+        text = transcript.text.trim(),
+    )
+}
+
+/// Attach a video to a meeting: download, decode, cut, transcribe, file it.
+/// Blocking and slow — minutes for a lecture. Must not run on the UI thread.
+pub fn import(meeting_id: &str, url: &str, start: &str, end: &str) -> Result<String, String> {
+    let dir = crate::library::meeting_dir(meeting_id)?;
+    let info = probe(url)?;
+    let range = parse_range(start, end, info.duration_secs)?;
+
+    // The audio is scratch: it exists only to be decoded, and a meeting folder
+    // full of 50 MB m4a files is not what the user asked to keep.
+    let scratch = std::env::temp_dir().join(format!("oatmeal-video-{}", info.id));
+    std::fs::create_dir_all(&scratch).map_err(|e| format!("create scratch dir: {e}"))?;
+    let audio = download_audio(&info.id, &scratch);
+    let result = audio.and_then(|path| {
+        let decoded = decode_m4a(&path);
+        let _ = std::fs::remove_file(&path);
+        let (samples, rate) = decoded?;
+        let samples = crate::transcribe::resample_linear(&samples, rate, 16_000);
+        let cut = slice_range(&samples, range, 16_000)?;
+        crate::transcribe::transcribe_samples("", &cut, None)
+    });
+    let _ = std::fs::remove_dir_all(&scratch);
+    let transcript = result?;
+
+    let path = next_video_path(&dir);
+    crate::store::write(&path, &render_markdown(&info, range, &transcript))?;
+
+    // The notes now describe less than their sources do. Regenerating is a full
+    // model run, so the user is told rather than charged for it silently —
+    // exactly how a late-transcribed segment behaves.
+    crate::library::mark_notes_stale(&dir)?;
+    Ok(path.display().to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -584,5 +649,45 @@ mod tests {
         ] {
             assert!(parse_probe_json(json).is_err(), "should have rejected {json}");
         }
+    }
+
+    #[test]
+    fn video_transcripts_number_upwards_within_a_meeting() {
+        let dir = std::env::temp_dir().join("oatmeal-video-numbering");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        assert!(next_video_path(&dir).ends_with("video-1.md"));
+        std::fs::write(dir.join("video-1.md"), "x").unwrap();
+        assert!(next_video_path(&dir).ends_with("video-2.md"));
+        std::fs::write(dir.join("video-2.md"), "x").unwrap();
+        assert!(next_video_path(&dir).ends_with("video-3.md"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_written_markdown_records_where_the_words_came_from() {
+        let info = VideoInfo {
+            id: "dQw4w9WgXcQ".into(),
+            title: "Lecture 4 — Ecology".into(),
+            duration_secs: 3672.0,
+        };
+        let transcript = crate::transcribe::Transcript {
+            text: "carbon sinks and the nitrogen cycle".into(),
+            segments: vec![],
+        };
+        let md = render_markdown(&info, Range { start_secs: 750.0, end_secs: 1680.0 }, &transcript);
+
+        assert!(md.contains("Lecture 4 — Ecology"), "title missing:\n{md}");
+        assert!(md.contains("https://www.youtube.com/watch?v=dQw4w9WgXcQ"), "url missing:\n{md}");
+        assert!(md.contains("12:30"), "start missing:\n{md}");
+        assert!(md.contains("28:00"), "end missing:\n{md}");
+        assert!(md.contains("carbon sinks and the nitrogen cycle"), "words missing:\n{md}");
+        // strip_transcript_markup drops `#` headings and `_italic_` lines, so the
+        // provenance lines must not survive into what the model reads as speech.
+        let stripped = crate::library::strip_transcript_markup(&md);
+        assert!(!stripped.contains("youtube.com"), "url leaked into source text: {stripped}");
+        assert!(stripped.contains("carbon sinks"), "words lost: {stripped}");
     }
 }
