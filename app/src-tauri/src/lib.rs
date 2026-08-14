@@ -646,7 +646,10 @@ fn ask_meeting(
     id: String,
     question: String,
 ) -> Result<String, String> {
-    let transcript = if id.trim().is_empty() {
+    // The live transcript is the fast model's, and lossier; `recap` softens its
+    // "that never came up" refusal accordingly.
+    let live = id.trim().is_empty();
+    let transcript = if live {
         let lines = state
             .live
             .lock()
@@ -663,7 +666,7 @@ fn ask_meeting(
     };
 
     let path = model::ensure_chat_model()?;
-    chat::recap(&path, &transcript, &question, &mut chat_token_sink(app))
+    chat::recap(&path, &transcript, &question, live, &mut chat_token_sink(app))
 }
 
 /// Answer a question from every meeting in the library, rather than from one

@@ -554,6 +554,12 @@
       border-radius: 14px; padding: 4px 11px; font: 500 12px var(--sans); cursor: pointer;
     }
     .qa .copy:hover { border-color: var(--accent); color: var(--accent); }
+    /* Under every generated answer. A small local model reading speech
+       recognition output is wrong often enough that saying so once, quietly,
+       under each answer is the honest default — and it has to sit below the
+       copy button and the citations, which are inserted directly after `.a`. */
+    .qa .caveat { display: flex; gap: 6px; align-items: baseline; margin-top: 10px; font: 400 11.5px/1.5 var(--sans); color: var(--faint); }
+    .qa .caveat::before { content: "!"; font: 700 10px var(--mono); flex: none; }
 
     /* Library-wide ask, at the top of the dashboard. Borrows `.ask` and `.qa`
        from the note view's ask bar so there is only one answer style. */

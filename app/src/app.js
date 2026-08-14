@@ -508,7 +508,9 @@ async function askLive() {
   streamingAnswer = statusEl
   try {
     // An empty id means "the meeting happening right now".
-    setStatus(await invoke('ask_meeting', { id: '', question }))
+    // This answer lands in the one-line status, where the caveat that sits under
+    // a `.qa` answer would not fit — so it gets the short form of the same point.
+    setStatus(`${await invoke('ask_meeting', { id: '', question })}  (AI — check the recording)`)
   } catch (e) {
     setStatus(String(e), true)
   } finally {
@@ -1485,6 +1487,9 @@ async function runChat(prompt, pending, generate, { into = answersEl, disable = 
     // The returned string is authoritative: it also covers any event that was
     // dropped while the window was busy.
     a.textContent = await generate()
+    // Last, so the copy button and citations a caller inserts with `a.after()`
+    // land above it rather than below the small print.
+    a.after(caveat())
     return a
   } catch (e) {
     a.textContent = String(e)
@@ -1495,6 +1500,21 @@ async function runChat(prompt, pending, generate, { into = answersEl, disable = 
     for (const el of disable) el.disabled = false
     refreshModelChip()
   }
+}
+
+/// The small print under a generated answer.
+///
+/// Only successful answers get one: an error message is not a claim about the
+/// meeting, and hedging it would read as though the app were unsure whether it
+/// had failed. Rust refuses outright when the recording can't support an answer
+/// (`chat::NOT_DISCUSSED`), so this covers the remaining case — an answer that
+/// is grounded but may still have read the transcript wrong.
+function caveat() {
+  const el = document.createElement('div')
+  el.className = 'caveat'
+  el.textContent =
+    'AI-generated from your transcript, on your machine. It can be incomplete or wrong — check the recording before relying on it.'
+  return el
 }
 
 // ── ask across the whole library ─────────────────────────────────────────────
