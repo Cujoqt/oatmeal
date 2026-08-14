@@ -35,6 +35,7 @@ const folderList = $('folderList')
 const folderNote = $('folderNote')
 const newFolderBtn = $('newFolder')
 const meetingsLabel = $('meetingsLabel')
+const sortModeEl = $('sortMode')
 const navHome = $('navHome')
 const navSettings = $('navSettings')
 const navHomework = $('navHomework')
@@ -134,6 +135,11 @@ let searchTimer = null
 let searchSeq = 0
 let folders = []
 let currentFolder = null
+const SORT_KEY = 'oatmeal.sort'
+/// 'new' | 'old' | 'az'. One sort for whatever list is on screen, folder or
+/// not — a per-folder setting would need a stored map and a rule for folders
+/// never visited, to answer a question nobody asked.
+let sortMode = localStorage.getItem(SORT_KEY) || 'new'
 let openId = null
 let noteTab = 'notes'
 let liveLines = []
@@ -729,7 +735,24 @@ function visibleMeetings() {
     const q = filter.toLowerCase()
     list = meetings.filter((m) => m.title.toLowerCase().includes(q))
   }
-  return currentFolder ? list.filter((m) => m.folder === currentFolder) : list
+  if (currentFolder) list = list.filter((m) => m.folder === currentFolder)
+  return sortMeetings(list)
+}
+
+/// Applies the sidebar's sort mode. Sorting here rather than in each renderer
+/// is what keeps the sidebar and the dashboard note list in the same order —
+/// both read this one function.
+function sortMeetings(list) {
+  const sorted = list.slice()
+  if (sortMode === 'az') {
+    sorted.sort((a, b) => a.title.localeCompare(b.title))
+  } else {
+    // `list_meetings` already comes back newest-first, but a search reorders it
+    // by relevance, so newest-first has to be asked for rather than assumed.
+    sorted.sort((a, b) => new Date(b.started_at) - new Date(a.started_at))
+    if (sortMode === 'old') sorted.reverse()
+  }
+  return sorted
 }
 
 /// Runs `filter` against transcript and notes content too, not just titles, and
@@ -791,11 +814,48 @@ function renderSidebar() {
     item.addEventListener('dragstart', (e) => {
       e.dataTransfer.effectAllowed = 'move'
       e.dataTransfer.setData('text/plain', m.id)
+      liftGhost(e, item)
     })
+    item.addEventListener('dragend', dropGhost)
     sideList.appendChild(item)
   }
 }
 
+
+/// The tilted thing that follows the cursor during a drag.
+///
+/// A drag image is snapshotted once, from whatever the element looks like when
+/// `dragstart` returns — so tilting the row itself would tilt the row sitting
+/// in the list and leave the cursor dragging an upright copy. Instead a clone
+/// is rendered offscreen, rotated, and handed over as the drag image. The
+/// clone can't be removed here: the snapshot happens after this returns, and
+/// removing it first drags nothing at all. `dropGhost` clears it on `dragend`.
+let ghostEl = null
+let ghostSource = null
+
+function liftGhost(e, item) {
+  dropGhost()
+  const rect = item.getBoundingClientRect()
+  const ghost = item.cloneNode(true)
+  ghost.classList.add('drag-ghost')
+  ghost.classList.remove('on')
+  // The clone is out of the sidebar's flex context, so it has no width of its own.
+  ghost.style.width = `${rect.width}px`
+  document.body.appendChild(ghost)
+  if (e.dataTransfer.setDragImage) {
+    e.dataTransfer.setDragImage(ghost, e.clientX - rect.left, e.clientY - rect.top)
+  }
+  ghostEl = ghost
+  ghostSource = item
+  item.classList.add('dragging')
+}
+
+function dropGhost() {
+  ghostEl?.remove()
+  ghostEl = null
+  ghostSource?.classList.remove('dragging')
+  ghostSource = null
+}
 
 async function loadMeetings() {
   try {
@@ -850,7 +910,7 @@ function renderFolders() {
     const count = el('span', 'count', String(f.count))
     const del = el('button', 'del', '×')
     del.title = `Delete "${f.name}"`
-    del.addEventListener('click', (e) => { e.stopPropagation(); deleteFolder(f.name) })
+    del.addEventListener('click', (e) => { e.stopPropagation(); askDeleteFolder(row, f.name) })
     row.append(name, count, del)
 
     row.addEventListener('click', () => selectFolder(f.name))
@@ -905,6 +965,38 @@ function startRenameFolder(row, nameEl, oldName) {
   input.addEventListener('keydown', onKey)
 }
 
+/// Swaps the folder row's contents for a Delete/Cancel prompt — the same
+/// swap-in-place `startRenameFolder` does, rather than a native `confirm()`,
+/// which blocks the webview and looks like a browser rather than Oatmeal.
+/// Escape cancels. Re-rendering the folder list is what restores the row, so
+/// there is no saved-children bookkeeping to get wrong.
+function askDeleteFolder(row, name) {
+  const kids = [...row.children]
+  const wrap = el('div', 'confirm')
+  const q = el('span', 'q', `Delete "${name}"?`)
+  const yes = el('button', 'yes', 'Delete')
+  const no = el('button', '', 'Cancel')
+  wrap.append(q, yes, no)
+  row.replaceChildren(wrap)
+
+  const cancel = () => {
+    document.removeEventListener('keydown', onKey)
+    row.replaceChildren(...kids)
+  }
+  const onKey = (e) => { if (e.key === 'Escape') cancel() }
+  document.addEventListener('keydown', onKey)
+
+  no.addEventListener('click', (e) => { e.stopPropagation(); cancel() })
+  yes.addEventListener('click', (e) => {
+    e.stopPropagation()
+    document.removeEventListener('keydown', onKey)
+    deleteFolder(name)
+  })
+  // The row itself selects the folder on click; a click anywhere in the prompt
+  // must not also navigate.
+  wrap.addEventListener('click', (e) => e.stopPropagation())
+}
+
 async function deleteFolder(name) {
   try {
     await invoke('delete_folder', { name })
@@ -926,6 +1018,17 @@ function selectFolder(name) {
 meetingsLabel.addEventListener('click', () => {
   currentFolder = null
   renderFolders()
+  renderSidebar()
+  renderNotesList()
+})
+
+// The select lives inside #meetingsLabel, whose click handler clears the
+// folder — without this, changing the sort would also kick you out of the
+// folder you were sorting.
+sortModeEl.addEventListener('click', (e) => e.stopPropagation())
+sortModeEl.addEventListener('change', () => {
+  sortMode = sortModeEl.value
+  localStorage.setItem(SORT_KEY, sortMode)
   renderSidebar()
   renderNotesList()
 })
@@ -2062,6 +2165,7 @@ async function boot() {
   } catch { /* first run, or no config yet */ }
   renderGreeting()
   setRail(localStorage.getItem(RAIL_KEY) === '1')
+  sortModeEl.value = sortMode
   renderSuggestions()
   refreshHide()
   refreshModelChip()

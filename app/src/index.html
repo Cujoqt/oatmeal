@@ -226,6 +226,8 @@
     }
     .side-item:hover { background: var(--hover); }
     .side-item.on { background: var(--key-bg); }
+    /* The row left behind while its ghost follows the cursor. */
+    .side-item.dragging { opacity: .35; }
     .side-item .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--line-2); flex: none; }
     .side-item.done .dot { background: var(--accent); }
     .side-item .txt { min-width: 0; }
@@ -267,6 +269,41 @@
     .folder-row .del:hover { color: var(--danger); }
 
     .folder-row.drag-over, .side-label.clickable.drag-over { background: var(--hover); }
+
+    /* The thing that actually follows the cursor. A drag image is snapshotted
+       once at dragstart, so this has to be a real rendered clone parked
+       offscreen — a transform applied to the source row after the drag begins
+       would never show up. It is deliberately not `display:none`/`opacity:0`:
+       an unrendered element snapshots blank. */
+    .drag-ghost {
+      position: fixed; top: -1000px; left: -1000px; pointer-events: none;
+      transform: rotate(27deg); /* the tilt — one place to change it */
+      background: var(--card); border: 1px solid var(--line);
+      border-radius: 9px; box-shadow: 0 8px 20px rgba(0,0,0,.22);
+    }
+
+    /* Sits in the Meetings label, so it inherits that row's uppercase micro-type
+       rather than looking like a form control dropped into the sidebar. */
+    .side-label .sort {
+      font: 600 10.5px var(--sans); text-transform: uppercase; letter-spacing: .5px;
+      color: var(--faint); background: none; border: 0; cursor: pointer;
+      padding: 0 2px; border-radius: 4px; outline: none; max-width: 96px;
+    }
+    .side-label .sort:hover { color: var(--ink); background: var(--hover); }
+    .side-label .right { display: inline-flex; align-items: center; gap: 6px; }
+
+    /* Replaces the folder row's own contents while a delete is pending, the
+       same swap-in-place the rename input does. */
+    .folder-row .confirm { flex: 1; min-width: 0; display: flex; gap: 6px; align-items: center; }
+    .folder-row .confirm .q {
+      flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      font: 500 12px var(--sans); color: var(--ink);
+    }
+    .folder-row .confirm button {
+      flex: none; border: 0; border-radius: 4px; cursor: pointer; padding: 2px 6px;
+      font: 600 11px var(--sans); background: var(--hover); color: var(--muted);
+    }
+    .folder-row .confirm button.yes { background: var(--danger); color: #fff; }
     /* Folder errors surface here: #status lives inside the draft view, so it is
        invisible while the sidebar is what the user is actually working in. */
     .side-note { font: 400 11.5px var(--sans); color: var(--danger); padding: 2px 10px 6px; }
@@ -857,7 +894,17 @@
       <div class="side-list folders" id="folderList"></div>
       <div class="side-note" id="folderNote" role="status" aria-live="polite"></div>
 
-      <div class="side-label clickable" id="meetingsLabel"><span>Meetings</span><span id="sideCount"></span></div>
+      <div class="side-label clickable" id="meetingsLabel">
+        <span>Meetings</span>
+        <span class="right">
+          <select class="sort" id="sortMode" title="Sort meetings" aria-label="Sort meetings">
+            <option value="new">Newest</option>
+            <option value="old">Oldest</option>
+            <option value="az">A–Z</option>
+          </select>
+          <span id="sideCount"></span>
+        </span>
+      </div>
       <div class="side-list" id="sideList"></div>
 
       <div class="side-foot">
