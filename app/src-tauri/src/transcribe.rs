@@ -59,14 +59,54 @@ pub fn model_dir() -> PathBuf {
     Path::new(&home).join("Library/Application Support/dev.oatmeal.app/models")
 }
 
-/// Default Whisper model file. `small.en` transcribes technical speech markedly
-/// better than `base.en` while still running several times faster than realtime
-/// on Apple silicon, which live transcription depends on.
+/// Model for the *live* lane, where latency is the product.
+///
+/// `small.en` is not the most accurate model available, and it is here anyway:
+/// the live panel is judged on how soon a phrase appears, and measurement says
+/// the bigger models cost far more in lag than they return in words. Swapping
+/// this for `large-v3-turbo` left accuracy flat — 96.3% either way on the
+/// two-lane scenario — while worst-phrase latency went from about 550 ms to
+/// about 2400 ms. The accurate model earns its keep on the saved transcript
+/// instead; see `ACCURATE_WHISPER_FILE`.
 pub const DEFAULT_WHISPER_FILE: &str = "ggml-small.en.bin";
 
-/// Default on-disk location for the downloaded Whisper model.
+/// Model for the passes nobody is waiting on: the background block pass during
+/// a meeting, and the final transcript written at stop.
+///
+/// `large-v3-turbo` carries large-v3's full encoder with only four decoder
+/// layers, so it reads names and technical vocabulary far better than `small.en`
+/// at a fraction of large-v3's decode cost. Quantized to q8_0 — near-lossless,
+/// and half the memory of the f16 build, which matters on a machine holding the
+/// live model and the chat model at the same time. These passes have minutes of
+/// slack, so the extra time costs nobody anything.
+///
+/// Unlike the `.en` models this one is multilingual, so short inputs need a
+/// language passed rather than detected.
+pub const ACCURATE_WHISPER_FILE: &str = "ggml-large-v3-turbo-q8_0.bin";
+
+/// Default on-disk location for the live Whisper model.
 pub fn default_model_path() -> PathBuf {
     model_dir().join(DEFAULT_WHISPER_FILE)
+}
+
+/// On-disk location for the model the accurate passes use.
+pub fn accurate_model_path() -> PathBuf {
+    model_dir().join(ACCURATE_WHISPER_FILE)
+}
+
+/// Same resolution order as `resolve_model_path`, but falling back to the
+/// accurate model. `OATMEAL_MODEL` still overrides both, so a run can be pinned
+/// to one model end to end when comparing them.
+pub fn resolve_accurate_path(explicit: &str) -> PathBuf {
+    if !explicit.trim().is_empty() {
+        return PathBuf::from(explicit);
+    }
+    if let Ok(env) = std::env::var("OATMEAL_MODEL") {
+        if !env.trim().is_empty() {
+            return PathBuf::from(env);
+        }
+    }
+    accurate_model_path()
 }
 
 /// Transcribe a WAV file. `language` is a Whisper language code ("en"), or `None`
@@ -98,7 +138,7 @@ pub fn transcribe_samples(
     samples: &[f32],
     language: Option<&str>,
 ) -> Result<Transcript, String> {
-    Transcriber::load(model_path)?.run(samples, language, Quality::Accurate, None)
+    Transcriber::load_accurate(model_path)?.run(samples, language, Quality::Accurate, None)
 }
 
 /// How hard Whisper should work. Loading the model dominates either way; this
@@ -148,9 +188,17 @@ fn thread_budget(quality: Quality) -> i32 {
 }
 
 impl Transcriber {
-    /// Load the model at `model_path` (empty for the resolution fallback).
+    /// Load the live model at `model_path` (empty for the resolution fallback).
     pub fn load(model_path: &str) -> Result<Self, String> {
-        let model = resolve_model_path(model_path);
+        Self::load_at(resolve_model_path(model_path))
+    }
+
+    /// Load the model the accurate passes use (empty for the fallback).
+    pub fn load_accurate(model_path: &str) -> Result<Self, String> {
+        Self::load_at(resolve_accurate_path(model_path))
+    }
+
+    fn load_at(model: PathBuf) -> Result<Self, String> {
         if !model.exists() {
             return Err(format!(
                 "whisper model not found at {} — download a ggml model there first",

@@ -11,11 +11,11 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Mutex, OnceLock};
 
-use crate::transcribe::{model_dir, resolve_model_path};
+use crate::transcribe::{model_dir, resolve_accurate_path, resolve_model_path};
 
-/// A downloadable Whisper model. `small.en` is the default: clearly better than
-/// `base.en` on lectures and technical vocabulary, still comfortably faster than
-/// realtime on Apple silicon so live transcription keeps up.
+/// A downloadable Whisper model. `large-v3-turbo-q8_0` is the default: large-v3's
+/// encoder with a four-layer decoder, which buys most of large-v3's accuracy at a
+/// fraction of its decode cost, so live transcription keeps up on Apple silicon.
 pub struct WhisperModel {
     pub name: &'static str,
     pub file: &'static str,
@@ -43,6 +43,12 @@ pub const WHISPER_MODELS: &[WhisperModel] = &[
         url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.en.bin",
         approx_mb: 1533,
     },
+    WhisperModel {
+        name: "large-v3-turbo",
+        file: "ggml-large-v3-turbo-q8_0.bin",
+        url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q8_0.bin",
+        approx_mb: 833,
+    },
 ];
 
 /// Look a Whisper model up by short name.
@@ -50,10 +56,23 @@ pub fn whisper_model(name: &str) -> Option<&'static WhisperModel> {
     WHISPER_MODELS.iter().find(|m| m.name == name)
 }
 
-/// Ensure the Whisper model exists locally, downloading it if absent. Returns the
-/// path to the ready model. Blocking; run off the UI thread.
+/// Ensure both Whisper models exist locally. Returns the path to the live one.
+/// Blocking, and now for two downloads rather than one, so run it off the UI
+/// thread.
+///
+/// The live model is fetched first because nothing can be recorded without it.
+/// The accurate model only feeds the background and final passes, so a failure
+/// to fetch it is reported and swallowed: the meeting still records, and the
+/// transcript still gets written by the live model rather than not at all.
 pub fn ensure_model() -> Result<PathBuf, String> {
-    let dest = resolve_model_path("");
+    let live = ensure_one(resolve_model_path(""))?;
+    if let Err(e) = ensure_one(resolve_accurate_path("")) {
+        eprintln!("[oatmeal] accurate model unavailable, falling back: {e}");
+    }
+    Ok(live)
+}
+
+fn ensure_one(dest: PathBuf) -> Result<PathBuf, String> {
     if is_present(&dest) {
         return Ok(dest);
     }

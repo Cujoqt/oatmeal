@@ -330,10 +330,15 @@ fn begin_session(
     {
         let mut slot = state.live.lock().map_err(|_| "live state poisoned")?;
         let handle = app.clone();
-        // An empty language means auto-detect, matching the offline path.
+        // The offline pass can auto-detect: it sees the whole meeting. The live
+        // lane sees a second or two at a time, which is not enough to tell one
+        // language from another — a misdetected window decodes to nonsense, and
+        // the nonsense then becomes the next window's prompt. So an unset picker
+        // means English here rather than detection. Anyone who picks a language
+        // still gets it.
         let lang = {
             let l = language.trim();
-            if l.is_empty() { None } else { Some(l.to_string()) }
+            Some(if l.is_empty() { "en".to_string() } else { l.to_string() })
         };
         match LiveSession::start(tap, String::new(), lang, move |line| {
             use tauri::Emitter;
