@@ -214,6 +214,7 @@
     .nav:hover { background: var(--hover); }
     .nav.on { background: var(--key-bg); color: var(--ink); }
     .nav svg { width: 16px; height: 16px; flex: none; }
+    .nav .count { margin-left: auto; font: 400 11px var(--sans); color: var(--hint); flex: none; }
 
     .side-label {
       font: 600 10.5px var(--sans); text-transform: uppercase; letter-spacing: .8px;
@@ -890,6 +891,7 @@
       <button class="nav" id="navHomework">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3h8a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z" /><path d="M9 9h6M9 13h6M9 17h4" /></svg>
         <span>Homework</span>
+        <span class="count" id="hwCount" hidden></span>
       </button>
       </nav>
 
