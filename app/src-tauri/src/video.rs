@@ -338,6 +338,7 @@ fn download_audio(id: &str, dest_dir: &Path) -> Result<PathBuf, String> {
 fn decode_m4a(path: &Path) -> Result<(Vec<f32>, u32), String> {
     use symphonia::core::audio::SampleBuffer;
     use symphonia::core::codecs::DecoderOptions;
+    use symphonia::core::errors::Error as SymphoniaError;
     use symphonia::core::formats::FormatOptions;
     use symphonia::core::io::MediaSourceStream;
     use symphonia::core::meta::MetadataOptions;
@@ -358,19 +359,41 @@ fn decode_m4a(path: &Path) -> Result<(Vec<f32>, u32), String> {
         .find(|t| t.codec_params.codec != symphonia::core::codecs::CODEC_TYPE_NULL)
         .ok_or("that download contains no audio track")?;
     let track_id = track.id;
+    // Reserved up front from the container's own frame count so a long import
+    // doesn't grow-and-copy its way through several peak allocations. Two
+    // hours at 44.1 kHz mono f32 is ~1.27 GB; Vec growth would peak near
+    // double that while the old buffer is still alive.
+    let n_frames = track.codec_params.n_frames;
     let mut decoder = symphonia::default::get_codecs()
         .make(&track.codec_params, &DecoderOptions::default())
         .map_err(|e| format!("can't decode that audio: {e}"))?;
 
-    let mut samples: Vec<f32> = Vec::new();
+    let mut samples: Vec<f32> = match n_frames {
+        Some(n) => Vec::with_capacity(n as usize),
+        None => Vec::new(),
+    };
     let mut rate = 0u32;
     let mut buf: Option<SampleBuffer<f32>> = None;
     loop {
         let packet = match format.next_packet() {
             Ok(p) => p,
-            // End of stream arrives as an io error; anything decoded so far is
-            // still good, so this ends the loop rather than failing the import.
-            Err(_) => break,
+            // A clean end of stream arrives as an IoError of kind UnexpectedEof
+            // — anything decoded so far is still good, so this ends the loop
+            // rather than failing the import. Anything else (a truncated
+            // download, a malformed packet table) is a real failure: silently
+            // stopping here would hand back a partial decode as if it were
+            // complete, and a range request past that point would blame the
+            // range instead of the download.
+            Err(SymphoniaError::IoError(ref e))
+                if e.kind() == std::io::ErrorKind::UnexpectedEof =>
+            {
+                break
+            }
+            Err(e) => {
+                return Err(format!(
+                    "that video's audio ended unexpectedly ({e}) — try importing it again"
+                ));
+            }
         };
         if packet.track_id() != track_id {
             continue;
