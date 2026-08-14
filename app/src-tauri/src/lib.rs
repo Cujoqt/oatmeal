@@ -12,6 +12,7 @@ pub mod store;
 mod sysaudio;
 pub mod transcribe;
 pub mod update;
+pub mod video;
 mod window;
 
 use std::path::{Path, PathBuf};
