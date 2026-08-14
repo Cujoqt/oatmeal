@@ -56,9 +56,9 @@ pub fn whisper_model(name: &str) -> Option<&'static WhisperModel> {
     WHISPER_MODELS.iter().find(|m| m.name == name)
 }
 
-/// Ensure the Whisper model exists locally, downloading it if absent. Returns the
-/// path to the ready model. Blocking; run off the UI thread.
 /// Ensure both Whisper models exist locally. Returns the path to the live one.
+/// Blocking, and now for two downloads rather than one, so run it off the UI
+/// thread.
 ///
 /// The live model is fetched first because nothing can be recorded without it.
 /// The accurate model only feeds the background and final passes, so a failure
