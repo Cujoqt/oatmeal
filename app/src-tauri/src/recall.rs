@@ -19,7 +19,7 @@ use std::path::Path;
 
 use serde::Serialize;
 
-use crate::chat::{CHARS_PER_TOKEN, MAX_TOKENS, N_CTX};
+use crate::chat::{terms, word_start_hits, CHARS_PER_TOKEN, MAX_TOKENS, N_CTX};
 use crate::library::{self, Meeting};
 
 /// Room set aside for the system prompt, the question, and the `[1] Title …`
@@ -43,9 +43,6 @@ const MAX_MEETINGS: usize = 5;
 /// transcript cannot crowd the other four out of the prompt entirely.
 const PER_MEETING_CHARS: usize = CONTEXT_BUDGET_CHARS / MAX_MEETINGS;
 
-/// Shortest run of characters worth treating as a search term.
-const MIN_TERM_LEN: usize = 2;
-
 /// A term repeated forty times shouldn't beat a meeting that matches every
 /// term once, so each term's contribution to the score saturates.
 const MAX_HITS_PER_TERM: usize = 5;
@@ -58,25 +55,6 @@ const TITLE_WEIGHT: usize = 3;
 const NO_MATCH: &str =
     "I couldn't find anything about that in your meetings. Try different words, \
      or check that the meeting you have in mind was transcribed.";
-
-/// Words carried by the shape of a question rather than its subject. Dropping
-/// them is the whole difference between matching "decide"/"pricing" and
-/// matching nothing at all.
-const STOPWORDS: &[&str] = &[
-    "a", "about", "after", "again", "all", "also", "am", "an", "and", "any", "anyone", "are",
-    "around", "as", "at", "back", "be", "because", "been", "before", "being", "both", "but", "by",
-    "can", "come", "could", "did", "do", "does", "doing", "done", "down", "each", "even", "ever",
-    "every", "for", "from", "get", "give", "go", "going", "gone", "got", "had", "has", "have",
-    "he", "her", "here", "hers", "him", "his", "how", "i", "if", "in", "into", "is", "it", "its",
-    "just", "know", "like", "make", "many", "may", "me", "might", "mine", "more", "most", "much",
-    "must", "my", "need", "no", "not", "now", "of", "off", "on", "one", "only", "or", "other",
-    "our", "ours", "out", "over", "own", "put", "said", "same", "say", "says", "see", "she",
-    "should", "so", "some", "still", "such", "take", "tell", "than", "that", "the", "their",
-    "them", "then", "there", "these", "they", "thing", "things", "think", "this", "those",
-    "through", "to", "too", "up", "us", "use", "very", "want", "was", "we", "well", "were",
-    "what", "when", "where", "which", "while", "who", "whom", "why", "will", "with", "would",
-    "yes", "you", "your", "yours",
-];
 
 /// A meeting the answer drew on, in the order it was quoted. The UI turns each
 /// of these into a chip that opens the meeting.
@@ -92,39 +70,6 @@ pub struct Source {
 pub struct LibraryAnswer {
     pub answer: String,
     pub sources: Vec<Source>,
-}
-
-/// The meaningful words of `question`, lowercased and deduplicated.
-fn terms(question: &str) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    for raw in question.split(|c: char| !c.is_alphanumeric()) {
-        let term = raw.to_lowercase();
-        if term.len() < MIN_TERM_LEN || STOPWORDS.contains(&term.as_str()) {
-            continue;
-        }
-        if !out.contains(&term) {
-            out.push(term);
-        }
-    }
-    out
-}
-
-/// How many times `term` starts a word in `text`. Both must already be
-/// lowercase.
-///
-/// Plain substring counting would score "art" for every "start". Requiring a
-/// word boundary in front keeps that out while still letting "price" match
-/// "prices" and "pricing" — the only stemming this needs.
-fn word_start_hits(text: &str, term: &str) -> usize {
-    text.match_indices(term)
-        .filter(|(i, _)| {
-            !text[..*i]
-                .chars()
-                .next_back()
-                .map(|c| c.is_alphanumeric())
-                .unwrap_or(false)
-        })
-        .count()
 }
 
 /// How well a meeting answers to `terms`. Zero means it is not a candidate.

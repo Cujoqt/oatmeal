@@ -36,3 +36,8 @@ Screenshot*.png
 *.swp
 .idea/
 .vscode/
+
+# Working state for the agent loops under `loops/`, one STATE.md each. It is
+# scratch for whoever is running the loop, not product history — and it has to
+# stay out of `git status`, which the release preflight requires to be empty.
+loops/
