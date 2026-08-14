@@ -96,6 +96,7 @@
       display: flex; align-items: center; gap: 8px; pointer-events: none;
       font-size: 12.5px; font-weight: 500; color: var(--faint);
     }
+    .brand-ver { font-size: 11px; color: var(--hint); letter-spacing: .2px; }
     .brand .mark { display: flex; align-items: center; gap: 1.5px; height: 12px; }
     .brand .mark i { width: 2px; border-radius: 2px; background: var(--ink-soft); }
     .brand .mark i:nth-child(4), .brand .mark i:nth-child(5) { background: var(--accent); }
@@ -799,6 +800,9 @@
       <span class="mark" aria-hidden="true">
         <i style="height:26%"></i><i style="height:44%"></i><i style="height:56%"></i><i style="height:62%"></i><i style="height:32%"></i>
       </span>Oatmeal
+      <!-- Filled from `app_version` at boot, and left empty if that ever fails
+           rather than showing a "v" with nothing after it. -->
+      <span class="brand-ver" id="brandVersion"></span>
     </div>
     <div class="bar-actions">
       <button id="theme" title="Switch theme" aria-label="Switch theme">
@@ -813,7 +817,7 @@
   <div class="update-strip" id="updateStrip">
     <span class="led" aria-hidden="true"></span>
     <span class="grow" id="updateStripText"></span>
-    <button id="updateGet">Download</button>
+    <button id="updateGet">Update now</button>
     <button class="quiet" id="updateLater">Later</button>
   </div>
 
@@ -1084,12 +1088,13 @@
 
           <div class="set-card">
             <h2>Version</h2>
-            <p>Oatmeal checks GitHub for a new release on launch. Nothing about your
+            <p>Oatmeal checks GitHub for a new release on launch, and again every few
+              hours while it's open. Nothing about your
               meetings is sent — the check asks for the release list and nothing more.</p>
             <div class="acct"><span class="led"></span><span id="versionLabel">Checking…</span></div>
             <div class="btn-row">
               <button class="btn quiet" id="updateCheck">Check for updates</button>
-              <button class="btn primary" id="updateOpen" hidden>Download</button>
+              <button class="btn primary" id="updateOpen" hidden>Update now</button>
             </div>
           </div>
 
@@ -1139,7 +1144,7 @@
     <div class="gate-card">
       <h2 id="gateTitle"></h2>
       <div id="gateBody"></div>
-      <button id="gateGet">Download the update</button>
+      <button id="gateGet">Update now</button>
     </div>
   </div>
 

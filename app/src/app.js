@@ -99,6 +99,7 @@ const toastEl = $('toast')
 const versionLabel = $('versionLabel')
 const updateCheckBtn = $('updateCheck')
 const updateOpenBtn = $('updateOpen')
+const brandVersionEl = $('brandVersion')
 
 const DRAFT_KEY = 'oatmeal.draft'
 const INTRO_KEY = 'oatmeal.introSeen'
@@ -536,8 +537,18 @@ okayBtn.addEventListener('click', () => {
 // must never cost somebody a meeting.
 
 let update = null
+/// When the last check finished, so the app can notice a release published
+/// while it was running. Checking only at launch meant a release put out in the
+/// afternoon was invisible to anyone who had opened Oatmeal that morning — and
+/// Oatmeal is an app people leave open for days.
+let lastUpdateCheck = 0
+const UPDATE_RECHECK_MS = 6 * 60 * 60 * 1000
+/// Coming back to the window is the moment someone is most likely to be waiting
+/// on a release, so re-check then too — but not on every alt-tab.
+const UPDATE_FOCUS_RECHECK_MS = 30 * 60 * 1000
 
 async function refreshUpdate({ manual = false } = {}) {
+  lastUpdateCheck = Date.now()
   if (manual) note(versionLabel, 'Checking…')
   try {
     update = await invoke('check_for_update')
@@ -625,6 +636,37 @@ function renderVersionCard() {
   updateOpenBtn.hidden = !newer || !downloadLink()
 }
 
+/// Install without leaving the app. Oatmeal fetches the disk image itself,
+/// swaps the bundle and reopens — so this call only ever *returns* on failure,
+/// because success takes the window with it.
+///
+/// Everything that can go wrong (no write access to /Applications, an image
+/// that won't mount) falls back to the old behaviour: open the download in a
+/// browser and let the person drag it across.
+async function installUpdate(btn) {
+  const url = update?.downloadUrl
+  if (!url) return openDownload()
+  const label = btn?.textContent
+  if (btn) {
+    btn.disabled = true
+    btn.textContent = 'Installing…'
+  }
+  setStatus(`Downloading Oatmeal ${update.latest || ''} — it will restart when it's ready.`)
+  try {
+    await invoke('install_update', { url })
+  } catch (e) {
+    if (btn) {
+      btn.disabled = false
+      btn.textContent = label
+    }
+    setStatus(`${e} — opening the download instead.`, true)
+    note(versionLabel, String(e), 'err')
+    await openDownload()
+  }
+}
+
+/// The fallback, and the only path for a release with no image attached: hand
+/// the link to the browser.
 async function openDownload() {
   const url = downloadLink()
   if (!url) return
@@ -635,13 +677,17 @@ async function openDownload() {
   }
 }
 
-updateGetBtn.addEventListener('click', openDownload)
-gateGetBtn.addEventListener('click', openDownload)
-updateOpenBtn.addEventListener('click', openDownload)
+updateGetBtn.addEventListener('click', () => installUpdate(updateGetBtn))
+gateGetBtn.addEventListener('click', () => installUpdate(gateGetBtn))
+updateOpenBtn.addEventListener('click', () => installUpdate(updateOpenBtn))
 updateCheckBtn.addEventListener('click', () => refreshUpdate({ manual: true }))
 updateLaterBtn.addEventListener('click', () => {
   if (update?.latest) localStorage.setItem(UPDATE_SNOOZE_KEY, update.latest)
   updateStrip.classList.remove('show')
+})
+
+window.addEventListener('focus', () => {
+  if (Date.now() - lastUpdateCheck > UPDATE_FOCUS_RECHECK_MS) refreshUpdate()
 })
 
 // ── meeting library ──────────────────────────────────────────────────────────
@@ -2024,9 +2070,13 @@ async function boot() {
   showHome()
   loadAgenda()
   setInterval(loadAgenda, AGENDA_REFRESH_MS)
+  invoke('app_version')
+    .then((v) => { brandVersionEl.textContent = `v${v}` })
+    .catch(() => {})
   // Not awaited: a slow network must not hold up the window, and the gate can
   // arrive a moment after the UI does.
   refreshUpdate()
+  setInterval(refreshUpdate, UPDATE_RECHECK_MS)
 
   setIntroVisible(!localStorage.getItem(INTRO_KEY))
   try {
