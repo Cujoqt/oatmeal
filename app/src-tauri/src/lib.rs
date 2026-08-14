@@ -858,12 +858,36 @@ fn check_for_update() -> update::UpdateStatus {
     update::check()
 }
 
+/// The version this build was compiled as. Separate from `check_for_update` so
+/// the title bar can show it immediately instead of waiting on a network call
+/// that may take ten seconds to time out.
+#[tauri::command]
+fn app_version() -> &'static str {
+    update::current_version()
+}
+
 /// Open a release page or its DMG in the browser. Refuses links outside the
 /// project's own repository. Spawning `open` and waiting on it blocks, so it
 /// stays off the main thread like everything else here that blocks.
 #[tauri::command(async)]
 fn open_update_download(url: String) -> Result<(), String> {
     update::open_download(&url)
+}
+
+/// Download and install the update in place, then quit — the installer script
+/// waits for this process to be gone, swaps the bundle and reopens Oatmeal.
+///
+/// Refuses while a meeting is being recorded: quitting mid-session would take
+/// the recording with it, and no update is worth a lost meeting. The frontend
+/// falls back to opening the DMG in a browser if this fails for any reason.
+#[tauri::command(async)]
+fn install_update(app: tauri::AppHandle, state: tauri::State<'_, AppState>, url: String) -> Result<(), String> {
+    if state.session.lock().map(|s| s.is_some()).unwrap_or(false) {
+        return Err("Stop the recording before updating.".into());
+    }
+    update::install(&url)?;
+    app.exit(0);
+    Ok(())
 }
 
 // ── Data compatibility ───────────────────────────────────────────────────────
@@ -953,8 +977,10 @@ pub fn run() {
             set_homework_done,
             delete_homework,
             data_status,
+            app_version,
             check_for_update,
-            open_update_download
+            open_update_download,
+            install_update
         ])
         .setup(|app| {
             // Before anything reads or writes a meeting: reconcile this build
@@ -1025,6 +1051,7 @@ mod tests {
             "draft_followup",
             "check_for_update",
             "open_update_download",
+            "install_update",
             "search_snippets",
             "chat_model_status",
             "unload_chat_model",

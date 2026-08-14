@@ -19,6 +19,8 @@
 //! request Rust can make just as easily. Follows `model.rs` in shelling out to
 //! `curl` rather than pulling in an HTTP stack.
 
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use serde::Serialize;
@@ -231,6 +233,186 @@ pub fn open_download(url: &str) -> Result<(), String> {
     Ok(())
 }
 
+// ── Installing the update in place ───────────────────────────────────────────
+//
+// Handing someone a DMG to mount and drag is the step where an update stops
+// happening. Fetching it here instead also settles the Gatekeeper prompt that
+// greeted every update: `com.apple.quarantine` is stamped on by whatever
+// downloads a file, and `curl` — unlike a browser — does not stamp it.
+//
+// What it cannot fix is the permission dialogs. macOS keys those grants to the
+// code signature, and Oatmeal is ad-hoc signed (`signingIdentity: "-"`), so
+// every build is a stranger to TCC no matter how it arrives. That needs a
+// Developer ID certificate and notarization, which is a release-pipeline
+// change, not something the app can do to itself.
+
+/// Everything is staged while the app is still up, so a failure is a message on
+/// screen rather than a half-replaced bundle. Only the swap itself has to wait
+/// for the process to be gone, and that is all this script does.
+const SWAP_SCRIPT: &str = r#"#!/bin/sh
+# $1 pid to wait for  $2 installed bundle  $3 staged bundle  $4 scratch path for
+# the old bundle  $5 the downloaded disk image
+while kill -0 "$1" 2>/dev/null; do sleep 0.2; done
+sleep 0.5
+rm -rf "$4"
+mv "$2" "$4" || exit 1
+# Put the old one back if the new one won't move into place: better a stale
+# Oatmeal than no Oatmeal.
+if ! mv "$3" "$2"; then mv "$4" "$2"; exit 1; fi
+rm -rf "$4"
+open "$2"
+rm -f "$5"
+"#;
+
+/// The `.app` an executable is running out of. `current_exe` lands on
+/// `Oatmeal.app/Contents/MacOS/oatmeal-app`, so the bundle is three levels up.
+/// A binary running outside a bundle — `cargo run`, or a test — has nothing to
+/// replace, and says so rather than guessing at a path to delete.
+fn bundle_of(exe: &Path) -> Option<&Path> {
+    exe.ancestors()
+        .nth(3)
+        .filter(|p| p.extension().map_or(false, |e| e == "app"))
+}
+
+/// Can we replace the bundle without asking for an admin password? Probing is
+/// the only honest answer — directory permission bits don't account for ACLs or
+/// a read-only volume. Not user data, so a plain write is right here.
+fn writable(dir: &Path) -> bool {
+    let probe = dir.join(".oatmeal-write-probe");
+    match fs::write(&probe, b"") {
+        Ok(()) => {
+            let _ = fs::remove_file(&probe);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+fn run(cmd: &mut Command, what: &str) -> Result<(), String> {
+    match cmd.output() {
+        Ok(o) if o.status.success() => Ok(()),
+        Ok(o) => {
+            let why = String::from_utf8_lossy(&o.stderr);
+            let why = why.trim();
+            Err(if why.is_empty() {
+                format!("{what} failed")
+            } else {
+                format!("{what} failed: {why}")
+            })
+        }
+        Err(e) => Err(format!("could not run {what}: {e}")),
+    }
+}
+
+/// The `.app` inside a mounted release image. Found by looking rather than by
+/// name so renaming the product doesn't silently break updating.
+fn app_in(mount: &Path) -> Result<PathBuf, String> {
+    fs::read_dir(mount)
+        .map_err(|e| format!("could not read the disk image: {e}"))?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .find(|p| p.extension().map_or(false, |e| e == "app"))
+        .ok_or_else(|| "the disk image has no application in it".into())
+}
+
+/// Download the release image and stage the new bundle beside the installed
+/// one, then hand the swap to a detached script that waits for this process to
+/// exit. Returns once the swap is armed — the caller quits the app, and the
+/// script reopens it.
+pub fn install(url: &str) -> Result<(), String> {
+    if !url.starts_with(REPO_PREFIX) || !url.ends_with(".dmg") {
+        return Err("refusing to install anything but a disk image from the Oatmeal repository".into());
+    }
+
+    let exe = std::env::current_exe().map_err(|e| format!("could not find the running app: {e}"))?;
+    let bundle = bundle_of(&exe)
+        .ok_or("Oatmeal isn't running from an .app bundle, so it can't replace itself")?
+        .to_path_buf();
+    let parent = bundle
+        .parent()
+        .ok_or("the installed app has no containing folder")?
+        .to_path_buf();
+    if !writable(&parent) {
+        return Err(format!(
+            "Oatmeal can't write to {} — install the update from the disk image instead",
+            parent.display()
+        ));
+    }
+
+    // Staged next to the installed app so the swap is a rename on one volume.
+    let staged = parent.join(".Oatmeal.app.new");
+    let old = parent.join(".Oatmeal.app.old");
+
+    // A fixed name rather than a fresh temp dir each time, so a run that dies
+    // before its cleanup leaves at most one image behind, not one per attempt.
+    let work = std::env::temp_dir().join("oatmeal-update");
+    let _ = fs::remove_dir_all(&work);
+    fs::create_dir_all(&work).map_err(|e| format!("could not make a scratch folder: {e}"))?;
+    let dmg = work.join("Oatmeal.dmg");
+    let mount = work.join("mnt");
+
+    run(
+        Command::new("curl")
+            .arg("-fsSL")
+            .arg("--max-time")
+            .arg("300")
+            .arg("-H")
+            .arg("User-Agent: Oatmeal")
+            .arg("-o")
+            .arg(&dmg)
+            .arg(url),
+        "downloading the update",
+    )?;
+
+    run(
+        Command::new("hdiutil")
+            .arg("attach")
+            .arg(&dmg)
+            .arg("-nobrowse")
+            .arg("-quiet")
+            .arg("-readonly")
+            .arg("-mountpoint")
+            .arg(&mount),
+        "opening the update",
+    )?;
+
+    // Everything from here has a mounted image to put back, so failures detach
+    // before they return.
+    let detach = || {
+        let _ = Command::new("hdiutil")
+            .arg("detach")
+            .arg(&mount)
+            .arg("-quiet")
+            .output();
+    };
+    let copied = app_in(&mount).and_then(|app| {
+        let _ = fs::remove_dir_all(&staged);
+        // `ditto` rather than a recursive copy: it is the tool that preserves
+        // the symlinks, permissions and extended attributes an .app is made of.
+        run(
+            Command::new("ditto").arg(&app).arg(&staged),
+            "unpacking the update",
+        )
+    });
+    detach();
+    if let Err(e) = copied {
+        let _ = fs::remove_dir_all(&staged);
+        return Err(e);
+    }
+
+    let script = work.join("swap.sh");
+    fs::write(&script, SWAP_SCRIPT).map_err(|e| format!("could not stage the update: {e}"))?;
+    Command::new("/bin/sh")
+        .arg(&script)
+        .arg(std::process::id().to_string())
+        .arg(&bundle)
+        .arg(&staged)
+        .arg(&old)
+        .arg(&dmg)
+        .spawn()
+        .map_err(|e| format!("could not start the installer: {e}"))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -310,6 +492,32 @@ mod tests {
         assert_eq!(s.release_url, None, "off-repo release page dropped");
         assert!(s.download_url.unwrap().starts_with(REPO_PREFIX));
         assert!(open_download("https://evil.example/x.dmg").is_err());
+    }
+
+    #[test]
+    fn the_bundle_is_found_three_levels_above_the_executable() {
+        assert_eq!(
+            bundle_of(Path::new("/Applications/Oatmeal.app/Contents/MacOS/oatmeal-app")),
+            Some(Path::new("/Applications/Oatmeal.app")),
+        );
+        // `cargo run` and the test binary have no bundle to replace. Guessing
+        // here would mean `rm -rf`ing a directory that is not an app.
+        assert_eq!(bundle_of(Path::new("/Users/x/oatmeal/target/debug/oatmeal-app")), None);
+        assert_eq!(bundle_of(Path::new("/oatmeal-app")), None);
+    }
+
+    /// `install` deletes and replaces a directory, so the URL it trusts has to
+    /// be one this project published — checked before anything is downloaded.
+    #[test]
+    fn install_refuses_anything_but_a_repository_disk_image() {
+        for url in [
+            "https://evil.example/Oatmeal.dmg",
+            "https://github.com/someone-else/oatmeal/releases/download/v9/Oatmeal.dmg",
+            // Right repository, but not an image — a release can attach anything.
+            "https://github.com/Cujoqt/oatmeal/releases/download/v1.5.1/notes.txt",
+        ] {
+            assert!(install(url).is_err(), "should have refused {url}");
+        }
     }
 
     /// Hits the real releases API. Ignored by default like the audio end-to-end
