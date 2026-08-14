@@ -29,7 +29,6 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use oatmeal_app_lib::live::{LiveSession, Tap};
-use oatmeal_app_lib::transcribe::WHISPER_RATE;
 
 /// Accuracy the live lane has to reach before this is considered fixed.
 const TARGET_ACCURACY: f64 = 0.90;
@@ -67,28 +66,43 @@ const SCRIPT: &[&str] = &[
 ];
 
 /// Synthesise one sentence to 16 kHz mono f32 via `say`, then read it back.
-fn speak(text: &str, idx: usize) -> Vec<f32> {
-    let path = std::env::temp_dir().join(format!("oatmeal-live-{}-{idx}.wav", std::process::id()));
+fn speak(text: &str, idx: usize, rate: u32) -> Vec<f32> {
+    let path = std::env::temp_dir().join(format!("oatmeal-live-{}-{idx}-{rate}.wav", std::process::id()));
     let status = std::process::Command::new("say")
-        .args(["--data-format=LEF32@16000", "--file-format=WAVE", "-r", "175", "-o"])
+        .args([
+            &format!("--data-format=LEF32@{rate}"),
+            "--file-format=WAVE",
+            "-r",
+            "175",
+            "-o",
+        ])
         .arg(&path)
         .arg(text)
         .status()
         .expect("spawn say");
     assert!(status.success(), "say failed for {text:?}");
-    let samples = oatmeal_app_lib::transcribe::load_wav_mono_16k(&path).expect("read say output");
+    // Read at the rate it was written. `load_wav_mono_16k` would drag it down to
+    // Whisper's rate here, which is the one thing these fixtures must not do:
+    // the tap's own resampler is part of what is being measured, and audio that
+    // has already been through a resampler on the way in is measuring it twice.
+    let mut reader = hound::WavReader::open(&path).expect("open say output");
+    let samples: Vec<f32> = reader
+        .samples::<f32>()
+        .map(|s| s.expect("read sample"))
+        .collect();
     std::fs::remove_file(&path).ok();
     samples
 }
 
-/// The whole script as one stream, with a short pause between sentences so the
-/// chunker has somewhere natural to cut. Normalised to a realistic close-mic
-/// peak so the scenarios below differ only by what we do to it.
-fn script_audio() -> Vec<f32> {
-    let gap = vec![0.0f32; (WHISPER_RATE as f32 * 0.45) as usize];
+/// The whole script as one stream at `rate`, with a short pause between
+/// sentences so the chunker has somewhere natural to cut. Normalised to a
+/// realistic close-mic peak so the scenarios below differ only by what we do
+/// to it.
+fn script_audio(rate: u32) -> Vec<f32> {
+    let gap = vec![0.0f32; (rate as f32 * 0.45) as usize];
     let mut all = Vec::new();
     for (i, line) in SCRIPT.iter().enumerate() {
-        all.extend_from_slice(&speak(line, i));
+        all.extend_from_slice(&speak(line, i, rate));
         all.extend_from_slice(&gap);
     }
     let peak = all.iter().fold(0.0f32, |m, &s| m.max(s.abs())).max(1e-6);
@@ -155,7 +169,14 @@ struct Run {
 /// Feed `lanes` into one live session at wall-clock speed and collect what comes
 /// back out. Every lane pushes into the same tap, exactly as `begin_session` wires
 /// the mic and system-audio recorders.
-fn run_scenario(lanes: &[Vec<f32>]) -> Run {
+///
+/// `rates` is the capture rate each lane's audio was authored at, and the rate
+/// it is pushed at. Feeding lanes at 16 kHz would make the tap's resampler a
+/// no-op and hide everything interesting about it: real capture never arrives at
+/// Whisper's rate, and the mic and system lanes rarely arrive at the same one as
+/// each other.
+fn run_scenario(lanes: &[Vec<f32>], rates: &[u32]) -> Run {
+    assert_eq!(lanes.len(), rates.len(), "one capture rate per lane");
     let (tap, sinks) = Tap::with_lanes(lanes.len());
     let observed: Arc<Mutex<Vec<Observed>>> = Arc::new(Mutex::new(Vec::new()));
     let started = Instant::now();
@@ -176,26 +197,29 @@ fn run_scenario(lanes: &[Vec<f32>]) -> Run {
 
     // Push 100 ms at a time from every lane, sleeping to keep wall clock in step
     // with audio time — the whole point is to measure how far behind we run.
-    let step = (WHISPER_RATE / 10) as usize;
-    let longest = lanes.iter().map(|l| l.len()).max().unwrap_or(0);
-    let mut pos = 0;
-    while pos < longest {
-        let end = (pos + step).min(longest);
-        for (lane, sink) in lanes.iter().zip(sinks.iter()) {
-            if pos < lane.len() {
-                let stop = end.min(lane.len());
-                sink.push(&lane[pos..stop], 1, WHISPER_RATE);
+    // Steps are counted in time rather than samples, because the lanes do not
+    // share a sample rate.
+    let audio_secs = lanes
+        .iter()
+        .zip(rates.iter())
+        .map(|(l, &r)| l.len() as f64 / r as f64)
+        .fold(0.0f64, f64::max);
+    let steps = (audio_secs * 10.0).ceil() as usize;
+    for step in 0..steps {
+        for ((lane, sink), &rate) in lanes.iter().zip(sinks.iter()).zip(rates.iter()) {
+            let from = (step * rate as usize) / 10;
+            let to = (((step + 1) * rate as usize) / 10).min(lane.len());
+            if from < to {
+                sink.push(&lane[from..to], 1, rate);
             }
         }
-        let target = Duration::from_millis((end as u64 * 1000) / WHISPER_RATE as u64);
+        let target = Duration::from_millis((step as u64 + 1) * 100);
         let elapsed = started.elapsed();
         if target > elapsed {
             std::thread::sleep(target - elapsed);
         }
-        pos = end;
     }
     let audio_done_ms = started.elapsed().as_millis() as u64;
-    let audio_secs = longest as f64 / WHISPER_RATE as f64;
 
     // `finish` also hands back what the background accurate pass got through
     // while this was running — the work that used to happen only after someone
@@ -361,29 +385,51 @@ fn live_lane_is_accurate_and_prompt() {
     whisper_rs::install_logging_hooks();
     assert!(
         oatmeal_app_lib::transcribe::default_model_path().exists(),
-        "whisper model not downloaded; run the app once or the e2e test first"
+        "live whisper model not downloaded; run the app once or the e2e test first"
+    );
+    assert!(
+        oatmeal_app_lib::transcribe::accurate_model_path().exists(),
+        "accurate whisper model not downloaded; the background-pass numbers below \
+         come from it, so a run without it is not comparable"
     );
 
-    let audio = script_audio();
-    println!(
-        "script is {:.1}s of speech",
-        audio.len() as f32 / WHISPER_RATE as f32
-    );
+    // A common mic rate. Nothing here arrives at 16 kHz, so the tap's resampler
+    // is exercised in every scenario rather than short-circuited.
+    const MIC: u32 = 44_100;
+    // What ScreenCaptureKit is pinned to, so the system lane is always this.
+    const SYS: u32 = 48_000;
+
+    // Synthesised separately at each rate rather than resampled between them.
+    // Authoring at one rate and converting would put a resampler in front of the
+    // one being measured, and its losses would be scored as transcription error.
+    let audio = script_audio(MIC);
+    let sys_audio = script_audio(SYS);
+    println!("script is {:.1}s of speech", audio.len() as f32 / MIC as f32);
 
     // Control: one lane, close-mic level, quiet room.
-    let loud = run_scenario(&[quiet_speaker(&audio, 1.0, 0.0004)]);
+    let loud = run_scenario(&[quiet_speaker(&audio, 1.0, 0.0004)], &[MIC]);
     report("loud, single lane", &loud);
 
     // The complaint: someone who isn't yelling, in a room with a noise floor.
-    let quiet = run_scenario(&[quiet_speaker(&audio, 0.055, 0.004)]);
+    let quiet = run_scenario(&[quiet_speaker(&audio, 0.055, 0.004)], &[MIC]);
     report("quiet, single lane", &quiet);
 
     // How every real meeting runs: mic and system audio both feeding the tap.
     // The speech is on the system lane; the mic lane is an empty room.
-    let both = run_scenario(&[
-        room_tone(audio.len(), 0.001, 0xB0B),
-        quiet_speaker(&audio, 1.0, 0.0004),
-    ]);
+    //
+    // The two rates differ on purpose. The mic runs at whatever its device
+    // offers while system audio is pinned to 48 kHz, so the lanes resample by
+    // different ratios — and `drain` sums them by position, which only works
+    // while they agree on where they are. A resampler that loses a fraction of a
+    // sample per callback slides one lane past the other, and the summed result
+    // smears into a conversation overlaid on a delayed copy of itself.
+    let both = run_scenario(
+        &[
+            room_tone(audio.len(), 0.001, 0xB0B),
+            quiet_speaker(&sys_audio, 1.0, 0.0004),
+        ],
+        &[MIC, SYS],
+    );
     report("two lanes (mic + system)", &both);
 
     let mut failures = Vec::new();
