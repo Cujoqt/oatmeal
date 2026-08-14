@@ -370,7 +370,10 @@ decisions, action items, open questions. Use '## ' headings and '- ' bullets.
 
 Be faithful to the transcript. Never invent names, numbers, dates or commitments that are \
 not there. If the transcript is too short or too garbled to summarize, say so plainly in \
-one sentence and stop.";
+one sentence and stop.
+
+Some source material may come from a video the user attached rather than the meeting \
+itself. When a point appears only in that material, end its line with \"(from video)\".";
 
 const RECAP_SYSTEM: &str = "\
 You answer questions about a meeting or lecture that is being recorded right now, using \
