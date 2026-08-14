@@ -34,6 +34,9 @@ whisper-rs = { version = "0.16.0", default-features = false, features = ["metal"
 # The `=` is load-bearing: a caret requirement would happily resolve to 0.1.152.
 llama-cpp-2 = { version = "=0.1.141", default-features = false, features = ["metal"] }
 encoding_rs = "0.8.35"
+# Decoding YouTube's m4a audio in-process, so Oatmeal needs no ffmpeg. Only the
+# AAC-in-MP4 path is compiled in: that is the one format `video.rs` requests.
+symphonia = { version = "0.5", default-features = false, features = ["isomp4", "aac"] }
 objc2-event-kit = { version = "0.3", features = ["EKEventStore", "EKEvent", "EKCalendarItem", "EKCalendar", "EKParticipant", "block2"] }
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", features = ["NSDate", "NSString", "NSArray", "NSEnumerator", "NSURL", "NSCalendar", "NSTimeZone", "NSDateFormatter"] }

@@ -281,9 +281,165 @@ fn yt_dlp_error(stderr: &str) -> String {
     }
 }
 
+/// Cut `range` out of already-decoded samples at `rate`.
+///
+/// Clamped against the real sample count rather than the probe's duration: the
+/// two disagree by a fraction of a second often enough, and indexing on the
+/// probe's number would panic on exactly the videos that round badly.
+fn slice_range(samples: &[f32], range: Range, rate: u32) -> Result<Vec<f32>, String> {
+    let rate = rate as f64;
+    let start = (range.start_secs * rate).round().max(0.0) as usize;
+    let end = ((range.end_secs * rate).round().max(0.0) as usize).min(samples.len());
+    if start >= samples.len() {
+        return Err("that range starts after the end of the video's audio".into());
+    }
+    if end <= start {
+        return Err("that range is empty".into());
+    }
+    Ok(samples[start..end].to_vec())
+}
+
+/// Ask yt-dlp for the m4a audio track only, into `dest_dir`. Returns its path.
+fn download_audio(id: &str, dest_dir: &Path) -> Result<PathBuf, String> {
+    let exe = ensure_yt_dlp()?;
+    let out_tpl = dest_dir.join(format!("{id}.%(ext)s"));
+    let out = Command::new(&exe)
+        // m4a specifically: YouTube's other audio format is Opus in WebM, which
+        // symphonia cannot decode. No `/bestaudio` fallback — a silent fallback
+        // to a format that fails at decode time reports the wrong problem.
+        .arg("-f")
+        .arg("bestaudio[ext=m4a]")
+        .arg("--no-playlist")
+        .arg("--no-warnings")
+        // yt-dlp's section download shells out to ffmpeg, which Oatmeal doesn't
+        // have — so the whole track comes down and the range is cut after decode.
+        .arg("-o")
+        .arg(&out_tpl)
+        .arg(format!("https://www.youtube.com/watch?v={id}"))
+        .output()
+        .map_err(|e| format!("couldn't run the YouTube helper: {e}"))?;
+
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        if stderr.to_lowercase().contains("requested format is not available") {
+            return Err("that video has no audio track Oatmeal can read".into());
+        }
+        return Err(yt_dlp_error(&stderr));
+    }
+
+    let path = dest_dir.join(format!("{id}.m4a"));
+    if !path.is_file() {
+        return Err("the download finished but produced no audio file".into());
+    }
+    Ok(path)
+}
+
+/// Decode an m4a to mono f32 samples plus their sample rate.
+fn decode_m4a(path: &Path) -> Result<(Vec<f32>, u32), String> {
+    use symphonia::core::audio::SampleBuffer;
+    use symphonia::core::codecs::DecoderOptions;
+    use symphonia::core::formats::FormatOptions;
+    use symphonia::core::io::MediaSourceStream;
+    use symphonia::core::meta::MetadataOptions;
+    use symphonia::core::probe::Hint;
+
+    let file = std::fs::File::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
+    let mss = MediaSourceStream::new(Box::new(file), Default::default());
+    let mut hint = Hint::new();
+    hint.with_extension("m4a");
+
+    let probed = symphonia::default::get_probe()
+        .format(&hint, mss, &FormatOptions::default(), &MetadataOptions::default())
+        .map_err(|e| format!("that audio isn't in a format Oatmeal can read: {e}"))?;
+    let mut format = probed.format;
+    let track = format
+        .tracks()
+        .iter()
+        .find(|t| t.codec_params.codec != symphonia::core::codecs::CODEC_TYPE_NULL)
+        .ok_or("that download contains no audio track")?;
+    let track_id = track.id;
+    let mut decoder = symphonia::default::get_codecs()
+        .make(&track.codec_params, &DecoderOptions::default())
+        .map_err(|e| format!("can't decode that audio: {e}"))?;
+
+    let mut samples: Vec<f32> = Vec::new();
+    let mut rate = 0u32;
+    let mut buf: Option<SampleBuffer<f32>> = None;
+    loop {
+        let packet = match format.next_packet() {
+            Ok(p) => p,
+            // End of stream arrives as an io error; anything decoded so far is
+            // still good, so this ends the loop rather than failing the import.
+            Err(_) => break,
+        };
+        if packet.track_id() != track_id {
+            continue;
+        }
+        let decoded = match decoder.decode(&packet) {
+            Ok(d) => d,
+            // A damaged packet mid-stream costs one frame, not the lecture.
+            Err(_) => continue,
+        };
+        let spec = *decoded.spec();
+        rate = spec.rate;
+        let channels = spec.channels.count().max(1);
+        let sb = buf.get_or_insert_with(|| {
+            SampleBuffer::<f32>::new(decoded.capacity() as u64, spec)
+        });
+        sb.copy_interleaved_ref(decoded);
+        // Mono mixdown, matching what the mic and system-audio lanes hand to
+        // Whisper. Averaging rather than taking one channel keeps a speaker
+        // who is panned to one side from vanishing.
+        for frame in sb.samples().chunks(channels) {
+            samples.push(frame.iter().sum::<f32>() / channels as f32);
+        }
+    }
+
+    if samples.is_empty() || rate == 0 {
+        return Err("that video's audio decoded to nothing".into());
+    }
+    Ok((samples, rate))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn slices_the_requested_seconds_out_of_the_samples() {
+        // 10 seconds at 16 kHz, each sample carrying its own index so the slice
+        // boundaries are checkable rather than merely the right length.
+        let samples: Vec<f32> = (0..160_000).map(|i| i as f32).collect();
+        let cut = slice_range(
+            &samples,
+            Range { start_secs: 2.0, end_secs: 5.0 },
+            16_000,
+        )
+        .unwrap();
+        assert_eq!(cut.len(), 48_000);
+        assert_eq!(cut[0], 32_000.0);
+        assert_eq!(*cut.last().unwrap(), 79_999.0);
+    }
+
+    #[test]
+    fn a_slice_past_the_end_of_the_audio_is_clamped_not_a_panic() {
+        // The probe's duration and the decoded length can disagree by a fraction of
+        // a second. Indexing on the probe's number would panic on that difference.
+        let samples: Vec<f32> = vec![1.0; 16_000 * 10];
+        let cut = slice_range(
+            &samples,
+            Range { start_secs: 9.0, end_secs: 12.0 },
+            16_000,
+        )
+        .unwrap();
+        assert_eq!(cut.len(), 16_000);
+    }
+
+    #[test]
+    fn refuses_a_slice_that_starts_past_the_audio() {
+        let samples: Vec<f32> = vec![1.0; 16_000];
+        assert!(slice_range(&samples, Range { start_secs: 5.0, end_secs: 8.0 }, 16_000).is_err());
+    }
 
     #[test]
     fn reads_the_id_out_of_every_youtube_url_shape() {
