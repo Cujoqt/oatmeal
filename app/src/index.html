@@ -548,6 +548,15 @@
     .qa { margin-bottom: 18px; animation: rise .3s ease both; }
     .qa .q { font: 600 14px var(--sans); color: var(--ink); margin-bottom: 6px; display: flex; gap: 8px; }
     .qa .q::before { content: "›"; color: var(--accent); }
+    /* Hidden until the block is hovered, like the folder rows' delete — but
+       still in the DOM and focusable, so tab and VoiceOver reach it. */
+    .qa .del {
+      flex: none; margin-left: auto; width: 20px; height: 20px; border-radius: 5px; border: 0;
+      background: none; color: var(--hint); cursor: pointer; opacity: 0;
+      display: inline-flex; align-items: center; justify-content: center;
+    }
+    .qa:hover .del, .qa .del:focus-visible { opacity: 1; }
+    .qa .del:hover { color: var(--danger); background: var(--hover); }
     .qa .a { font-size: 14.5px; line-height: 1.7; color: var(--ink-soft); }
     .qa .a.thinking { color: var(--faint); font-style: italic; }
     .qa .copy {

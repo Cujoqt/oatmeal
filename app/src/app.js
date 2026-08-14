@@ -1477,6 +1477,7 @@ async function runChat(prompt, pending, generate, { into = answersEl, disable = 
   const a = document.createElement('div')
   a.className = 'a thinking'
   a.textContent = pending
+  q.appendChild(dismiss(qa, a))
   qa.append(q, a)
   into.appendChild(qa)
   qa.scrollIntoView({ behavior: 'smooth', block: 'end' })
@@ -1501,6 +1502,29 @@ async function runChat(prompt, pending, generate, { into = answersEl, disable = 
     for (const el of disable) el.disabled = false
     refreshModelChip()
   }
+}
+
+const TRASH = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16" /><path d="M10 4h4M6 7l1 13h10l1-13" /><path d="M10 11v6M14 11v6" /></svg>'
+
+/// Throw one question and its answer away. The dashboard's list is never
+/// cleared for you — a note view wipes its answers when you open another note,
+/// but the library-wide ask has no such moment — so without this, every
+/// question asked in a session stays stacked above the agenda forever.
+///
+/// Removing the wrapper is enough: the caveat, the copy button and the citation
+/// chips are all inserted with `a.after()`, which puts them inside it. Dropping
+/// the streaming reference matters though — the token handler would otherwise
+/// keep writing into a node that is no longer in the document.
+function dismiss(qa, a) {
+  const b = document.createElement('button')
+  b.className = 'del'
+  b.title = 'Delete this question'
+  b.innerHTML = TRASH
+  b.addEventListener('click', () => {
+    if (streamingAnswer === a) streamingAnswer = null
+    qa.remove()
+  })
+  return b
 }
 
 /// The small print under a generated answer.
