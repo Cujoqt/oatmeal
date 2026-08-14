@@ -117,7 +117,11 @@ Recording** again after an update.
   first launch, an update check that asks GitHub for this repository's release
   list when the app starts, and — if you're using the Calendar features —
   EventKit itself running in-process. The update check sends nothing but the
-  request; it reads the newest release's tag and notes.
+  request. If you attach a YouTube video to a note, Oatmeal fetches that
+  video's audio from YouTube. That request tells Google which video you asked
+  for and the IP address you're asking from, but sends nothing about your
+  meetings, notes, or transcripts. The fetch happens only when you paste a link
+  and ask for it; it never happens on its own.
 - Recording people has consent rules that vary by place. Tell attendees
   you're taking notes.
 
