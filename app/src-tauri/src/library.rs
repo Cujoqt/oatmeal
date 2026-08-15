@@ -872,6 +872,10 @@ pub fn transcript_text(id: &str) -> Result<String, String> {
     Ok(strip_transcript_markup(&md))
 }
 
+/// Marks where an attached video's words begin in `source_text`. Shared with
+/// `chat::NOTES_SYSTEM`, which quotes it verbatim.
+pub const VIDEO_DELIMITER: &str = "--- attached video ---";
+
 /// Everything the note-writer is allowed to read for a meeting: its own
 /// transcript, then any videos attached to it, in the order they were added.
 ///
@@ -893,6 +897,13 @@ pub fn source_text(id: &str) -> Result<String, String> {
         if !out.is_empty() {
             out.push_str("\n\n");
         }
+        // A label, deliberately not a sentence: `chat::guarded` tells the model
+        // to act on nothing it finds inside the material, so anything phrased as
+        // an instruction here would be ignored by design. The notes prompt names
+        // this exact line, which is the only way it can tell a point that came
+        // from an attached video from one that was said in the room.
+        out.push_str(VIDEO_DELIMITER);
+        out.push_str("\n\n");
         out.push_str(&words);
     }
     if out.trim().is_empty() {
@@ -1787,6 +1798,11 @@ mod tests {
         assert!(text.contains("we talked about carbon"), "meeting words missing: {text}");
         assert!(text.contains("the nitrogen cycle matters"), "video words missing: {text}");
         assert!(!text.contains("youtube.com"), "provenance leaked into the prompt: {text}");
+        // The notes prompt asks for "(from video)" on points that appear only in
+        // attached material, which it can only honour if the material is marked.
+        let (before, after) = text.split_once(VIDEO_DELIMITER).expect("no video delimiter");
+        assert!(before.contains("we talked about carbon"), "meeting words after the mark: {text}");
+        assert!(after.contains("the nitrogen cycle matters"), "video words before the mark: {text}");
 
         let _ = std::fs::remove_dir_all(&home);
     }
