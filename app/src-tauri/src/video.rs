@@ -456,12 +456,39 @@ pub fn render_markdown(
     )
 }
 
+/// The model the transcription step will load, fetched now if it isn't here.
+///
+/// Before the download, not after: the audio fetch and decode take minutes and
+/// hundreds of megabytes, and spending all of that to then find there is nothing
+/// to transcribe with wastes every second of it. The message on failure is the
+/// one a person can act on — `transcribe`'s own is a developer's note about a
+/// path.
+fn ensure_whisper() -> Result<(), String> {
+    let model = crate::transcribe::resolve_accurate_path("");
+    if model.exists() {
+        return Ok(());
+    }
+    // `ensure_model` reports a failed *accurate* download and carries on, since
+    // a meeting can still be recorded with the live model. A video import
+    // cannot, so the path is checked again rather than trusting the Ok.
+    if let Err(e) = crate::model::ensure_model() {
+        eprintln!("[oatmeal] video import: model download failed: {e}");
+    }
+    if model.exists() {
+        return Ok(());
+    }
+    Err("Oatmeal needs its transcription model before it can read a video, and couldn't \
+         download it — check your connection and try again"
+        .into())
+}
+
 /// Attach a video to a meeting: download, decode, cut, transcribe, file it.
 /// Blocking and slow — minutes for a lecture. Must not run on the UI thread.
 pub fn import(meeting_id: &str, url: &str, start: &str, end: &str) -> Result<String, String> {
     let dir = crate::library::meeting_dir(meeting_id)?;
     let info = probe(url)?;
     let range = parse_range(start, end, info.duration_secs)?;
+    ensure_whisper()?;
 
     // The audio is scratch: it exists only to be decoded, and a meeting folder
     // full of 50 MB m4a files is not what the user asked to keep.
@@ -485,7 +512,13 @@ pub fn import(meeting_id: &str, url: &str, start: &str, end: &str) -> Result<Str
     // The notes now describe less than their sources do. Regenerating is a full
     // model run, so the user is told rather than charged for it silently —
     // exactly how a late-transcribed segment behaves.
-    crate::library::mark_notes_stale(&dir)?;
+    //
+    // The write above is the point of no return: the video is in the meeting
+    // whatever happens here. Failing the whole import over the flag would report
+    // a failure that didn't happen and invite a second import of the same video.
+    if let Err(e) = crate::library::mark_notes_stale(&dir) {
+        eprintln!("[oatmeal] video imported but couldn't flag the notes stale: {e}");
+    }
     Ok(path.display().to_string())
 }
 
