@@ -1345,12 +1345,13 @@ async function renderNotes(force = false, regenerate = false) {
   }
 }
 
-/// Audio was recorded into this meeting after the model wrote it up, so the
-/// notes on screen describe only part of it. Rewriting them is a full model run,
-/// so this says so and offers the button rather than spending the time unasked.
+/// A source was added to this meeting after the model wrote it up — more audio
+/// recorded, or a video attached — so the notes on screen describe only part of
+/// it. Rewriting them is a full model run, so this says so and offers the button
+/// rather than spending the time unasked.
 function staleBanner() {
   const wrap = el('div', 'stale')
-  wrap.append(el('span', '', 'More audio was recorded after these notes were written.'))
+  wrap.append(el('span', '', 'This meeting has more in it than these notes were written from.'))
   const go = el('button', '', 'Regenerate')
   go.addEventListener('click', () => renderNotes(true, true))
   wrap.append(go)

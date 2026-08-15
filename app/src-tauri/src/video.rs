@@ -190,10 +190,13 @@ pub fn ensure_yt_dlp() -> Result<PathBuf, String> {
         );
     }
 
+    // Executable *before* the rename: `dest.is_file()` short-circuits every
+    // later call, so a file that reached its final name without the bit set
+    // would stay broken forever with nothing in the app able to repair it.
+    make_executable(&part)?;
     // Only after a clean download does the real name appear, so an interrupted
     // fetch can never be mistaken for a working binary.
     std::fs::rename(&part, &dest).map_err(|e| format!("install yt-dlp: {e}"))?;
-    make_executable(&dest)?;
     Ok(dest)
 }
 
