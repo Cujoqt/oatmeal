@@ -1673,6 +1673,10 @@ videoImport.addEventListener('click', async () => {
     })
     resetVideoPanel()
     setStatus('Video added. Regenerate the notes to fold it in.')
+    // The import set `notes_stale` on disk; the cached record still says false,
+    // and `renderNotes` reads the cache — so without this reload the banner
+    // offering to regenerate never appears and the note looks unchanged.
+    await loadMeetings()
     await openNote(openId)
   } catch (e) {
     setStatus(String(e), true)
