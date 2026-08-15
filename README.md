@@ -117,11 +117,18 @@ Recording** again after an update.
   first launch, an update check that asks GitHub for this repository's release
   list when the app starts, and — if you're using the Calendar features —
   EventKit itself running in-process. The update check sends nothing but the
-  request. If you attach a YouTube video to a note, Oatmeal fetches that
-  video's audio from YouTube. That request tells Google which video you asked
-  for and the IP address you're asking from, but sends nothing about your
-  meetings, notes, or transcripts. The fetch happens only when you paste a link
-  and ask for it; it never happens on its own.
+  request.
+- Attaching a YouTube video to a note reaches the network twice more, and both
+  are worth knowing about. **Pasting the link already contacts YouTube** —
+  Oatmeal looks the video up to read its title and length before you press
+  Transcribe, so the request goes out as soon as you paste, not when you
+  confirm. And the first time you do this, Oatmeal downloads a **third-party
+  helper program, `yt-dlp`, from github.com and runs it on your machine**;
+  nothing else in Oatmeal does that. The version is pinned in the source, so
+  the app never fetches whatever build happens to be newest. These requests
+  tell Google which video you asked for and the IP address you're asking from,
+  but send nothing about your meetings, notes, or transcripts, and none of it
+  happens unless you paste a link.
 - Recording people has consent rules that vary by place. Tell attendees
   you're taking notes.
 
