@@ -81,6 +81,13 @@ const chipFinish = $('chipFinish')
 const chipContinue = $('chipContinue')
 const chipExport = $('chipExport')
 const chipFollowup = $('chipFollowup')
+const chipVideo = $('chipVideo')
+const videoPanel = $('videoPanel')
+const videoUrl = $('videoUrl')
+const videoMeta = $('videoMeta')
+const videoStart = $('videoStart')
+const videoEnd = $('videoEnd')
+const videoImport = $('videoImport')
 const chipDelete = $('chipDelete')
 const tmplChips = $('tmplChips')
 const tabNotes = $('tabNotes')
@@ -1149,6 +1156,7 @@ async function openNote(id) {
   noteTab = 'notes'
   showView('note')
   answersEl.innerHTML = ''
+  resetVideoPanel()
   renderSidebar()
   renderSuggestions()
 
@@ -1337,12 +1345,13 @@ async function renderNotes(force = false, regenerate = false) {
   }
 }
 
-/// Audio was recorded into this meeting after the model wrote it up, so the
-/// notes on screen describe only part of it. Rewriting them is a full model run,
-/// so this says so and offers the button rather than spending the time unasked.
+/// A source was added to this meeting after the model wrote it up — more audio
+/// recorded, or a video attached — so the notes on screen describe only part of
+/// it. Rewriting them is a full model run, so this says so and offers the button
+/// rather than spending the time unasked.
 function staleBanner() {
   const wrap = el('div', 'stale')
-  wrap.append(el('span', '', 'More audio was recorded after these notes were written.'))
+  wrap.append(el('span', '', 'This meeting has more in it than these notes were written from.'))
   const go = el('button', '', 'Regenerate')
   go.addEventListener('click', () => renderNotes(true, true))
   wrap.append(go)
@@ -1602,6 +1611,90 @@ function renderCitations(answerEl, sources) {
 }
 
 chipFollowup.addEventListener('click', draftFollowup)
+
+/// The video whose title and length the panel is currently showing, or null.
+/// The import button stays disabled until a probe has succeeded: a range can't
+/// be checked against a video nobody has looked up yet, and transcribing the
+/// wrong ten minutes is the failure this feature has to avoid.
+let probedVideo = null
+
+/// Hides the panel and blanks the url/range inputs, the probed-title line, and
+/// the probe result. Switching notes must call this: `probedVideo` and the
+/// input values otherwise survive the switch, so the panel would keep showing
+/// one note's video — with Transcribe still enabled — while `openId` points at
+/// a different note, and pressing it would attach that video to the wrong one.
+function resetVideoPanel() {
+  videoPanel.hidden = true
+  videoUrl.value = ''
+  videoStart.value = ''
+  videoEnd.value = ''
+  videoMeta.textContent = ''
+  probedVideo = null
+  videoImport.disabled = true
+}
+
+chipVideo.addEventListener('click', () => {
+  if (videoPanel.hidden) {
+    videoPanel.hidden = false
+    videoUrl.focus()
+  } else {
+    resetVideoPanel()
+  }
+})
+
+videoUrl.addEventListener('change', async () => {
+  const url = videoUrl.value.trim()
+  probedVideo = null
+  videoImport.disabled = true
+  if (!url) {
+    videoMeta.textContent = ''
+    return
+  }
+  videoMeta.textContent = 'Looking it up…'
+  try {
+    probedVideo = await invoke('video_probe', { url })
+    videoMeta.textContent = `${probedVideo.title} — ${clock(probedVideo.duration_secs)}`
+    videoImport.disabled = false
+  } catch (e) {
+    videoMeta.textContent = ''
+    setStatus(String(e), true)
+  }
+})
+
+videoImport.addEventListener('click', async () => {
+  if (!probedVideo || !openId) return
+  videoImport.disabled = true
+  setStatus('Transcribing the video — this takes a few minutes.')
+  try {
+    await invoke('video_import', {
+      meetingId: openId,
+      url: videoUrl.value.trim(),
+      start: videoStart.value,
+      end: videoEnd.value,
+    })
+    resetVideoPanel()
+    setStatus('Video added. Regenerate the notes to fold it in.')
+    // The import set `notes_stale` on disk; the cached record still says false,
+    // and `renderNotes` reads the cache — so without this reload the banner
+    // offering to regenerate never appears and the note looks unchanged.
+    await loadMeetings()
+    await openNote(openId)
+  } catch (e) {
+    setStatus(String(e), true)
+  } finally {
+    videoImport.disabled = !probedVideo
+  }
+})
+
+/// Seconds to `12:30` / `1:05:20`, for the panel's duration line.
+function clock(secs) {
+  const t = Math.max(0, Math.floor(secs))
+  const h = Math.floor(t / 3600)
+  const m = Math.floor((t % 3600) / 60)
+  const s = t % 60
+  const pad = (n) => String(n).padStart(2, '0')
+  return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`
+}
 
 // ── local model status ───────────────────────────────────────────────────────
 

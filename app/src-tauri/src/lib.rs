@@ -12,6 +12,7 @@ pub mod store;
 mod sysaudio;
 pub mod transcribe;
 pub mod update;
+pub mod video;
 mod window;
 
 use std::path::{Path, PathBuf};
@@ -898,6 +899,32 @@ fn install_update(app: tauri::AppHandle, state: tauri::State<'_, AppState>, url:
     Ok(())
 }
 
+/// What a YouTube URL points at, so the UI can show the title and reject a
+/// range typed past the end of it. Network and subprocess work — async.
+#[tauri::command(async)]
+fn video_probe(url: String) -> Result<video::VideoInfo, String> {
+    video::probe(&url)
+}
+
+/// Attach a video's watched stretch to a meeting. Minutes of Whisper — async.
+///
+/// Refused while a meeting is recording: this competes for the same cores as
+/// the live lane, and the live lane falling behind the speaker is the one thing
+/// that cannot be recovered afterwards.
+#[tauri::command(async)]
+fn video_import(
+    state: tauri::State<'_, AppState>,
+    meeting_id: String,
+    url: String,
+    start: String,
+    end: String,
+) -> Result<String, String> {
+    if is_session_active(state) {
+        return Err("finish the recording first — importing a video would slow it down".into());
+    }
+    video::import(&meeting_id, &url, &start, &end)
+}
+
 // ── Data compatibility ───────────────────────────────────────────────────────
 
 /// How this build's understanding of the on-disk format compares to what is
@@ -988,7 +1015,9 @@ pub fn run() {
             app_version,
             check_for_update,
             open_update_download,
-            install_update
+            install_update,
+            video_probe,
+            video_import
         ])
         .setup(|app| {
             // Before anything reads or writes a meeting: reconcile this build
@@ -1060,6 +1089,8 @@ mod tests {
             "check_for_update",
             "open_update_download",
             "install_update",
+            "video_probe",
+            "video_import",
             "search_snippets",
             "chat_model_status",
             "unload_chat_model",

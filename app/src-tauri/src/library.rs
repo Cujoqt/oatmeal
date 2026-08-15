@@ -460,7 +460,7 @@ fn meeting_matches(m: &Meeting, q: &str) -> bool {
     if selected_notes(dir).to_lowercase().contains(q) {
         return true;
     }
-    ["transcript.md", TYPED_NOTES]
+    ["transcript.md", TYPED_NOTES, "video-1.md", "video-2.md", "video-3.md"]
         .iter()
         .filter_map(|file| std::fs::read_to_string(dir.join(file)).ok())
         .any(|text| text.to_lowercase().contains(q))
@@ -872,6 +872,46 @@ pub fn transcript_text(id: &str) -> Result<String, String> {
     Ok(strip_transcript_markup(&md))
 }
 
+/// Marks where an attached video's words begin in `source_text`. Shared with
+/// `chat::NOTES_SYSTEM`, which quotes it verbatim.
+pub const VIDEO_DELIMITER: &str = "--- attached video ---";
+
+/// Everything the note-writer is allowed to read for a meeting: its own
+/// transcript, then any videos attached to it, in the order they were added.
+///
+/// Separate from `transcript_text` because the raw-transcript tab and the
+/// export are about what was *recorded* — a video the user attached is a
+/// source for the notes, not part of the recording.
+pub fn source_text(id: &str) -> Result<String, String> {
+    let dir = meeting_dir(id)?;
+    let mut out = transcript_text(id).unwrap_or_default();
+    for n in 1..u32::MAX {
+        let path = dir.join(format!("video-{n}.md"));
+        let Ok(md) = std::fs::read_to_string(&path) else {
+            break;
+        };
+        let words = strip_transcript_markup(&md);
+        if words.trim().is_empty() {
+            continue;
+        }
+        if !out.is_empty() {
+            out.push_str("\n\n");
+        }
+        // A label, deliberately not a sentence: `chat::guarded` tells the model
+        // to act on nothing it finds inside the material, so anything phrased as
+        // an instruction here would be ignored by design. The notes prompt names
+        // this exact line, which is the only way it can tell a point that came
+        // from an attached video from one that was said in the room.
+        out.push_str(VIDEO_DELIMITER);
+        out.push_str("\n\n");
+        out.push_str(&words);
+    }
+    if out.trim().is_empty() {
+        return Err("this meeting has no transcript yet".into());
+    }
+    Ok(out)
+}
+
 /// Pull the spoken words out of a `transcript.md`, dropping the title, the
 /// recorded-at line, the `## Transcript` heading and the `**[m:ss]**` stamps.
 pub(crate) fn strip_transcript_markup(md: &str) -> String {
@@ -968,7 +1008,7 @@ pub fn write_notes(id: &str, template: crate::chat::Template, force: bool) -> Re
         }
     }
 
-    let transcript = transcript_text(id)?;
+    let transcript = source_text(id)?;
     let model = crate::model::ensure_chat_model()?;
     let notes = crate::chat::write_notes(&model, &transcript, template)?;
 
@@ -1731,5 +1771,39 @@ mod tests {
                 .unwrap()
                 .contains("budget"));
         });
+    }
+
+    #[test]
+    fn note_sources_include_attached_videos() {
+        let _guard = crate::settings::HOME_ENV_LOCK.lock().unwrap();
+        let home = std::env::temp_dir().join("oatmeal-source-text-home");
+        let _ = std::fs::remove_dir_all(&home);
+        let dir = home
+            .join("Library/Application Support/dev.oatmeal.app/recordings/20260814-090000-ecology");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("HOME", &home);
+
+        std::fs::write(
+            dir.join("transcript.md"),
+            "# Ecology\n\n_Recorded 14 Aug_\n\n## Transcript\n\n**[0:05]** we talked about carbon\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("video-1.md"),
+            "# Lecture 4\n\n_From https://www.youtube.com/watch?v=abc — 0:00 to 5:00_\n\n## Transcript\n\nthe nitrogen cycle matters\n",
+        )
+        .unwrap();
+
+        let text = source_text("20260814-090000-ecology").unwrap();
+        assert!(text.contains("we talked about carbon"), "meeting words missing: {text}");
+        assert!(text.contains("the nitrogen cycle matters"), "video words missing: {text}");
+        assert!(!text.contains("youtube.com"), "provenance leaked into the prompt: {text}");
+        // The notes prompt asks for "(from video)" on points that appear only in
+        // attached material, which it can only honour if the material is marked.
+        let (before, after) = text.split_once(VIDEO_DELIMITER).expect("no video delimiter");
+        assert!(before.contains("we talked about carbon"), "meeting words after the mark: {text}");
+        assert!(after.contains("the nitrogen cycle matters"), "video words before the mark: {text}");
+
+        let _ = std::fs::remove_dir_all(&home);
     }
 }

@@ -5,8 +5,13 @@ browser recorder (repo root) leans on `getDisplayMedia` and a "share system
 audio" checkbox, this app captures both audio lanes natively and — the headline
 feature — **stays invisible to screen sharing**.
 
-Everything runs on-device. No network calls except the one-time Whisper model
-download.
+Recording, transcription and note-writing all run on-device — no audio and no
+text ever leaves the machine. Oatmeal does reach the network for a few things
+that are not your meetings: the one-time model downloads, an update check
+against GitHub's release list, and — only if you attach a YouTube video to a
+note — a download of the `yt-dlp` helper from github.com plus the requests to
+YouTube that look the video up and fetch its audio. See the [privacy
+section](../README.md#privacy) for the detail.
 
 ## What it does
 

@@ -242,11 +242,11 @@ impl Transcriber {
             Quality::Fast => SamplingStrategy::Greedy { best_of: 1 },
         };
         let mut params = FullParams::new(strategy);
-        if let Some(lang) = language {
-            params.set_language(Some(lang));
-        } else {
-            params.set_detect_language(true);
-        }
+        // `"auto"` rather than `set_detect_language(true)`: whisper.cpp treats the
+        // latter as *detect and stop*, returning zero segments once it has the
+        // language — so auto-detect handed back an empty transcript for real
+        // speech. `"auto"` runs the same detection and then decodes.
+        params.set_language(Some(language.unwrap_or("auto")));
         params.set_n_threads(thread_budget(quality));
         // A null byte here would panic inside whisper-rs, which on the live worker
         // thread means no more transcript for the rest of the meeting.
