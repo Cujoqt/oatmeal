@@ -1156,6 +1156,7 @@ async function openNote(id) {
   noteTab = 'notes'
   showView('note')
   answersEl.innerHTML = ''
+  resetVideoPanel()
   renderSidebar()
   renderSuggestions()
 
@@ -1616,9 +1617,28 @@ chipFollowup.addEventListener('click', draftFollowup)
 /// wrong ten minutes is the failure this feature has to avoid.
 let probedVideo = null
 
+/// Hides the panel and blanks the url/range inputs, the probed-title line, and
+/// the probe result. Switching notes must call this: `probedVideo` and the
+/// input values otherwise survive the switch, so the panel would keep showing
+/// one note's video — with Transcribe still enabled — while `openId` points at
+/// a different note, and pressing it would attach that video to the wrong one.
+function resetVideoPanel() {
+  videoPanel.hidden = true
+  videoUrl.value = ''
+  videoStart.value = ''
+  videoEnd.value = ''
+  videoMeta.textContent = ''
+  probedVideo = null
+  videoImport.disabled = true
+}
+
 chipVideo.addEventListener('click', () => {
-  videoPanel.hidden = !videoPanel.hidden
-  if (!videoPanel.hidden) videoUrl.focus()
+  if (videoPanel.hidden) {
+    videoPanel.hidden = false
+    videoUrl.focus()
+  } else {
+    resetVideoPanel()
+  }
 })
 
 videoUrl.addEventListener('change', async () => {
@@ -1651,12 +1671,7 @@ videoImport.addEventListener('click', async () => {
       start: videoStart.value,
       end: videoEnd.value,
     })
-    videoPanel.hidden = true
-    videoUrl.value = ''
-    videoStart.value = ''
-    videoEnd.value = ''
-    videoMeta.textContent = ''
-    probedVideo = null
+    resetVideoPanel()
     setStatus('Video added. Regenerate the notes to fold it in.')
     await openNote(openId)
   } catch (e) {
