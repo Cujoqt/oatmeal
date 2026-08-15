@@ -141,7 +141,7 @@ fn human(secs: f64) -> String {
 /// but it would also mean Oatmeal downloads and runs a build nobody here chose.
 /// When YouTube breaks this one, bump the constant and ship a release — the
 /// import error says exactly that rather than blaming the video.
-const YT_DLP_VERSION: &str = "2025.09.26";
+const YT_DLP_VERSION: &str = "2026.07.04";
 
 /// Where the downloaded yt-dlp lives.
 pub fn yt_dlp_path() -> PathBuf {
@@ -269,7 +269,7 @@ fn yt_dlp_error(stderr: &str) -> String {
         "that video isn't available".into()
     } else if low.contains("not available in your country") || low.contains("geo") {
         "that video isn't available in your region".into()
-    } else if low.contains("unable to extract") || low.contains("nsig") || low.contains("player response") {
+    } else if low.contains("unable to extract") || low.contains("nsig") || low.contains("player response") || low.contains("page needs to be reloaded") {
         "YouTube changed something Oatmeal's helper doesn't understand yet — updating Oatmeal should fix it".into()
     } else {
         let tail = stderr.trim().lines().last().unwrap_or("").trim();
