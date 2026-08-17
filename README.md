@@ -101,7 +101,7 @@ version, cannot leave a half-written note behind.
 
 Oatmeal checks this repository's releases when it starts. A newer version shows
 a strip you can dismiss; occasionally a release is marked required, and then the
-app asks you to update before continuing. If it can't reach GitHub it says
+app asks you to update before continuing (In app updates). If it can't reach GitHub it says
 nothing and carries on — you can always record offline.
 
 One wrinkle worth knowing: builds are ad-hoc signed, so macOS treats each
