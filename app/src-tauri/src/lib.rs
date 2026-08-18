@@ -1,4 +1,5 @@
 pub mod apple_calendar;
+mod autoanswer;
 pub mod chat;
 pub mod homework;
 pub mod library;
@@ -26,6 +27,11 @@ use sysaudio::SysAudioRecorder;
 
 /// Event carrying each piece of a streamed chat answer: `{ seq, text }`.
 const CHAT_TOKEN_EVENT: &str = "oatmeal://chat-token";
+
+/// Pieces of a streamed live auto-answer: `{ seq, text }`. Separate from
+/// `CHAT_TOKEN_EVENT` so the panel's answer stream never interleaves with an
+/// answer the user typed into the note window's ask box.
+const LIVE_ANSWER_EVENT: &str = "oatmeal://live-answer";
 
 /// Label of the floating live-transcript window declared in `tauri.conf.json`.
 const TRANSCRIPT_WINDOW: &str = "transcript";
@@ -57,6 +63,9 @@ pub struct AppState {
     /// Folder of the most recent meeting, so notes typed *after* it stopped keep
     /// landing next to that meeting's audio instead of vanishing.
     pub last_dir: Mutex<Option<String>>,
+    /// Rate limiter for the live panel's auto-answers, so answering questions
+    /// can't starve the live transcription that shares the same GPU.
+    pub auto_answer: Mutex<autoanswer::Gate>,
 }
 
 impl Default for AppState {
@@ -78,6 +87,7 @@ impl Default for AppState {
             live: Mutex::new(None),
             pending_notes: Mutex::new(None),
             last_dir: Mutex::new(None),
+            auto_answer: Mutex::new(autoanswer::Gate::default()),
         }
     }
 }
@@ -675,6 +685,96 @@ fn ask_meeting(
     chat::recap(&path, &transcript, &question, live, &mut chat_token_sink(app))
 }
 
+/// Answer a question the live panel overheard in the meeting, streaming a short
+/// reply drawn from the model's own knowledge. This is the auto-answer path: the
+/// panel calls it on its own when it detects a spoken question, so the limits
+/// that protect the recording live here, not in the UI.
+///
+/// - Only one answer runs at a time and a minimum interval sits between them
+///   (`autoanswer::Gate`), because Whisper and this model share the GPU.
+/// - Over-long "questions" are dropped as misrecognized run-ons.
+/// - The reply stays on the machine (local model) and is never written into the
+///   meeting; the panel shows it as unverified.
+///
+/// A refused claim returns an error the panel treats as "skip this one"; it is
+/// not shown to the user.
+#[tauri::command(async)]
+fn answer_live_question(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    question: String,
+) -> Result<String, String> {
+    let question = question.trim();
+    if question.is_empty() {
+        return Err("no question to answer".into());
+    }
+    if question.chars().count() > autoanswer::MAX_QUESTION_CHARS {
+        return Err("question is too long to auto-answer".into());
+    }
+
+    // Claim the gate up front and release it no matter how the answer ends. A
+    // poisoned lock means some other answer panicked mid-flight; treat that as
+    // "busy" rather than trying to recover the count.
+    {
+        let mut gate = state.auto_answer.lock().map_err(|_| "auto-answer busy")?;
+        if !gate.try_begin(std::time::Instant::now()) {
+            return Err("auto-answer is rate limited".into());
+        }
+    }
+    let result = generate_live_answer(&app, &state, question);
+    if let Ok(mut gate) = state.auto_answer.lock() {
+        gate.finish();
+    }
+    result
+}
+
+/// The generation half of `answer_live_question`, split out so the gate is
+/// always released even when this returns early.
+fn generate_live_answer(
+    app: &tauri::AppHandle,
+    state: &tauri::State<'_, AppState>,
+    question: &str,
+) -> Result<String, String> {
+    let recent = state
+        .live
+        .lock()
+        .ok()
+        .and_then(|l| l.as_ref().map(|s| s.lines()))
+        .unwrap_or_default()
+        .iter()
+        .map(|l| l.text.as_str())
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    let path = model::ensure_chat_model()?;
+    chat::answer_live(&path, &recent, question, &mut live_answer_sink(app.clone()))
+}
+
+/// Sink that streams a live auto-answer's tokens to the panel on its own event.
+/// `seq` starts at 1 so the panel can tell the first token — which clears the
+/// previous answer — from the rest.
+fn live_answer_sink(app: tauri::AppHandle) -> impl FnMut(&str) {
+    use tauri::Emitter;
+    let mut seq = 0u32;
+    move |piece: &str| {
+        seq += 1;
+        let _ = app.emit(
+            LIVE_ANSWER_EVENT,
+            serde_json::json!({ "seq": seq, "text": piece }),
+        );
+    }
+}
+
+/// Load the chat model into memory ahead of time, so the first auto-answer isn't
+/// paying the multi-second load while the user waits. The panel calls this when
+/// auto-answer is switched on. Idempotent: the model is kept resident, so later
+/// calls are cheap.
+#[tauri::command(async)]
+fn warm_chat_model() -> Result<(), String> {
+    let path = model::ensure_chat_model()?;
+    chat::warm(&path)
+}
+
 /// Answer a question from every meeting in the library, rather than from one
 /// the user has already picked. Streams the same `CHAT_TOKEN_EVENT` tokens as
 /// `ask_meeting`, and names the meetings it drew on so the UI can link to them.
@@ -990,6 +1090,8 @@ pub fn run() {
             meeting_segments,
             meeting_typed_notes,
             ask_meeting,
+            answer_live_question,
+            warm_chat_model,
             ask_library,
             draft_followup,
             unload_chat_model,
@@ -1084,6 +1186,8 @@ mod tests {
             "ensure_chat_model",
             "write_notes",
             "ask_meeting",
+            "answer_live_question",
+            "warm_chat_model",
             "ask_library",
             "draft_followup",
             "check_for_update",

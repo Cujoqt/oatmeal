@@ -24,6 +24,10 @@ const recBtn = el('rec')
 const searchBtn = el('searchBtn')
 const searchEl = el('search')
 const langEl = el('lang')
+const autoBtn = el('autoBtn')
+const answerEl = el('answer')
+const ansQEl = el('ansQ')
+const ansBodyEl = el('ansBody')
 
 let recording = false
 /// Every line currently shown, so search can re-render without re-fetching.
@@ -94,7 +98,113 @@ function addLine(line) {
   if (filtering) applyFilter()
 
   if (stick) scrollEl.scrollTop = scrollEl.scrollHeight
+
+  maybeAutoAnswer(text)
 }
+
+// ── auto-answer ────────────────────────────────────────────────────────────────
+//
+// When it is switched on, a line that looks like a question is handed to the
+// local model, which answers it in a card below the transcript from what it
+// already knows — no network, nothing written into the meeting. Detection is a
+// cheap heuristic here so the model is never woken just to decide whether a line
+// was even a question; the real limits (one answer at a time, a minimum gap
+// between them, a length cap) live in Rust, where the recording is protected.
+
+const AUTO_KEY = 'oatmeal.autoAnswer'
+
+/// Mirrors `autoanswer::MIN_INTERVAL` as a client-side pre-filter, so a burst of
+/// questions doesn't flash a "Thinking…" card the backend will only reject. The
+/// backend gate is still the authority.
+const AUTO_MIN_GAP_MS = 6000
+
+/// First words that make a line a question even without a "?" — speech
+/// recognition rarely punctuates one.
+const QUESTION_STARTS = new Set([
+  'what', 'why', 'how', 'when', 'where', 'who', 'whom', 'whose', 'which',
+  'can', 'could', 'should', 'would', 'will', 'is', 'are', 'am', 'was', 'were',
+  'do', 'does', 'did', 'has', 'have', 'had', 'may', 'might', 'shall',
+])
+
+let autoOn = false
+/// True while an answer is being generated, so we don't stack a second request
+/// on top of one the backend would refuse anyway.
+let answering = false
+/// When the last answer started, for the client-side gap check.
+let lastAskAt = 0
+
+function looksLikeQuestion(text) {
+  const t = text.trim()
+  if (t.length < 6) return false
+  if (t.endsWith('?')) return true
+  const first = t.toLowerCase().match(/^[a-z]+/)
+  return first ? QUESTION_STARTS.has(first[0]) : false
+}
+
+function maybeAutoAnswer(text) {
+  if (!autoOn || !recording || answering) return
+  if (Date.now() - lastAskAt < AUTO_MIN_GAP_MS) return
+  if (!looksLikeQuestion(text)) return
+  askAuto(text)
+}
+
+async function askAuto(question) {
+  answering = true
+  lastAskAt = Date.now()
+  ansQEl.textContent = question
+  ansBodyEl.textContent = 'Thinking…'
+  answerEl.classList.remove('hidden')
+  try {
+    // Tokens stream into the card via the liveAnswer listener; the returned
+    // string is the finished answer, which also covers the case where nothing
+    // streamed (e.g. an immediate refusal).
+    const full = await invoke('answer_live_question', { question })
+    if (full) ansBodyEl.textContent = full
+  } catch (err) {
+    // A rate-limit/busy refusal isn't worth showing — just retire the card if it
+    // never filled. Any other error is surfaced.
+    const msg = String(err)
+    if (/rate limited|busy|too long/.test(msg)) {
+      if (ansBodyEl.textContent === 'Thinking…') answerEl.classList.add('hidden')
+    } else {
+      ansBodyEl.textContent = msg
+    }
+  } finally {
+    answering = false
+  }
+}
+
+// The first token of a new answer clears the "Thinking…" placeholder; the rest
+// append. textContent throughout, so model output can never inject markup.
+listen(EVENTS.liveAnswer, (e) => {
+  const { seq, text } = e.payload || {}
+  if (!text) return
+  if (seq === 1) ansBodyEl.textContent = ''
+  ansBodyEl.textContent += text
+})
+
+el('ansClose').addEventListener('click', () => answerEl.classList.add('hidden'))
+
+function setAutoUI(on) {
+  autoOn = on
+  autoBtn.classList.toggle('on', on)
+  autoBtn.setAttribute('aria-pressed', String(on))
+  autoBtn.title = on ? 'Auto-answer questions (on)' : 'Auto-answer questions (off)'
+}
+
+autoBtn.addEventListener('click', () => {
+  const on = !autoOn
+  setAutoUI(on)
+  localStorage.setItem(AUTO_KEY, on ? '1' : '0')
+  if (on) {
+    // Load the model now so the first real answer isn't paying the load cost.
+    invoke('warm_chat_model').catch(() => {})
+    setNote('Auto-answer on — spoken questions get a quick, unverified answer.')
+  } else {
+    answerEl.classList.add('hidden')
+    setNote('Auto-answer off.')
+  }
+})
 
 function replaceAll(incoming) {
   lines = (incoming || [])
@@ -123,6 +233,9 @@ listen(EVENTS.session, async (e) => {
     // A fresh meeting starts with a clean sheet.
     replaceAll([])
     setNote('')
+    answerEl.classList.add('hidden')
+    // Warm the model up front so the first spoken question answers fast.
+    if (autoOn) invoke('warm_chat_model').catch(() => {})
   }
   setRecordingUI(Boolean(active))
 })
@@ -233,6 +346,8 @@ async function boot() {
         : `Transcribing in ${langEl.options[langEl.selectedIndex].text}.`,
     )
   })
+
+  setAutoUI(localStorage.getItem(AUTO_KEY) === '1')
 
   setRecordingUI(false)
   try {

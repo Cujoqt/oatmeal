@@ -10,6 +10,9 @@ export const BACKEND = {
   line: 'oatmeal://live-line',
   /// Each piece of a streamed chat answer: `{ seq, text }`.
   chatToken: 'oatmeal://chat-token',
+  /// Each piece of a streamed live auto-answer: `{ seq, text }`. Separate from
+  /// `chatToken` so the panel's answer never interleaves with a typed one.
+  liveAnswer: 'oatmeal://live-answer',
 }
 
 /// Events the two windows use to talk to each other.
