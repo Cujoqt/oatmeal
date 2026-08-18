@@ -69,6 +69,37 @@
     }
     #note.err { color: var(--red); }
 
+    /* ── auto-answer ───────────────────────────────────────────────────────
+     * A dismissible card for the answer to a question overheard in the room.
+     * In flow above the note, not floating, so it never lies across the last
+     * transcript line or the footer. */
+    #autoBtn.on { color: var(--green); }
+    #answer {
+      flex: 0 0 auto; margin: .2rem .8rem .4rem;
+      background: var(--surface-2); border: 1px solid var(--line);
+      border-left: 2px solid var(--green); border-radius: var(--r-md);
+      padding: .6rem .8rem; animation: fade .2s ease both;
+    }
+    #answer.hidden { display: none; }
+    #answer .ans-top { display: flex; align-items: flex-start; gap: .6rem; }
+    #answer .ans-q {
+      flex: 1; font-size: .78rem; color: var(--ink-muted);
+      font-style: italic; line-height: 1.4;
+    }
+    #answer .ans-x {
+      flex: 0 0 auto; background: none; border: 0; cursor: pointer;
+      color: var(--ink-faint); font-size: 1.1rem; line-height: 1; padding: 0 .1rem;
+    }
+    #answer .ans-x:hover { color: var(--ink); }
+    #answer .ans-body {
+      font-size: .9rem; line-height: 1.5; color: var(--ink);
+      margin-top: .3rem; white-space: pre-wrap;
+    }
+    #answer .ans-tag {
+      margin-top: .4rem; font-size: .7rem; color: var(--ink-faint);
+      text-transform: uppercase; letter-spacing: .04em;
+    }
+
     /* ── consent bar ───────────────────────────────────────────────────── */
     .consent {
       flex: 0 0 auto; margin: .4rem .8rem .6rem;
@@ -105,6 +136,12 @@
       </button>
       <input id="search" placeholder="Search transcript" />
       <div class="right">
+        <button class="icon-btn" id="autoBtn" title="Auto-answer questions (off)" aria-pressed="false">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M9.5 9a2.5 2.5 0 1 1 3.5 2.3c-.9.4-1.5 1-1.5 2M11.5 18h.01" />
+            <circle cx="12" cy="12" r="9" />
+          </svg>
+        </button>
         <button class="icon-btn" id="settings" title="Transcription settings">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round">
             <path d="M8 4v6M8 14v6M16 4v3M16 11v9" />
@@ -132,6 +169,15 @@
       </div>
       <div id="lines" class="hidden"></div>
     </main>
+
+    <div id="answer" class="hidden">
+      <div class="ans-top">
+        <span class="ans-q" id="ansQ"></span>
+        <button class="ans-x" id="ansClose" title="Dismiss">×</button>
+      </div>
+      <div class="ans-body" id="ansBody"></div>
+      <div class="ans-tag">AI · unverified</div>
+    </div>
 
     <div id="note"></div>
 
