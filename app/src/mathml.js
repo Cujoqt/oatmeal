@@ -163,3 +163,75 @@ function parseTokens(ts, depth) {
 export function parseLatex(src) {
   return parseTokens(tokenize(String(src)), 0)
 }
+
+const MATHML_NS = 'http://www.w3.org/1998/Math/MathML'
+
+function m(tag, text) {
+  const el = document.createElementNS(MATHML_NS, tag)
+  // textContent, never innerHTML — this renders model output, and the promise
+  // that model output can never become markup is the whole reason the rest of
+  // the app goes through textContent too.
+  if (text !== undefined) el.textContent = text
+  return el
+}
+
+function row(nodes) {
+  const r = m('mrow')
+  for (const n of nodes) r.appendChild(emit(n))
+  return r
+}
+
+function emit(node) {
+  switch (node.t) {
+    case 'num': return m('mn', node.v)
+    case 'ident': return m('mi', node.v)
+    case 'op': return m('mo', node.v)
+    case 'fn': return m('mi', node.v)
+    case 'raw': return m('mtext', node.v)
+    case 'group': return row(node.items)
+    case 'frac': {
+      const f = m('mfrac')
+      f.append(row(node.num), row(node.den))
+      return f
+    }
+    case 'sqrt': {
+      const s = m('msqrt')
+      s.appendChild(row(node.arg))
+      return s
+    }
+    case 'sup': {
+      const s = m('msup')
+      s.append(emit(node.base), row(node.over))
+      return s
+    }
+    case 'sub': {
+      const s = m('msub')
+      s.append(emit(node.base), row(node.under))
+      return s
+    }
+    case 'subsup': {
+      const s = m('msubsup')
+      s.append(emit(node.base), row(node.under), row(node.over))
+      return s
+    }
+    case 'bigop': {
+      const glyph = m('mo', BIGOPS[node.v])
+      if (!node.under.length && !node.over.length) return glyph
+      // munderover stacks the limits above and below, which is what makes a
+      // definite integral read as one.
+      const u = m('munderover')
+      u.append(glyph, row(node.under), row(node.over))
+      return u
+    }
+    default: return m('mtext', String(node.v ?? ''))
+  }
+}
+
+/// Typeset a LaTeX fragment. Returns a `<math>` element, always — unsupported
+/// input degrades to plain text inside it rather than failing.
+export function toMathML(latex, display = false) {
+  const math = m('math')
+  if (display) math.setAttribute('display', 'block')
+  math.appendChild(row(parseLatex(latex)))
+  return math
+}
