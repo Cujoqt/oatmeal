@@ -57,7 +57,16 @@ pub struct Settings {
     pub followup_style: String,
     /// The instruction to use when `followup_style` is `custom`.
     pub followup_custom: String,
+    /// How many seconds of one voice to read as a single paragraph in the
+    /// transcript. 0 means "whatever the build defaults to" — see
+    /// `DEFAULT_CHUNK_SECS`.
+    pub chunk_seconds: u32,
 }
+
+/// How long a speaker's turn runs before the transcript breaks it into another
+/// paragraph. Long enough that a normal answer stays in one block, short enough
+/// that a lecture is still readable.
+pub const DEFAULT_CHUNK_SECS: u32 = 30;
 
 pub fn load() -> Settings {
     let doc = read_raw();
@@ -66,6 +75,14 @@ pub fn load() -> Settings {
         language: str_field(&doc, "language"),
         followup_style: str_field(&doc, "followupStyle"),
         followup_custom: str_field(&doc, "followupCustom"),
+        // A config written before this setting existed, or hand-edited to
+        // something absurd, reads as the default rather than as zero-length
+        // paragraphs.
+        chunk_seconds: doc
+            .get("chunkSeconds")
+            .and_then(|v| v.as_u64())
+            .map(|v| (v as u32).clamp(5, 300))
+            .unwrap_or(DEFAULT_CHUNK_SECS),
     }
 }
 
@@ -75,6 +92,7 @@ pub fn save(
     language: &str,
     followup_style: &str,
     followup_custom: &str,
+    chunk_seconds: u32,
 ) -> Result<Settings, String> {
     let mut doc = read_raw();
     let obj = doc
@@ -84,6 +102,12 @@ pub fn save(
     obj.insert("language".into(), language.trim().into());
     obj.insert("followupStyle".into(), followup_style.trim().into());
     obj.insert("followupCustom".into(), followup_custom.trim().into());
+    // Clamped rather than rejected: a nonsense value in a hand-edited config
+    // should not stop the rest of the settings saving.
+    obj.insert(
+        "chunkSeconds".into(),
+        chunk_seconds.clamp(5, 300).into(),
+    );
     write(&doc)?;
     Ok(load())
 }

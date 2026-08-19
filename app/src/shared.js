@@ -13,6 +13,9 @@ export const BACKEND = {
   /// Each piece of a streamed live auto-answer: `{ seq, text }`. Separate from
   /// `chatToken` so the panel's answer never interleaves with a typed one.
   liveAnswer: 'oatmeal://live-answer',
+  /// The machine slept mid-recording: `{ asleep_ms }`. Nothing was captured for
+  /// that stretch, so the take is stopped rather than left with a hole in it.
+  slept: 'oatmeal://slept',
 }
 
 /// Events the two windows use to talk to each other.

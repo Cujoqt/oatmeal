@@ -165,7 +165,7 @@ fn remote_size(url: &str) -> Option<u64> {
         .last()
 }
 
-fn download_to(dest: &Path, url: &str) -> Result<(), String> {
+pub(crate) fn download_to(dest: &Path, url: &str) -> Result<(), String> {
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("create models dir {}: {e}", parent.display()))?;

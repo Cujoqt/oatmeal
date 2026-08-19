@@ -1,6 +1,7 @@
 pub mod apple_calendar;
 mod autoanswer;
 pub mod chat;
+pub mod diarize;
 pub mod homework;
 pub mod library;
 pub mod live;
@@ -10,6 +11,7 @@ pub mod recall;
 pub mod session;
 pub mod settings;
 pub mod store;
+mod sleep;
 mod sysaudio;
 pub mod transcribe;
 pub mod update;
@@ -32,6 +34,11 @@ const CHAT_TOKEN_EVENT: &str = "oatmeal://chat-token";
 /// `CHAT_TOKEN_EVENT` so the panel's answer stream never interleaves with an
 /// answer the user typed into the note window's ask box.
 const LIVE_ANSWER_EVENT: &str = "oatmeal://live-answer";
+
+/// Event telling the UI the machine slept mid-recording: `{ asleep_ms }`. The
+/// audio for that stretch does not exist, so the take is stopped rather than
+/// left with a hole in it.
+const SLEPT_EVENT: &str = "oatmeal://slept";
 
 /// Label of the floating live-transcript window declared in `tauri.conf.json`.
 const TRANSCRIPT_WINDOW: &str = "transcript";
@@ -437,6 +444,74 @@ fn set_transcript_window_visible(app: tauri::AppHandle, visible: bool) -> Result
         win.hide().map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+/// What one speaker pass found.
+#[derive(serde::Serialize)]
+struct SpeakerResult {
+    /// Transcript lines that came away with a voice on them.
+    labelled: usize,
+    /// Distinct voices heard.
+    speakers: usize,
+}
+
+/// Whether the speaker models are already downloaded.
+#[tauri::command]
+fn speaker_models_ready() -> bool {
+    diarize::models_present()
+}
+
+/// Roughly what the speaker models weigh, for the UI's copy.
+#[tauri::command]
+fn speaker_models_mb() -> u32 {
+    diarize::APPROX_MB
+}
+
+/// Fetch the speaker models. ~46 MB the first time, so off the UI thread.
+#[tauri::command(async)]
+fn ensure_speaker_models() -> Result<(), String> {
+    diarize::ensure_models().map(|_| ())
+}
+
+/// Work out who said each line of a meeting's transcript and write the voices
+/// into it.
+///
+/// A second pass over the whole recording — minutes for a long meeting — so it
+/// is `(async)` and never part of stopping: the transcript is already readable
+/// while this runs, and `transcript.md` is rewritten in place when it lands.
+#[tauri::command(async)]
+fn identify_speakers(id: String) -> Result<SpeakerResult, String> {
+    let meeting = library::meeting(&id)?;
+    let dir = PathBuf::from(&meeting.dir);
+
+    let samples = session::meeting_samples(&dir);
+    if samples.is_empty() {
+        return Err("this meeting has no audio left to listen to".into());
+    }
+    let spans = diarize::diarize_samples(&samples)?;
+    let labelled = diarize::label_transcript(&dir, &spans)?;
+
+    let mut ids: Vec<i32> = spans.iter().map(|s| s.speaker).collect();
+    ids.sort_unstable();
+    ids.dedup();
+    Ok(SpeakerResult {
+        labelled,
+        speakers: ids.len(),
+    })
+}
+
+/// Pin the floating transcript window to whatever Space you switch to.
+///
+/// Always-on-top only keeps the panel above other windows on the Space it was
+/// opened in, so swiping to the call left the live lines and the auto-answer
+/// behind. Pinning is a plain `#[tauri::command]` on purpose: it talks to
+/// AppKit, which is main-thread-only.
+#[tauri::command]
+fn set_transcript_pinned(app: tauri::AppHandle, pinned: bool) -> Result<(), String> {
+    let win = app
+        .get_webview_window(TRANSCRIPT_WINDOW)
+        .ok_or("transcript window not found")?;
+    window::set_pinned(&win, pinned)
 }
 
 /// Whether the floating transcript window is currently on screen.
@@ -887,12 +962,14 @@ fn save_settings(
     language: String,
     followup_style: String,
     followup_custom: String,
+    chunk_seconds: u32,
 ) -> Result<settings::Settings, String> {
     settings::save(
         &display_name,
         &language,
         &followup_style,
         &followup_custom,
+        chunk_seconds,
     )
 }
 
@@ -1083,6 +1160,11 @@ pub fn run() {
             live_lines,
             save_notes,
             set_transcript_window_visible,
+            set_transcript_pinned,
+            speaker_models_ready,
+            speaker_models_mb,
+            ensure_speaker_models,
+            identify_speakers,
             is_transcript_window_visible,
             ensure_chat_model,
             chat_model_status,
@@ -1148,6 +1230,23 @@ pub fn run() {
                     }
                 }
             }
+            // A machine that sleeps mid-meeting records nothing until it wakes.
+            // The UI stops the take and says so; Rust only reports the gap.
+            let handle = app.handle().clone();
+            sleep::on_wake(move |asleep_ms| {
+                use tauri::Emitter;
+                let recording = handle
+                    .state::<AppState>()
+                    .session
+                    .lock()
+                    .map(|s| s.is_some())
+                    .unwrap_or(false);
+                if !recording {
+                    return;
+                }
+                let _ = handle.emit(SLEPT_EVENT, serde_json::json!({ "asleep_ms": asleep_ms }));
+            });
+
             Ok(())
         })
         .build(tauri::generate_context!())
@@ -1198,6 +1297,8 @@ mod tests {
             "search_snippets",
             "chat_model_status",
             "unload_chat_model",
+            "ensure_speaker_models",
+            "identify_speakers",
         ] {
             let decl = format!("fn {name}(");
             let at = src
@@ -1210,6 +1311,27 @@ mod tests {
                  main thread freezes the UI"
             );
         }
+    }
+
+    /// Tauri's `dragDropEnabled` defaults to true, which hands every drag that
+    /// enters the webview to the native file-drop handler. That handler always
+    /// reports the drag as handled, so wry never forwards it to the page and
+    /// HTML5 `dragover`/`drop` never fire — which is why dragging a meeting
+    /// onto a folder in the sidebar did nothing. Oatmeal accepts no dropped
+    /// files, so the native handler has nothing to do here.
+    #[test]
+    fn main_window_leaves_html_drag_and_drop_to_the_page() {
+        let conf = include_str!("../tauri.conf.json");
+        let main = conf
+            .split("\"label\": \"main\"")
+            .nth(1)
+            .expect("main window in tauri.conf.json");
+        let main = &main[..main.find('}').expect("end of the main window block")];
+        assert!(
+            main.contains("\"dragDropEnabled\": false"),
+            "the main window must set dragDropEnabled: false, or the sidebar's \
+             drag-to-folder stops working"
+        );
     }
 
     /// The clock on screen counts this take, not the meeting. Continuing a

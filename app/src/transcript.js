@@ -25,6 +25,7 @@ const searchBtn = el('searchBtn')
 const searchEl = el('search')
 const langEl = el('lang')
 const autoBtn = el('autoBtn')
+const pinBtn = el('pin')
 const answerEl = el('answer')
 const ansQEl = el('ansQ')
 const ansBodyEl = el('ansBody')
@@ -70,6 +71,31 @@ function atBottom() {
   return scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight < 60
 }
 
+/// Whether new lines keep the view on the newest one.
+///
+/// It is a remembered decision rather than a measurement taken as each line
+/// lands: a panel that is on another Space, behind a full-screen call or hidden
+/// has no usable scroll metrics, so measuring at that moment reads as "scrolled
+/// up" and the panel comes back parked in the middle of the meeting. Only a real
+/// scroll by the user changes it.
+let follow = true
+
+function toBottom() {
+  scrollEl.scrollTop = scrollEl.scrollHeight
+}
+
+scrollEl.addEventListener('scroll', () => {
+  // A hidden panel reports zeros; that is not the user scrolling away.
+  if (scrollEl.clientHeight) follow = atBottom()
+})
+
+// Back from another Space, or from behind whatever was in front: catch up on
+// everything that arrived while the panel was away.
+window.addEventListener('focus', () => { if (follow) toBottom() })
+document.addEventListener('visibilitychange', () => {
+  if (follow && !document.hidden) toBottom()
+})
+
 function rowFor(line) {
   const div = document.createElement('div')
   div.className = 'line'
@@ -80,8 +106,6 @@ function rowFor(line) {
 function addLine(line) {
   const text = (line.text || '').trim()
   if (!text) return
-  const stick = atBottom()
-
   const row = { at_ms: line.at_ms || 0, text }
   lines.push(row)
   linesEl.appendChild(rowFor(row))
@@ -97,7 +121,7 @@ function addLine(line) {
   // Only the new row needs a decision, and only when a search is actually on.
   if (filtering) applyFilter()
 
-  if (stick) scrollEl.scrollTop = scrollEl.scrollHeight
+  if (follow) toBottom()
 
   maybeAutoAnswer(text)
 }
@@ -154,6 +178,7 @@ async function askAuto(question) {
   ansQEl.textContent = question
   ansBodyEl.textContent = 'Thinking…'
   answerEl.classList.remove('hidden')
+  if (follow) toBottom()
   try {
     // Tokens stream into the card via the liveAnswer listener; the returned
     // string is the finished answer, which also covers the case where nothing
@@ -181,9 +206,43 @@ listen(EVENTS.liveAnswer, (e) => {
   if (!text) return
   if (seq === 1) ansBodyEl.textContent = ''
   ansBodyEl.textContent += text
+  // The card grows in flow, taking height off the transcript above it — without
+  // this the newest lines slide out of sight as the answer streams in.
+  if (follow) toBottom()
 })
 
 el('ansClose').addEventListener('click', () => answerEl.classList.add('hidden'))
+
+// ── pin ──────────────────────────────────────────────────────────────────────
+//
+// Always-on-top only holds within one Space, so swiping over to the call left
+// the panel behind. Pinned, it joins every Space and may sit over a full-screen
+// app; the flag is remembered so it comes back pinned next time.
+
+const PIN_KEY = 'oatmeal.pin'
+let pinned = false
+
+function setPinUI(on) {
+  pinned = on
+  pinBtn.classList.toggle('on', on)
+  pinBtn.setAttribute('aria-pressed', String(on))
+  pinBtn.title = on ? 'Pinned over every Space (on)' : 'Pin over every Space (off)'
+}
+
+async function applyPin(on) {
+  setPinUI(on)
+  localStorage.setItem(PIN_KEY, on ? '1' : '0')
+  try {
+    await invoke('set_transcript_pinned', { pinned: on })
+  } catch (err) {
+    setNote(String(err), true)
+  }
+}
+
+pinBtn.addEventListener('click', () => {
+  applyPin(!pinned)
+  setNote(pinned ? 'Pinned — the panel follows you across Spaces.' : 'Unpinned.')
+})
 
 function setAutoUI(on) {
   autoOn = on
@@ -215,7 +274,7 @@ function replaceAll(incoming) {
   for (const l of lines) linesEl.appendChild(rowFor(l))
   refresh()
   applyFilter()
-  scrollEl.scrollTop = scrollEl.scrollHeight
+  toBottom()
 }
 
 // ── events ───────────────────────────────────────────────────────────────────
@@ -348,6 +407,7 @@ async function boot() {
   })
 
   setAutoUI(localStorage.getItem(AUTO_KEY) === '1')
+  applyPin(localStorage.getItem(PIN_KEY) === '1')
 
   setRecordingUI(false)
   try {

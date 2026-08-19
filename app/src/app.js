@@ -66,6 +66,7 @@ const languageEl = $('language')
 const followupStyleEl = $('followupStyle')
 const followupCustomEl = $('followupCustom')
 const followupCustomField = $('followupCustomField')
+const chunkSecondsEl = $('chunkSeconds')
 const modelPathEl = $('modelPath')
 const settingsNote = $('settingsNote')
 const acctEl = $('acct')
@@ -89,6 +90,7 @@ const videoStart = $('videoStart')
 const videoEnd = $('videoEnd')
 const videoImport = $('videoImport')
 const chipDelete = $('chipDelete')
+const chipSpeakers = $('chipSpeakers')
 const tmplChips = $('tmplChips')
 const tabNotes = $('tabNotes')
 const tabRaw = $('tabRaw')
@@ -143,6 +145,17 @@ let searchTimer = null
 let searchSeq = 0
 let folders = []
 let currentFolder = null
+/// Seconds of one voice read as a single transcript paragraph. Mirrored into
+/// localStorage because the transcript renders long before Settings is opened,
+/// and the config lives a Rust call away.
+const CHUNK_KEY = 'oatmeal.chunkSeconds'
+const DEFAULT_CHUNK_SECS = 30
+
+function chunkSeconds() {
+  const v = Number(localStorage.getItem(CHUNK_KEY))
+  return v >= 5 && v <= 300 ? v : DEFAULT_CHUNK_SECS
+}
+
 const SORT_KEY = 'oatmeal.sort'
 /// 'new' | 'old' | 'az'. One sort for whatever list is on screen, folder or
 /// not — a per-folder setting would need a stored map and a rule for folders
@@ -431,6 +444,7 @@ async function stopRecording() {
     // Land in the note that was just recorded — that's the thing worth reading.
     if (landedId && meetings.some((m) => m.id === landedId)) openNote(landedId)
   }
+  return landedId
 }
 
 /// Transcribe audio that was recorded but never written up — Oatmeal was killed
@@ -818,7 +832,12 @@ function renderSidebar() {
     s.textContent = [fmtWhen(new Date(m.started_at)), fmtDuration(m.duration_secs)].filter(Boolean).join(' · ')
     txt.append(t, s)
 
-    item.append(dot, txt)
+    const more = el('button', 'row-more', '⋯')
+    more.title = 'Meeting options'
+    more.setAttribute('aria-label', `Options for ${m.title}`)
+    more.addEventListener('click', (e) => { e.stopPropagation(); openMeetingMenu(more, m) })
+
+    item.append(dot, txt, more)
     item.addEventListener('click', () => openNote(m.id))
     item.draggable = true
     item.addEventListener('dragstart', (e) => {
@@ -831,6 +850,96 @@ function renderSidebar() {
   }
 }
 
+
+/// Everything you can do to a meeting without opening it. The move items are
+/// the click path to what dragging a row onto a folder does, so filing a
+/// meeting no longer depends on a drag landing.
+function openMeetingMenu(anchor, m) {
+  const items = [{ head: 'Move to' }]
+  const targets = folders.filter((f) => f.name !== m.folder)
+  if (!targets.length) items.push({ hint: folders.length ? 'Already filed here' : 'No folders yet' })
+  for (const f of targets) items.push({ label: f.name, run: () => dropMeetingOn(f.name, m.id) })
+  if (m.folder) items.push({ label: 'Unsorted', run: () => dropMeetingOn(null, m.id) })
+  items.push({ sep: true })
+  items.push({ label: 'Delete', danger: true, confirm: true, run: () => deleteMeeting(m.id) })
+  openMenu(anchor, items)
+}
+
+async function deleteMeeting(id) {
+  try {
+    await invoke('delete_meeting', { id })
+    await refreshLibrary()
+    if (openId === id) showHome()
+  } catch (e) {
+    setStatus(String(e), true)
+  }
+}
+
+/// One row menu at a time, anchored under the button that opened it.
+///
+/// Items are `{ label, danger, confirm, run }`, plus `{ head }`, `{ hint }` and
+/// `{ sep }` for the non-clickable parts. `confirm` arms the item on the first
+/// click and runs it on the second — the two-step the note view's delete chip
+/// uses, rather than a native `confirm()`, which blocks the webview and looks
+/// like a browser rather than Oatmeal.
+let menuEl = null
+
+function closeMenu() {
+  if (!menuEl) return
+  menuEl.remove()
+  menuEl = null
+  document.removeEventListener('mousedown', onMenuOutside, true)
+  document.removeEventListener('keydown', onMenuKey, true)
+  document.removeEventListener('scroll', closeMenu, true)
+  window.removeEventListener('resize', closeMenu)
+}
+
+function onMenuOutside(e) {
+  if (menuEl && !menuEl.contains(e.target)) closeMenu()
+}
+
+function onMenuKey(e) {
+  if (e.key === 'Escape') closeMenu()
+}
+
+function openMenu(anchorEl, items) {
+  closeMenu()
+  const menu = el('div', 'menu')
+  for (const it of items) {
+    if (it.head) { menu.appendChild(el('div', 'head', it.head)); continue }
+    if (it.hint) { menu.appendChild(el('div', 'hint', it.hint)); continue }
+    if (it.sep) { menu.appendChild(el('div', 'sep')); continue }
+    const b = el('button', it.danger ? 'danger' : '', it.label)
+    b.addEventListener('click', (e) => {
+      e.stopPropagation()
+      if (it.confirm && b.dataset.armed !== '1') {
+        b.dataset.armed = '1'
+        b.textContent = `Really ${it.label.toLowerCase()}?`
+        return
+      }
+      closeMenu()
+      it.run()
+    })
+    menu.appendChild(b)
+  }
+  document.body.appendChild(menu)
+
+  // Measured after it is in the document — an unrendered menu has no size, and
+  // a menu opened from the bottom of the list would hang off the window.
+  const r = anchorEl.getBoundingClientRect()
+  const w = menu.offsetWidth
+  const h = menu.offsetHeight
+  menu.style.left = `${Math.max(8, Math.min(r.right - w, window.innerWidth - w - 8))}px`
+  menu.style.top = `${r.bottom + 6 + h <= window.innerHeight ? r.bottom + 6 : Math.max(8, r.top - h - 6)}px`
+
+  menuEl = menu
+  menu.querySelector('button')?.focus()
+  document.addEventListener('mousedown', onMenuOutside, true)
+  document.addEventListener('keydown', onMenuKey, true)
+  // Capture: the sidebar's lists scroll, not the window.
+  document.addEventListener('scroll', closeMenu, true)
+  window.addEventListener('resize', closeMenu)
+}
 
 /// The tilted thing that follows the cursor during a drag.
 ///
@@ -918,10 +1027,18 @@ function renderFolders() {
     const row = el('button', 'folder-row' + (f.name === currentFolder ? ' on' : ''))
     const name = el('span', 'name', f.name)
     const count = el('span', 'count', String(f.count))
-    const del = el('button', 'del', '×')
-    del.title = `Delete "${f.name}"`
-    del.addEventListener('click', (e) => { e.stopPropagation(); askDeleteFolder(row, f.name) })
-    row.append(name, count, del)
+    const more = el('button', 'row-more', '⋯')
+    more.title = 'Folder options'
+    more.setAttribute('aria-label', `Options for ${f.name}`)
+    more.addEventListener('click', (e) => {
+      e.stopPropagation()
+      openMenu(more, [
+        { label: 'Rename', run: () => startRenameFolder(row, name, f.name) },
+        { sep: true },
+        { label: 'Delete', danger: true, run: () => askDeleteFolder(row, f.name) },
+      ])
+    })
+    row.append(name, count, more)
 
     row.addEventListener('click', () => selectFolder(f.name))
     name.addEventListener('dblclick', (e) => { e.stopPropagation(); startRenameFolder(row, name, f.name) })
@@ -1186,12 +1303,44 @@ function renderNoteActions() {
   chipContinue.hidden = recording && !live
   chipContinue.lastChild.textContent = live ? ' Stop recording' : ' Continue recording'
   chipContinue.classList.toggle('danger', live)
+  // Nothing to label until Whisper has written something, and the pass reads
+  // the lane WAVs, which are still being written while recording.
+  chipSpeakers.hidden = !m.transcribed || recording
 }
 
 chipContinue.addEventListener('click', () => {
   const m = currentMeeting()
   if (!m || busy) return
   continuingId === m.id ? stopRecording() : continueRecording(m.id)
+})
+
+/// Who said what. The pass is minutes of work on a long meeting, so the chip
+/// says what is happening and the transcript is re-read when it lands.
+chipSpeakers.addEventListener('click', async () => {
+  const m = currentMeeting()
+  if (!m || busy) return
+  busy = true
+  chipSpeakers.disabled = true
+  try {
+    if (!(await invoke('speaker_models_ready'))) {
+      const mb = await invoke('speaker_models_mb').catch(() => 46)
+      setStatus(`Downloading the speaker models (~${mb} MB, once)…`)
+      await invoke('ensure_speaker_models')
+    }
+    setStatus('Listening for who is speaking — this takes a while on a long meeting…')
+    const res = await invoke('identify_speakers', { id: m.id })
+    setStatus(
+      res.speakers
+        ? `Heard ${res.speakers} voice${res.speakers === 1 ? '' : 's'} across ${res.labelled} lines.`
+        : 'No separate voices found in this recording.',
+    )
+    if (openId === m.id && noteTab === 'raw') await renderTranscript()
+  } catch (e) {
+    setStatus(String(e), true)
+  } finally {
+    chipSpeakers.disabled = false
+    busy = false
+  }
 })
 
 chipFinish.addEventListener('click', () => {
@@ -1267,15 +1416,28 @@ async function renderTranscript() {
       noteBody.innerHTML = '<p class="placeholder">(no speech detected)</p>'
       return
     }
-    for (const s of segs) {
-      const row = document.createElement('div')
-      row.className = 'seg-line'
-      const b = document.createElement('b')
-      b.textContent = s.at
-      const t = document.createElement('span')
-      t.textContent = s.text
-      row.append(b, t)
-      noteBody.appendChild(row)
+    for (const turn of groupTurns(segs)) {
+      if (!turn.speaker) {
+        // No speaker pass has been over this one: the old line-per-utterance
+        // list, which is still the honest rendering when nobody is named.
+        for (const s of turn.lines) {
+          const row = document.createElement('div')
+          row.className = 'seg-line'
+          const b = document.createElement('b')
+          b.textContent = s.at
+          const t = document.createElement('span')
+          t.textContent = s.text
+          row.append(b, t)
+          noteBody.appendChild(row)
+        }
+        continue
+      }
+      const block = el('div', 'seg-turn')
+      const who = el('div', 'who', turn.speaker)
+      who.appendChild(el('time', '', turn.lines[0].at))
+      const p = el('p', '', turn.lines.map((l) => l.text).join(' '))
+      block.append(who, p)
+      noteBody.appendChild(block)
     }
   } catch (e) {
     noteBody.innerHTML = ''
@@ -1284,6 +1446,33 @@ async function renderTranscript() {
     p.textContent = String(e)
     noteBody.appendChild(p)
   }
+}
+
+/// Consecutive lines from one voice, read as one paragraph.
+///
+/// Whisper cuts a line every time the speaker pauses, which is why an
+/// unlabelled transcript reads as a list of fragments. A turn ends when someone
+/// else starts, or when the block has run longer than the chunk length — a long
+/// uninterrupted stretch still has to break somewhere a reader can follow.
+function groupTurns(lines) {
+  const limit = chunkSeconds()
+  const turns = []
+  for (const line of lines) {
+    const last = turns[turns.length - 1]
+    const sameVoice = last && last.speaker === (line.speaker || null)
+    const room = last && atSecs(line.at) - atSecs(last.lines[0].at) < limit
+    if (sameVoice && room) last.lines.push(line)
+    else turns.push({ speaker: line.speaker || null, lines: [line] })
+  }
+  return turns
+}
+
+/// `M:SS` (or `H:MM:SS`) as seconds.
+function atSecs(at) {
+  return String(at)
+    .split(':')
+    .map(Number)
+    .reduce((total, part) => total * 60 + (part || 0), 0)
 }
 
 async function renderNotes(force = false, regenerate = false) {
@@ -1413,6 +1602,46 @@ chipDelete.addEventListener('click', async () => {
     chipDelete.dataset.armed = ''
     chipDelete.lastChild.textContent = ' Delete'
   }
+})
+
+// ── slept mid-recording ──────────────────────────────────────────────────────
+//
+// macOS captures nothing while the machine is asleep, so the stretch the lid was
+// shut for is simply missing. Rather than leave one take with a hole in it, the
+// take is stopped here and the meeting is offered back for a fresh one — which
+// is what `continueRecording` already does for a meeting picked up later.
+
+const sleepStrip = $('sleepStrip')
+const sleepStripText = $('sleepStripText')
+let sleptMeetingId = null
+
+function fmtGap(ms) {
+  const mins = Math.round(ms / 60000)
+  if (mins < 1) return 'a moment'
+  if (mins < 60) return `${mins} minute${mins === 1 ? '' : 's'}`
+  const hrs = Math.round(mins / 60)
+  return `${hrs} hour${hrs === 1 ? '' : 's'}`
+}
+
+listen(EVENTS.slept, async (e) => {
+  if (!recording) return
+  const gap = fmtGap(Number(e.payload?.asleep_ms) || 0)
+  sleptMeetingId = await stopRecording()
+  sleepStripText.innerHTML =
+    `<strong>Your Mac slept for ${gap} while recording.</strong> ` +
+    'Nothing was captured during that time, so the recording was stopped and saved.'
+  $('sleepResume').style.display = sleptMeetingId ? '' : 'none'
+  sleepStrip.classList.add('show')
+})
+
+$('sleepResume').addEventListener('click', () => {
+  sleepStrip.classList.remove('show')
+  if (sleptMeetingId) continueRecording(sleptMeetingId)
+})
+
+$('sleepDismiss').addEventListener('click', () => {
+  sleepStrip.classList.remove('show')
+  sleptMeetingId = null
 })
 
 // ── ask ──────────────────────────────────────────────────────────────────────
@@ -2121,6 +2350,8 @@ async function loadSettings() {
     languageEl.value = getLang() || s.language || ''
     followupStyleEl.value = s.followupStyle || 'brief'
     followupCustomEl.value = s.followupCustom || ''
+    if (s.chunkSeconds) localStorage.setItem(CHUNK_KEY, String(s.chunkSeconds))
+    chunkSecondsEl.value = String(chunkSeconds())
     renderFollowupStyle()
   } catch (e) {
     note(settingsNote, String(e), 'err')
@@ -2231,7 +2462,9 @@ $('saveSettings').addEventListener('click', async () => {
       language: languageEl.value.trim(),
       followupStyle: followupStyleEl.value,
       followupCustom: followupCustomEl.value.trim(),
+      chunkSeconds: Number(chunkSecondsEl.value) || DEFAULT_CHUNK_SECS,
     })
+    localStorage.setItem(CHUNK_KEY, String(saved.chunkSeconds || DEFAULT_CHUNK_SECS))
     setLang(languageEl.value.trim())
     displayName = saved.displayName || ''
     renderGreeting()
