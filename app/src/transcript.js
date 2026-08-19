@@ -1,13 +1,16 @@
 // Oatmeal — the floating transcript window.
 //
-// A transparent, always-on-top panel you park over a call. It renders the same
-// `oatmeal://live-line` events the backend emits while recording, one line per
-// decoded window. Lines are final when they arrive — the worker never rewrites
-// one — so this is pure append: no flicker, no reflow of what you already read.
+// A transparent, always-on-top panel you park over a call. It renders the
+// `oatmeal://live-line` events the backend emits while recording. Whisper cuts a
+// line every time somebody pauses, so lines are merged into paragraphs as they
+// arrive — one timestamp per paragraph, a new one once the block has run past
+// the chunk length. Lines are final when they arrive — the worker never rewrites
+// one — so this is pure append: the newest paragraph grows, nothing above it
+// moves.
 //
 // The note window owns the session. This window only renders and asks.
 
-import { EVENTS, LANG_KEY, getLang, setLang, fmtMs, escapeHtml } from '/shared.js'
+import { EVENTS, LANG_KEY, chunkSeconds, getLang, setLang, fmtMs, escapeHtml } from '/shared.js'
 
 const { invoke } = window.__TAURI__.core
 const { listen, emit } = window.__TAURI__.event
@@ -31,13 +34,16 @@ const ansQEl = el('ansQ')
 const ansBodyEl = el('ansBody')
 
 let recording = false
-/// Every line currently shown, so search can re-render without re-fetching.
-let lines = []
+/// Every paragraph currently shown, newest last, one per `#lines` child and in
+/// the same order — `applyFilter()` pairs them up by index. Each is
+/// `{ at_ms, texts: [] }`: the time it started and the lines merged into it, kept
+/// so search can re-render without re-fetching.
+let blocks = []
 
-/// Rows kept in the DOM. A long meeting produced thousands, and every one of them
-/// was re-examined on each new line — the panel got slower the longer you talked.
-/// The authoritative transcript is the file written at stop, so trimming the top
-/// of the panel costs nothing.
+/// Paragraphs kept in the DOM. A long meeting produced thousands of rows, and
+/// every one of them was re-examined on each new line — the panel got slower the
+/// longer you talked. The authoritative transcript is the file written at stop,
+/// so trimming the top of the panel costs nothing.
 const MAX_ROWS = 1200
 
 /// Whether a search is narrowing the list right now. Without this, every incoming
@@ -60,7 +66,7 @@ function setRecordingUI(on) {
 }
 
 function refresh() {
-  const has = lines.length > 0
+  const has = blocks.length > 0
   emptyEl.classList.toggle('hidden', has)
   linesEl.classList.toggle('hidden', !has)
 }
@@ -96,29 +102,44 @@ document.addEventListener('visibilitychange', () => {
   if (follow && !document.hidden) toBottom()
 })
 
-function rowFor(line) {
+function blockText(block) {
+  return block.texts.join(' ')
+}
+
+function rowFor(block) {
   const div = document.createElement('div')
   div.className = 'line'
-  div.innerHTML = `<time>${fmtMs(line.at_ms)}</time><span>${escapeHtml(line.text)}</span>`
+  div.innerHTML = `<time>${fmtMs(block.at_ms)}</time><span>${escapeHtml(blockText(block))}</span>`
   return div
 }
 
+/// Where a line goes: the open paragraph, unless that paragraph started more
+/// than the chunk length ago.
 function addLine(line) {
   const text = (line.text || '').trim()
   if (!text) return
-  const row = { at_ms: line.at_ms || 0, text }
-  lines.push(row)
-  linesEl.appendChild(rowFor(row))
+  const at_ms = line.at_ms || 0
+  const open = blocks[blocks.length - 1]
 
-  // Drop the oldest rows past the ceiling, keeping `lines` and the DOM in step —
-  // applyFilter() pairs them up by index.
-  while (lines.length > MAX_ROWS) {
-    lines.shift()
+  if (open && at_ms - open.at_ms < chunkSeconds() * 1000) {
+    open.texts.push(text)
+    // Re-rendered as plain text; a live search paints its marks back on below.
+    linesEl.lastElementChild.lastElementChild.textContent = blockText(open)
+  } else {
+    const block = { at_ms, texts: [text] }
+    blocks.push(block)
+    linesEl.appendChild(rowFor(block))
+  }
+
+  // Drop the oldest paragraphs past the ceiling, keeping `blocks` and the DOM in
+  // step — applyFilter() pairs them up by index.
+  while (blocks.length > MAX_ROWS) {
+    blocks.shift()
     if (linesEl.firstElementChild) linesEl.removeChild(linesEl.firstElementChild)
   }
 
   refresh()
-  // Only the new row needs a decision, and only when a search is actually on.
+  // Only the newest paragraph changed, but a search still has to re-decide it.
   if (filtering) applyFilter()
 
   if (follow) toBottom()
@@ -266,12 +287,19 @@ autoBtn.addEventListener('click', () => {
 })
 
 function replaceAll(incoming) {
-  lines = (incoming || [])
-    .map((l) => ({ at_ms: l.at_ms || 0, text: (l.text || '').trim() }))
-    .filter((l) => l.text)
-    .slice(-MAX_ROWS)
+  const limit = chunkSeconds() * 1000
+  blocks = []
+  for (const l of incoming || []) {
+    const text = (l.text || '').trim()
+    if (!text) continue
+    const at_ms = l.at_ms || 0
+    const open = blocks[blocks.length - 1]
+    if (open && at_ms - open.at_ms < limit) open.texts.push(text)
+    else blocks.push({ at_ms, texts: [text] })
+  }
+  blocks = blocks.slice(-MAX_ROWS)
   linesEl.innerHTML = ''
-  for (const l of lines) linesEl.appendChild(rowFor(l))
+  for (const b of blocks) linesEl.appendChild(rowFor(b))
   refresh()
   applyFilter()
   toBottom()
@@ -309,7 +337,7 @@ for (const id of ['minimize', 'collapse']) {
 }
 
 el('copy').addEventListener('click', async () => {
-  const text = lines.map((l) => `[${fmtMs(l.at_ms)}] ${l.text}`).join('\n')
+  const text = blocks.map((b) => `[${fmtMs(b.at_ms)}] ${blockText(b)}`).join('\n')
   if (!text) return setNote('Nothing to copy yet.')
   try {
     await navigator.clipboard.writeText(text)
@@ -348,7 +376,9 @@ searchEl.addEventListener('keydown', (e) => {
   applyFilter()
 })
 
-/// Hide non-matching lines and highlight the hits in the rest.
+/// Hide paragraphs that do not contain the query and highlight the hits in the
+/// rest. A paragraph is the unit: the whole block is the smallest thing on
+/// screen that still carries its own timestamp.
 function applyFilter() {
   const q = searchEl.value.trim().toLowerCase()
   const nodes = linesEl.children
@@ -357,7 +387,7 @@ function applyFilter() {
 
   for (let i = 0; i < nodes.length; i++) {
     const span = nodes[i].lastElementChild
-    const text = lines[i]?.text ?? span.textContent
+    const text = blocks[i] ? blockText(blocks[i]) : span.textContent
     if (!q) {
       nodes[i].classList.remove('hide')
       span.textContent = text
@@ -371,8 +401,8 @@ function applyFilter() {
     }
   }
 
-  if (q) setNote(hits ? `${hits} matching line${hits === 1 ? '' : 's'}` : 'No matches')
-  else if (/matching line|No matches/.test(noteEl.textContent)) setNote('')
+  if (q) setNote(hits ? `${hits} matching paragraph${hits === 1 ? '' : 's'}` : 'No matches')
+  else if (/matching paragraph|No matches/.test(noteEl.textContent)) setNote('')
 }
 
 function highlight(text, q) {

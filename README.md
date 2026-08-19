@@ -114,8 +114,7 @@ Recording** again after an update.
   local language model, via whisper.cpp/llama.cpp on the Metal GPU. Audio is
   never stored or uploaded anywhere.
 - The only network calls Oatmeal makes are the one-time model downloads — the
-  Whisper and note-writing models on first launch, plus the two speaker models
-  the first time you ask "Identify speakers" — an update check that asks GitHub for this repository's release
+  Whisper and note-writing models on first launch — an update check that asks GitHub for this repository's release
   list when the app starts, and — if you're using the Calendar features —
   EventKit itself running in-process. The update check sends nothing but the
   request.

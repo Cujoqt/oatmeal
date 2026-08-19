@@ -193,24 +193,6 @@ fn segment_offset_cs(dir: &Path, segment: u32) -> i64 {
     (1..segment).map(|n| segment_len_cs(dir, n)).sum()
 }
 
-/// Every take of a meeting, mixed and laid end to end — the one timeline the
-/// transcript's timestamps refer to, and so the audio a speaker pass has to run
-/// over. Takes are contiguous by construction (`segment_offset_cs` sums them the
-/// same way), so the first missing one is the end.
-pub fn meeting_samples(dir: &Path) -> Vec<f32> {
-    let mut all = Vec::new();
-    for n in 1u32.. {
-        let (mic_wav, sys_wav) = segment_paths(dir, n);
-        if !mic_wav.is_file() && !sys_wav.is_file() {
-            break;
-        }
-        let mic = load_optional(&mic_wav);
-        let sys = load_optional(&sys_wav);
-        all.extend(mix(&mic, &sys));
-    }
-    all
-}
-
 /// Mix segment `segment`'s two lane WAVs (either may be missing/empty),
 /// transcribe the result, and fold it into `transcript.md` in `dir`.
 /// `model_path`/`language` may be empty.

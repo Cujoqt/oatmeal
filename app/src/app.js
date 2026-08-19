@@ -9,7 +9,7 @@ const { listen, emit } = window.__TAURI__.event
 
 const $ = (id) => document.getElementById(id)
 
-import { EVENTS, getLang, setLang } from '/shared.js'
+import { CHUNK_KEY, DEFAULT_CHUNK_SECS, EVENTS, chunkSeconds, getLang, setLang } from '/shared.js'
 import { createDatePicker } from '/datepicker.js'
 
 const btn = $('btn')
@@ -90,7 +90,6 @@ const videoStart = $('videoStart')
 const videoEnd = $('videoEnd')
 const videoImport = $('videoImport')
 const chipDelete = $('chipDelete')
-const chipSpeakers = $('chipSpeakers')
 const tmplChips = $('tmplChips')
 const tabNotes = $('tabNotes')
 const tabRaw = $('tabRaw')
@@ -145,16 +144,6 @@ let searchTimer = null
 let searchSeq = 0
 let folders = []
 let currentFolder = null
-/// Seconds of one voice read as a single transcript paragraph. Mirrored into
-/// localStorage because the transcript renders long before Settings is opened,
-/// and the config lives a Rust call away.
-const CHUNK_KEY = 'oatmeal.chunkSeconds'
-const DEFAULT_CHUNK_SECS = 30
-
-function chunkSeconds() {
-  const v = Number(localStorage.getItem(CHUNK_KEY))
-  return v >= 5 && v <= 300 ? v : DEFAULT_CHUNK_SECS
-}
 
 const SORT_KEY = 'oatmeal.sort'
 /// 'new' | 'old' | 'az'. One sort for whatever list is on screen, folder or
@@ -259,9 +248,11 @@ function renderMarkdown(md, target) {
 // ── recording ────────────────────────────────────────────────────────────────
 
 function fmtElapsed(ms) {
-  const s = Math.floor(ms / 1000)
-  const m = Math.floor(s / 60)
-  return `${String(m).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`
+  const s = Math.max(0, Math.floor(ms / 1000))
+  const h = Math.floor(s / 3600)
+  const m = Math.floor((s % 3600) / 60)
+  const pad = (n) => String(n).padStart(2, '0')
+  return h > 0 ? `${h}:${pad(m)}:${pad(s % 60)}` : `${pad(m)}:${pad(s % 60)}`
 }
 
 /// `elapsedMs` seeds the clock for a meeting that was already running — after a
@@ -1303,44 +1294,12 @@ function renderNoteActions() {
   chipContinue.hidden = recording && !live
   chipContinue.lastChild.textContent = live ? ' Stop recording' : ' Continue recording'
   chipContinue.classList.toggle('danger', live)
-  // Nothing to label until Whisper has written something, and the pass reads
-  // the lane WAVs, which are still being written while recording.
-  chipSpeakers.hidden = !m.transcribed || recording
 }
 
 chipContinue.addEventListener('click', () => {
   const m = currentMeeting()
   if (!m || busy) return
   continuingId === m.id ? stopRecording() : continueRecording(m.id)
-})
-
-/// Who said what. The pass is minutes of work on a long meeting, so the chip
-/// says what is happening and the transcript is re-read when it lands.
-chipSpeakers.addEventListener('click', async () => {
-  const m = currentMeeting()
-  if (!m || busy) return
-  busy = true
-  chipSpeakers.disabled = true
-  try {
-    if (!(await invoke('speaker_models_ready'))) {
-      const mb = await invoke('speaker_models_mb').catch(() => 46)
-      setStatus(`Downloading the speaker models (~${mb} MB, once)…`)
-      await invoke('ensure_speaker_models')
-    }
-    setStatus('Listening for who is speaking — this takes a while on a long meeting…')
-    const res = await invoke('identify_speakers', { id: m.id })
-    setStatus(
-      res.speakers
-        ? `Heard ${res.speakers} voice${res.speakers === 1 ? '' : 's'} across ${res.labelled} lines.`
-        : 'No separate voices found in this recording.',
-    )
-    if (openId === m.id && noteTab === 'raw') await renderTranscript()
-  } catch (e) {
-    setStatus(String(e), true)
-  } finally {
-    chipSpeakers.disabled = false
-    busy = false
-  }
 })
 
 chipFinish.addEventListener('click', () => {
@@ -1417,26 +1376,11 @@ async function renderTranscript() {
       return
     }
     for (const turn of groupTurns(segs)) {
-      if (!turn.speaker) {
-        // No speaker pass has been over this one: the old line-per-utterance
-        // list, which is still the honest rendering when nobody is named.
-        for (const s of turn.lines) {
-          const row = document.createElement('div')
-          row.className = 'seg-line'
-          const b = document.createElement('b')
-          b.textContent = s.at
-          const t = document.createElement('span')
-          t.textContent = s.text
-          row.append(b, t)
-          noteBody.appendChild(row)
-        }
-        continue
-      }
       const block = el('div', 'seg-turn')
-      const who = el('div', 'who', turn.speaker)
-      who.appendChild(el('time', '', turn.lines[0].at))
+      const head = el('div', 'who')
+      head.appendChild(el('time', '', turn.lines[0].at))
       const p = el('p', '', turn.lines.map((l) => l.text).join(' '))
-      block.append(who, p)
+      block.append(head, p)
       noteBody.appendChild(block)
     }
   } catch (e) {
@@ -1448,21 +1392,19 @@ async function renderTranscript() {
   }
 }
 
-/// Consecutive lines from one voice, read as one paragraph.
+/// Consecutive lines read as one paragraph, with one timestamp on the front.
 ///
-/// Whisper cuts a line every time the speaker pauses, which is why an
-/// unlabelled transcript reads as a list of fragments. A turn ends when someone
-/// else starts, or when the block has run longer than the chunk length — a long
-/// uninterrupted stretch still has to break somewhere a reader can follow.
+/// Whisper cuts a line every time someone pauses, which is why a transcript
+/// arrives as a list of fragments. A block ends once it has run longer than the
+/// chunk length — a long stretch still has to break somewhere a reader can
+/// follow.
 function groupTurns(lines) {
   const limit = chunkSeconds()
   const turns = []
   for (const line of lines) {
     const last = turns[turns.length - 1]
-    const sameVoice = last && last.speaker === (line.speaker || null)
-    const room = last && atSecs(line.at) - atSecs(last.lines[0].at) < limit
-    if (sameVoice && room) last.lines.push(line)
-    else turns.push({ speaker: line.speaker || null, lines: [line] })
+    if (last && atSecs(line.at) - atSecs(last.lines[0].at) < limit) last.lines.push(line)
+    else turns.push({ lines: [line] })
   }
   return turns
 }

@@ -1,7 +1,6 @@
 pub mod apple_calendar;
 mod autoanswer;
 pub mod chat;
-pub mod diarize;
 pub mod homework;
 pub mod library;
 pub mod live;
@@ -444,60 +443,6 @@ fn set_transcript_window_visible(app: tauri::AppHandle, visible: bool) -> Result
         win.hide().map_err(|e| e.to_string())?;
     }
     Ok(())
-}
-
-/// What one speaker pass found.
-#[derive(serde::Serialize)]
-struct SpeakerResult {
-    /// Transcript lines that came away with a voice on them.
-    labelled: usize,
-    /// Distinct voices heard.
-    speakers: usize,
-}
-
-/// Whether the speaker models are already downloaded.
-#[tauri::command]
-fn speaker_models_ready() -> bool {
-    diarize::models_present()
-}
-
-/// Roughly what the speaker models weigh, for the UI's copy.
-#[tauri::command]
-fn speaker_models_mb() -> u32 {
-    diarize::APPROX_MB
-}
-
-/// Fetch the speaker models. ~46 MB the first time, so off the UI thread.
-#[tauri::command(async)]
-fn ensure_speaker_models() -> Result<(), String> {
-    diarize::ensure_models().map(|_| ())
-}
-
-/// Work out who said each line of a meeting's transcript and write the voices
-/// into it.
-///
-/// A second pass over the whole recording — minutes for a long meeting — so it
-/// is `(async)` and never part of stopping: the transcript is already readable
-/// while this runs, and `transcript.md` is rewritten in place when it lands.
-#[tauri::command(async)]
-fn identify_speakers(id: String) -> Result<SpeakerResult, String> {
-    let meeting = library::meeting(&id)?;
-    let dir = PathBuf::from(&meeting.dir);
-
-    let samples = session::meeting_samples(&dir);
-    if samples.is_empty() {
-        return Err("this meeting has no audio left to listen to".into());
-    }
-    let spans = diarize::diarize_samples(&samples)?;
-    let labelled = diarize::label_transcript(&dir, &spans)?;
-
-    let mut ids: Vec<i32> = spans.iter().map(|s| s.speaker).collect();
-    ids.sort_unstable();
-    ids.dedup();
-    Ok(SpeakerResult {
-        labelled,
-        speakers: ids.len(),
-    })
 }
 
 /// Pin the floating transcript window to whatever Space you switch to.
@@ -1161,10 +1106,6 @@ pub fn run() {
             save_notes,
             set_transcript_window_visible,
             set_transcript_pinned,
-            speaker_models_ready,
-            speaker_models_mb,
-            ensure_speaker_models,
-            identify_speakers,
             is_transcript_window_visible,
             ensure_chat_model,
             chat_model_status,
@@ -1297,8 +1238,6 @@ mod tests {
             "search_snippets",
             "chat_model_status",
             "unload_chat_model",
-            "ensure_speaker_models",
-            "identify_speakers",
         ] {
             let decl = format!("fn {name}(");
             let at = src
