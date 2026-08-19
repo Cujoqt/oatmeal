@@ -46,3 +46,14 @@ test('vocabulary in ordinary business context is not detected', () => {
     quarter so we can solve these problems before the board meeting`
   assert.equal(looksMathy(businessText), false, 'vocabulary alone must not be enough')
 })
+
+test('one incidental digit does not trigger detection', () => {
+  // Vocabulary in business context plus one stray digit: the edge case that
+  // defeated the previous density gate. With a multiplicative formula, both
+  // signals must contribute meaningfully; one incidental digit cannot push a
+  // marginally mathy text across the threshold.
+  const businessTextWithDigit = `we need to assess the risk matrix version 2 and review
+    the slope of this rollout and then discuss the vector of business priorities
+    for the next quarter so we can solve these problems before the board meeting`
+  assert.equal(looksMathy(businessTextWithDigit), false, 'vocabulary plus one digit must not be enough')
+})

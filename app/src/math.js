@@ -49,18 +49,19 @@ export function mathiness(text) {
   const words = text.toLowerCase().match(/[a-z]+/g) || []
   if (!words.length) return 0
   const strong = words.filter((w) => VOCAB.has(w)).length
+  // Vocabulary is required; without mathematical language, density alone is
+  // insufficient (budget data has density but not terminology).
+  if (strong === 0) return 0
   const weak = words.filter((w) => WEAK_VOCAB.has(w)).length
-  // Weak words are worth a fraction of a strong one and only when a strong one
-  // is present at all, so a finance meeting saying "times" and "over" scores
-  // nothing from them.
-  const vocab = strong === 0 ? 0 : (strong + weak * 0.25) / words.length
+  // Weak words contribute only in the presence of strong ones.
+  const vocab = (strong + weak * 0.25) / words.length
   const d = density(text)
-  // Density is a required gate: vocabulary alone cannot score. Two signals are
-  // required together. Without mathematical notation (digits, operators, or
-  // variables), vocabulary in ordinary speech (e.g., "matrix" in "risk matrix",
-  // "slope" in "slope of the rollout") must not trigger detection.
-  if (d === 0) return 0
-  return Math.min(1, vocab * 8 + d * 0.8)
+  // Two signals required together: vocabulary (mathematical terms) and density
+  // (notation, digits, variables). A product enforces both; neither "matrix" in
+  // "risk matrix" (high vocab, zero density) nor "Q2 revenue" (zero vocab, high
+  // density) scores above threshold alone. One incidental digit or variable does
+  // not overpower the requirement for actual mathematical vocabulary.
+  return Math.min(1, vocab * d * 12)
 }
 
 // Detection threshold. Tuned so the lecture fixture in math.test.mjs passes
