@@ -242,6 +242,17 @@ impl Transcriber {
             Quality::Fast => SamplingStrategy::Greedy { best_of: 1 },
         };
         let mut params = FullParams::new(strategy);
+        // whisper.cpp re-decodes a window at rising temperatures whenever the
+        // result looks unconfident — up to six passes over the same audio. On
+        // quiet far-field speech that trips on nearly every window, and the
+        // retries return hallucinations anyway, so the live lane pays six times
+        // over for output it then has to filter. It is the difference between a
+        // window costing 400 ms and 2.3 s, which is the difference between the
+        // panel keeping up and falling minutes behind. The background pass keeps
+        // the fallback: it has the time, and it writes the record that lasts.
+        if matches!(quality, Quality::Fast) {
+            params.set_temperature_inc(0.0);
+        }
         // `"auto"` rather than `set_detect_language(true)`: whisper.cpp treats the
         // latter as *detect and stop*, returning zero segments once it has the
         // language — so auto-detect handed back an empty transcript for real
