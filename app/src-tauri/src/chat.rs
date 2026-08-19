@@ -540,6 +540,40 @@ Be faithful to the transcript. Never invent names, numbers, dates or claims that
 there. If the transcript is too short or too garbled to assess, say so plainly in one \
 sentence and stop.";
 
+const LECTURE_SYSTEM: &str = "\
+You write lecture notes from raw transcripts of mathematics teaching. The transcript comes \
+from automatic speech recognition, so mathematics arrives as spoken words — 'x squared', \
+'the integral from zero to one', 'f of x' — with errors and false starts. Read through them \
+and write what was actually meant.
+
+Write in Markdown, in this order:
+
+A one-paragraph summary of what the lecture covered.
+
+'## Worked problems' — every problem the lecturer worked through. Give each one as a bold \
+statement of the problem, then the steps as '- ' bullets in the order they were done, then \
+the result. Do not invent problems that were not worked.
+
+'## Key results' — definitions, theorems and formulas stated in the lecture, one per bullet.
+
+'## Review questions' — three to five questions on the material actually covered, each as a \
+numbered item, and each followed by an indented line beginning '> Solution:' giving the \
+worked answer. Questions must test the same techniques the lecture used, not harder or \
+unrelated ones.
+
+Write every mathematical expression in LaTeX between \\( and \\) inline, or between \\[ and \\] \
+on its own line for a displayed equation. Never use dollar signs as math delimiters. Use only \
+\\frac, \\sqrt, \\int, \\sum, \\lim, ^, _, \\pi, \\theta, \\alpha, \\beta, \\infty, \\cdot, \
+\\times, \\div, \\leq, \\geq, \\neq, \\to, \\sin, \\cos, \\tan, \\log, \\ln. Write anything \
+outside that set in words instead.
+
+Be faithful to the transcript. Never invent results, steps or numbers that are not there. If \
+the transcript is too short or too garbled to write up, say so plainly in one sentence and stop.
+
+Some source material may come from a video the user attached rather than the lecture itself. \
+Everything after a line reading '--- attached video ---' came from such a video, not from the \
+room. When a point appears only after one of those lines, end its line with \"(from video)\".";
+
 /// Which shape of notes to write. `General` reproduces the original fixed
 /// format; the others match the system prompt to the kind of meeting.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -550,6 +584,7 @@ pub enum Template {
     Standup,
     OneOnOne,
     Interview,
+    Lecture,
 }
 
 impl Template {
@@ -559,6 +594,7 @@ impl Template {
             Template::Standup => STANDUP_SYSTEM,
             Template::OneOnOne => ONE_ON_ONE_SYSTEM,
             Template::Interview => INTERVIEW_SYSTEM,
+            Template::Lecture => LECTURE_SYSTEM,
         }
     }
 }
@@ -1037,5 +1073,31 @@ mod tests {
     fn refuses_transcripts_with_nothing_in_them() {
         let err = write_notes(Path::new("/nonexistent"), "um, so, yeah", Template::General).unwrap_err();
         assert!(err.contains("too short"), "got: {err}");
+    }
+
+    /// The renderer parses the lecture note by these exact markers. If the prompt
+    /// stops naming them, the model stops emitting them and the note renders as
+    /// plain prose with no typeset math and no collapsible solutions — silently,
+    /// because prose is still valid Markdown.
+    #[test]
+    fn the_lecture_prompt_names_the_markers_the_renderer_parses() {
+        let p = super::LECTURE_SYSTEM;
+        assert!(p.contains(r"\("), "inline math delimiter is not named");
+        assert!(p.contains(r"\["), "display math delimiter is not named");
+        assert!(p.contains("> Solution:"), "solution marker is not named");
+        assert!(p.contains("## Review questions"), "review section is not named");
+        assert!(
+            !p.contains('$'),
+            "the prompt must not offer $…$ — renderMarkdown is shared with every \
+             other template, where $50 is a price"
+        );
+    }
+
+    #[test]
+    fn lecture_selects_its_own_prompt() {
+        assert_eq!(
+            super::Template::Lecture.system_prompt(),
+            super::LECTURE_SYSTEM
+        );
     }
 }

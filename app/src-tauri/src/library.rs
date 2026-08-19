@@ -248,6 +248,7 @@ fn summary_filename(template: crate::chat::Template) -> &'static str {
         crate::chat::Template::Standup => "summary-standup.md",
         crate::chat::Template::OneOnOne => "summary-one-on-one.md",
         crate::chat::Template::Interview => "summary-interview.md",
+        crate::chat::Template::Lecture => "summary-lecture.md",
     }
 }
 
