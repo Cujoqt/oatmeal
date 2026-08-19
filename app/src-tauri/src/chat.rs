@@ -1018,6 +1018,7 @@ mod grounding_tests {
             STANDUP_SYSTEM,
             ONE_ON_ONE_SYSTEM,
             INTERVIEW_SYSTEM,
+            LECTURE_SYSTEM,
         ] {
             let system = guarded(prompt);
             assert!(system.contains("Refuse"), "no refusal rule");
