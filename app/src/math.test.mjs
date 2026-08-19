@@ -36,39 +36,60 @@ test('a short line is never detected on its own', () => {
   assert.equal(looksMathy('the integral of x'), false, 'too short to be sure')
 })
 
-test('vocabulary in ordinary business context is not detected', () => {
-  // VOCAB words (matrix, slope, vector, solve) used in purely business sense,
-  // with no digits or operators: must not trigger detection despite containing
-  // multiple dictionary words. This is the false-positive case the heuristic
-  // exists to prevent.
+test('single math words used in ordinary business speech are not detected', () => {
+  // "matrix", "slope", "vector" and "solve" as loose business metaphor, no
+  // spoken-math phrase and no notation. This is exactly the ambiguity that
+  // defeated a single-word vocabulary list: these words are ordinary English.
   const businessText = `we need to assess the risk matrix and review the slope of
     this rollout and then discuss the vector of business priorities for the next
     quarter so we can solve these problems before the board meeting`
   assert.equal(looksMathy(businessText), false, 'vocabulary alone must not be enough')
 })
 
-test('one incidental digit does not trigger detection', () => {
-  // Vocabulary in business context plus one stray digit: the edge case that
-  // defeated the previous density gate. With a multiplicative formula, both
-  // signals must contribute meaningfully; one incidental digit cannot push a
-  // marginally mathy text across the threshold.
+test('one incidental digit does not turn business speech into math', () => {
   const businessTextWithDigit = `we need to assess the risk matrix version 2 and review
     the slope of this rollout and then discuss the vector of business priorities
     for the next quarter so we can solve these problems before the board meeting`
   assert.equal(looksMathy(businessTextWithDigit), false, 'vocabulary plus one digit must not be enough')
 })
 
-test('a notation-light lecture is detected', () => {
-  // A strong lecture on calculus with heavy vocabulary but almost no notation:
-  // strong VOCAB terms (derivative, integral, theorem, polynomial, coefficient)
-  // repeated, but only one single-letter variable. Density is low (one token
-  // out of 51), yet this must be detected because the curated VOCAB list now
-  // excludes business words like "matrix" and "slope", making strong vocabulary
-  // trustworthy to carry the detection when density meets the floor.
+test('a notation-light lecture is still detected', () => {
+  // Heavy on spoken-math phrases and survivor words (derivative of, integral
+  // of, theorem, polynomial, coefficient) but almost no notation — only one
+  // single-letter variable in 50-odd words. Phrases carry this one, not density.
   const lightNotationLecture = `the derivative of equation x is the rate of change and
     when we use the power theorem we can differentiate a polynomial with many
     coefficient terms and the integral of that same equation gives us the area
     under the curve which is fundamental to understanding how these mathematical
     concepts relate`
-  assert.equal(looksMathy(lightNotationLecture), true, 'strong math vocabulary with minimal notation must be detected')
+  assert.equal(looksMathy(lightNotationLecture), true, 'spoken-math phrases with minimal notation must be detected')
+})
+
+// Two passages a reviewer constructed to defeat a single-word vocabulary list:
+// every math-adjacent word here ("derivatives desk", "credit limit", "proof of
+// concept", "common denominator", "a fraction of") is ordinary trading-desk
+// English. No spoken-math phrase ("derivative of", "with respect to", "solve
+// for", ...) appears in either one. They must score zero, not just below
+// threshold, because there is no vocabulary evidence in them at all.
+
+const ADVERSARIAL_DESK_UPDATE = `our derivatives desk had a strong quarter and the
+  team stayed well within the credit limit the whole time proof of concept work
+  on the new trading platform wrapped up ahead of schedule and margins are a
+  fraction of what they were last year so the common denominator across every
+  desk is discipline the numbers came in around version 2 of the forecast`
+
+const ADVERSARIAL_RISK_UPDATE = `the derivatives desk closed 4.2 million in
+  notional exposure this week and derivative contracts on the rate swap book
+  widened by 11 basis points the risk team flagged that derivative exposure
+  against the 3.8 million limit before the board meeting on Tuesday and
+  headcount on the desk moved from 12 to 14 this quarter`
+
+test('a desk update dense in math-adjacent business words is not detected', () => {
+  assert.equal(looksMathy(ADVERSARIAL_DESK_UPDATE), false)
+  assert.equal(mathiness(ADVERSARIAL_DESK_UPDATE), 0)
+})
+
+test('a risk update repeating "derivative" in its financial sense is not detected', () => {
+  assert.equal(looksMathy(ADVERSARIAL_RISK_UPDATE), false)
+  assert.equal(mathiness(ADVERSARIAL_RISK_UPDATE), 0)
 })
