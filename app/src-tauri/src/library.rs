@@ -947,6 +947,9 @@ pub struct TranscriptLine {
     /// Display timestamp as written in the markdown, e.g. `1:23`.
     pub at: String,
     pub text: String,
+    /// Whose voice it was, e.g. `Speaker 2`, once a speaker pass has run over
+    /// this meeting. `None` for a transcript nobody has labelled.
+    pub speaker: Option<String>,
 }
 
 /// Parse a saved `transcript.md` back into its timestamped lines.
@@ -961,10 +964,16 @@ pub fn transcript_lines(id: &str) -> Result<Vec<TranscriptLine>, String> {
         let Some(rest) = line.strip_prefix("**[") else { continue };
         let Some((at, text)) = rest.split_once("]**") else { continue };
         let text = text.trim();
+        // `0:12 · Speaker 2` once the speaker pass has been over it.
+        let (at, speaker) = match at.split_once(" · ") {
+            Some((at, who)) => (at, Some(who.trim().to_string())),
+            None => (at, None),
+        };
         if !text.is_empty() {
             out.push(TranscriptLine {
-                at: at.to_string(),
+                at: at.trim().to_string(),
                 text: text.to_string(),
+                speaker,
             });
         }
     }
@@ -1066,6 +1075,31 @@ pub fn typed_notes(id: &str) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
+
+    /// A labelled transcript has to come back with the voice split out, and an
+    /// unlabelled one — every transcript written before speakers existed —
+    /// has to keep working.
+    #[test]
+    fn transcript_lines_split_the_speaker_out() {
+        with_temp_home(|_| {
+            let id = "20260101-000000-m";
+            let dir = recordings_root().join(id);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("transcript.md"),
+                "# M\n\n## Transcript\n\n**[0:00 · Speaker 2]** hello\n\n**[0:09]** plain\n",
+            )
+            .unwrap();
+
+            let lines = transcript_lines(id).unwrap();
+            assert_eq!(lines.len(), 2);
+            assert_eq!(lines[0].at, "0:00");
+            assert_eq!(lines[0].speaker.as_deref(), Some("Speaker 2"));
+            assert_eq!(lines[0].text, "hello");
+            assert_eq!(lines[1].at, "0:09");
+            assert_eq!(lines[1].speaker, None);
+        })
+    }
     use super::*;
 
     #[test]

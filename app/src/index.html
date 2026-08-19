@@ -231,7 +231,7 @@
     .side-item.dragging { opacity: .35; }
     .side-item .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--line-2); flex: none; }
     .side-item.done .dot { background: var(--accent); }
-    .side-item .txt { min-width: 0; }
+    .side-item .txt { flex: 1; min-width: 0; }
     .side-item .t { font: 500 13px var(--sans); color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .side-item .s { font: 400 11px var(--sans); color: var(--hint); }
     .side-empty { font: 400 12px var(--sans); color: var(--hint); font-style: italic; padding: 8px 10px; }
@@ -261,13 +261,38 @@
       padding: 0 4px; outline: none;
     }
     .folder-row .count { font: 400 11px var(--sans); color: var(--hint); flex: none; }
-    .folder-row .del {
-      flex: none; width: 16px; height: 16px; border-radius: 4px; border: 0; background: none;
+    /* One affordance per row: left click opens that row's menu. Hidden until
+       the row is hovered or the button has focus, so the lists stay quiet. */
+    .row-more {
+      flex: none; width: 18px; height: 18px; border-radius: 5px; border: 0; background: none;
       color: var(--hint); cursor: pointer; font: 600 12px var(--sans); line-height: 1;
       display: none; align-items: center; justify-content: center;
     }
-    .folder-row:hover .del { display: inline-flex; }
-    .folder-row .del:hover { color: var(--danger); }
+    .folder-row:hover .row-more, .side-item:hover .row-more,
+    .row-more:focus { display: inline-flex; }
+    .row-more:hover { color: var(--ink); background: var(--hover); }
+
+    /* The row menu. Fixed, not absolute: both lists scroll, and an absolute
+       menu would be clipped by the list it was opened from. */
+    .menu {
+      position: fixed; z-index: 60; min-width: 168px; max-width: 240px; padding: 5px;
+      display: flex; flex-direction: column; gap: 1px;
+      background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+      box-shadow: 0 10px 28px rgba(0,0,0,.28);
+    }
+    .menu button {
+      text-align: left; background: none; border: 0; border-radius: 7px; cursor: pointer;
+      color: var(--ink-soft); font: 500 12.5px var(--sans); padding: 7px 9px;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .menu button:hover { background: var(--hover); color: var(--ink); }
+    .menu button.danger:hover { color: var(--danger); }
+    .menu .head {
+      font: 600 10px var(--sans); text-transform: uppercase; letter-spacing: .5px;
+      color: var(--hint); padding: 6px 9px 3px;
+    }
+    .menu .hint { font: 400 12px var(--sans); color: var(--hint); padding: 4px 9px 7px; }
+    .menu .sep { height: 1px; background: var(--line); margin: 4px 2px; }
 
     .folder-row.drag-over, .side-label.clickable.drag-over { background: var(--hover); }
 
@@ -278,7 +303,7 @@
        an unrendered element snapshots blank. */
     .drag-ghost {
       position: fixed; top: -1000px; left: -1000px; pointer-events: none;
-      transform: rotate(27deg); /* the tilt — one place to change it */
+      transform: rotate(3deg); /* the tilt — one place to change it */
       background: var(--card); border: 1px solid var(--line);
       border-radius: 9px; box-shadow: 0 8px 20px rgba(0,0,0,.22);
     }
@@ -516,6 +541,15 @@
     .prose strong { color: var(--ink); font-weight: 600; }
     .prose .placeholder { color: var(--faint); font-style: italic; }
 
+    /* A speaker's turn: the voice once at the top, then everything they said
+       until somebody else starts or the block runs past the chunk length. */
+    .seg-turn { margin: 0 0 14px; }
+    .seg-turn .who {
+      display: flex; align-items: baseline; gap: 8px; margin-bottom: 3px;
+      font: 600 12.5px var(--sans); color: var(--ink);
+    }
+    .seg-turn .who time { font: 400 11.5px var(--sans); color: var(--hint); }
+    .seg-turn p { margin: 0; color: var(--ink-soft); }
     .seg-line { display: flex; gap: 12px; margin-bottom: 10px; font-size: 14.5px; line-height: 1.65; }
     .seg-line b { font: 600 11px var(--mono); color: var(--accent); flex: none; padding-top: 3px; }
 
@@ -883,6 +917,16 @@
     <button class="quiet" id="updateLater">Later</button>
   </div>
 
+  <!-- The machine slept mid-recording. Same strip as the update gate, but it
+       always leaves a way out: the recording is already stopped by the time it
+       appears, so this is a report, not a gate. -->
+  <div class="update-strip" id="sleepStrip">
+    <span class="led" aria-hidden="true"></span>
+    <span class="grow" id="sleepStripText"></span>
+    <button id="sleepResume">Resume recording</button>
+    <button class="quiet" id="sleepDismiss">Dismiss</button>
+  </div>
+
   <!-- setStatus's home on every surface but the draft: its own #status line lives
        inside that view, so a failed export used to report into a hidden element. -->
   <div id="toast" role="status" aria-live="polite"></div>
@@ -1070,6 +1114,10 @@
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8" /><circle cx="12" cy="12" r="3.4" fill="currentColor" stroke="none" /></svg>
               Continue recording
             </button>
+            <button class="chip act" id="chipSpeakers" title="Work out who said each line">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3.2" /><path d="M3.5 19c.6-3 2.8-4.6 5.5-4.6S13.9 16 14.5 19" /><path d="M16 6.5a3.4 3.4 0 0 1 0 6.4M18.5 4.6a6.2 6.2 0 0 1 0 10.2" /></svg>
+              Identify speakers
+            </button>
             <button class="chip act" id="chipExport" title="Export as Markdown">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v10M8 10l4 4 4-4M5 18h14" /></svg>
               Export
@@ -1145,6 +1193,21 @@
               <label for="followupCustom">Your instructions</label>
               <input id="followupCustom" placeholder="Two sentences, no greeting, end with the next step" autocomplete="off" maxlength="300" />
               <div class="hint">Describe the length and formatting you want.</div>
+            </div>
+          </div>
+
+          <div class="set-card">
+            <h2>Transcript</h2>
+            <p>“Identify speakers” works out who said each line and rewrites the transcript with their voices. It runs on-device, downloads a ~46 MB model the first time, and takes a few minutes on a long meeting.</p>
+            <div class="field">
+              <label for="chunkSeconds">Paragraph length</label>
+              <select id="chunkSeconds">
+                <option value="10">Short — a new paragraph every 10 seconds</option>
+                <option value="30">Medium — every 30 seconds</option>
+                <option value="60">Long — every minute</option>
+                <option value="180">Very long — every three minutes</option>
+              </select>
+              <div class="hint">How much of one person's speech is read as a single block. A new speaker always starts a new one.</div>
             </div>
           </div>
 
