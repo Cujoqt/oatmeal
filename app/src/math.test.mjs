@@ -68,8 +68,8 @@ test('a notation-light lecture is still detected', () => {
 // Two passages a reviewer constructed to defeat a single-word vocabulary list:
 // every math-adjacent word here ("derivatives desk", "credit limit", "proof of
 // concept", "common denominator", "a fraction of") is ordinary trading-desk
-// English. No spoken-math phrase ("derivative of", "with respect to", "solve
-// for", ...) appears in either one. They must score zero, not just below
+// English. No spoken-math phrase ("the derivative of", "the limit as", "square
+// root of", ...) appears in either one. They must score zero, not just below
 // threshold, because there is no vocabulary evidence in them at all.
 
 const ADVERSARIAL_DESK_UPDATE = `our derivatives desk had a strong quarter and the
@@ -92,4 +92,53 @@ test('a desk update dense in math-adjacent business words is not detected', () =
 test('a risk update repeating "derivative" in its financial sense is not detected', () => {
   assert.equal(looksMathy(ADVERSARIAL_RISK_UPDATE), false)
   assert.equal(mathiness(ADVERSARIAL_RISK_UPDATE), 0)
+})
+
+// Round 4 kept "with respect to" and "solve for" as phrases on the theory
+// that a trading desk never says them. It was wrong — both are ordinary
+// formal business English. This passage says each once, in exactly that
+// ordinary sense, and must score zero now that both phrases are gone.
+const FINANCE_REVIEW_WITH_FORMAL_PHRASING = `this quarter we reviewed spend
+  with respect to the approved budget across every team and came in under
+  plan by six percent leadership asked us to solve for the gap before the
+  next board meeting so finance is pulling together options and we should
+  have a recommendation ready by Friday for the leadership team to review`
+
+test('formal business phrasing ("with respect to", "solve for") is not detected', () => {
+  assert.equal(looksMathy(FINANCE_REVIEW_WITH_FORMAL_PHRASING), false)
+  assert.equal(mathiness(FINANCE_REVIEW_WITH_FORMAL_PHRASING), 0)
+})
+
+// Round 4's "limit as" matched across an unrelated clause boundary: "credit
+// limit" ends one thought and "as we approach the end of the quarter" starts
+// the next, and mashing them together reads as the lecture phrase. The fix
+// requires the leading article ("the limit as"), which a lecturer actually
+// says and "credit limit" never precedes with.
+const TREASURY_CREDIT_LIMIT = `during the risk review treasury flagged that we
+  are close to breaching the credit limit as we approach the end of the
+  quarter and asked finance to confirm headroom before any new draws are
+  approved by the committee`
+
+test('"credit limit as" does not read as "the limit as"', () => {
+  assert.equal(looksMathy(TREASURY_CREDIT_LIMIT), false)
+  assert.equal(mathiness(TREASURY_CREDIT_LIMIT), 0)
+})
+
+// A proof-heavy real-analysis segment: no arithmetic notation to speak of,
+// and its distinguishing vocabulary (epsilon, delta, continuity, convergence,
+// Cauchy) is exactly the kind that is either business-ambiguous ("continuity"
+// -> business continuity, "convergence" -> convergence of trends) or, in the
+// case of "epsilon", a real vendor name. It is detected through phrases that
+// need the literal construction ("for every epsilon", "epsilon neighborhood",
+// "cauchy sequence", "continuous function") rather than the bare words.
+const REAL_ANALYSIS_LECTURE = `so to prove continuity at this point we need to
+  show that for every epsilon greater than zero there exists a delta such
+  that whenever the distance between x and the point is less than delta the
+  distance between the function values is less than epsilon this is the
+  epsilon neighborhood argument and once this holds at every point in the
+  domain we call the function a continuous function and by the cauchy
+  sequence criterion the series converges`
+
+test('a proof-heavy real-analysis lecture is detected', () => {
+  assert.equal(looksMathy(REAL_ANALYSIS_LECTURE), true)
 })

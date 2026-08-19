@@ -12,9 +12,27 @@
 // thresholds could not separate a math lecture from a trading-desk update,
 // because the ambiguity is in the words themselves, not their frequency. A
 // phrase carries the syntax that disambiguates: nobody says "the derivative
-// of" or "with respect to" or "by the chain rule" about a trading book. A
-// handful of single words survive contact with business English anyway
-// (hypotenuse, polynomial, asymptote, ...) and still count as evidence.
+// of" or "by the chain rule" about a trading book.
+//
+// Phrases are not automatically safe just for being multiple words, though —
+// "with respect to" and "solve for" were tried here first and both turned out
+// to be ordinary formal business English ("reviewed spend with respect to the
+// approved budget", "asked us to solve for the gap"), and "limit as" matched
+// across an unrelated boundary ("breaching the credit limit as we approach
+// the end of the quarter"). Every phrase below has been checked for two
+// distinct failure modes: being a genuine business idiom on its own, and
+// being formable by mashing the tail of one clause into the head of an
+// unrelated next one. Where a phrase only fails the second way, requiring the
+// leading article ("the limit as", not "limit as") fixes it, because a
+// lecturer says "the limit as" but "credit limit" is never followed by "the".
+//
+// A handful of single words survive contact with business English anyway
+// (hypotenuse, polynomial, asymptote, ...) and still count as evidence on
+// their own. "Epsilon" and "cauchy" deliberately are not on this list even
+// though neither is ordinary speech either — Epsilon is a real marketing-data
+// vendor name, so a meeting could plausibly mention it once. They still count
+// as evidence, just only inside the specific phrases below ("for every
+// epsilon", "cauchy sequence"), which nobody says about a vendor.
 //
 // This runs per live block and once over a finished transcript, so it is a
 // string check and nothing more — the model is never woken merely to classify,
@@ -23,31 +41,30 @@
 // Spoken-math phrases. ASR output has almost no punctuation, so these are
 // matched against normalized (lowercased, punctuation-stripped) text as
 // contiguous word sequences — a phrase is open-ended on the right, so
-// "derivative of" matches "derivative of x squared" without needing to know
-// what follows. Each phrase counts once per transcript, not once per
-// occurrence, so repeating "solve for x" ten times cannot substitute for
+// "the derivative of" matches "the derivative of x squared" without needing
+// to know what follows. Each phrase counts once per transcript, not once per
+// occurrence, so repeating "square root of" ten times cannot substitute for
 // actually covering more mathematical ground.
 const PHRASES = [
-  'derivative of',
-  'derivatives of',
+  'the derivative of',
+  'the derivatives of',
   'partial derivative',
   'second derivative',
   'third derivative',
   'take the derivative',
-  'differentiate with respect to',
-  'integral of',
-  'integral from',
-  'integrate from',
+  'the integral of',
   'definite integral',
   'indefinite integral',
-  'limit as',
+  // Requires the leading article: "credit limit as we approach" must not
+  // match, and never says "the" right before "limit" in that construction.
+  'the limit as',
   'approaches infinity',
-  'with respect to',
-  'solve for',
   'square root of',
   'cube root of',
+  // "to the power" alone was dropped — "deferred to the power players in the
+  // room" is a real sentence. "to the power of" and "raised to the power" are
+  // both specific enough that they don't form by coincidence.
   'to the power of',
-  'to the power',
   'raised to the power',
   'd by d',
   'plus a constant',
@@ -59,12 +76,27 @@ const PHRASES = [
   'fundamental theorem of calculus',
   'mean value theorem',
   'taylor series',
+  // Real-analysis vocabulary. "for every epsilon" and "epsilon neighborhood"
+  // need the literal word "epsilon" or "cauchy" as part of a specific
+  // construction — see the note on SURVIVOR_WORDS below for why those two
+  // words don't get to count on their own.
+  'for every epsilon',
+  'epsilon neighborhood',
+  'cauchy sequence',
+  'continuous function',
 ]
 
 /// Single words that are mathematical in a lecture and not ordinary business
 /// speech — unlike "derivative" or "limit", nobody says "hypotenuse" or
 /// "asymptote" about a trading book or a status meeting. These count as
 /// evidence on their own, without needing a surrounding phrase.
+///
+/// "Epsilon" and "cauchy" are deliberately absent: both are unambiguous math
+/// vocabulary, but Epsilon is also a real marketing-data vendor, so a single
+/// mention in an ordinary meeting ("we're working with Epsilon on the loyalty
+/// campaign") is plausible. They still count as evidence, just only inside
+/// the PHRASES above ("for every epsilon", "cauchy sequence") — nobody says
+/// those about a vendor.
 const SURVIVOR_WORDS = new Set([
   'hypotenuse', 'hypotenuses',
   'polynomial', 'polynomials',
@@ -97,7 +129,9 @@ function density(text) {
 
 /// Normalized text for phrase matching: lowercased, punctuation stripped to
 /// spaces, collapsed, and padded so every phrase can be found as whole words
-/// with a plain substring search.
+/// with a plain substring search. The padding is what stops "chain rules"
+/// (plural) from matching "chain rule" — the character run is there, but not
+/// followed by a word boundary.
 function normalizeForPhrases(text) {
   const collapsed = text.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()
   return ` ${collapsed} `
@@ -130,8 +164,8 @@ export function mathiness(text) {
 }
 
 /// Detection threshold. Tuned so both lecture fixtures in math.test.mjs clear
-/// it by a real margin and every business/finance fixture — including the two
-/// adversarial passages that defeated the single-word vocabulary — scores 0,
+/// it by a real margin and every business/finance fixture — including the
+/// adversarial passages that defeated earlier vocabulary choices — scores 0,
 /// because phrase matching gives them no vocabulary signal at all. If a future
 /// fixture forces a change, move this — never weaken a false-positive test to
 /// make a lecture test pass, because a false positive silently reshapes
