@@ -11,18 +11,20 @@
 
 const VOCAB = new Set([
   'derivative', 'derivatives', 'integral', 'integrate', 'integrals', 'limit',
-  'theorem', 'equation', 'equations', 'matrix', 'vector', 'sine', 'cosine',
-  'tangent', 'logarithm', 'log', 'polynomial', 'coefficient', 'hypotenuse',
-  'proof', 'squared', 'cubed', 'exponent', 'denominator', 'numerator',
-  'fraction', 'slope', 'asymptote', 'factorial', 'summation', 'sigma',
-  'differentiate', 'substitute', 'solve', 'simplify', 'graph',
+  'theorem', 'equation', 'equations', 'sine', 'cosine', 'tangent', 'logarithm',
+  'polynomial', 'coefficient', 'hypotenuse', 'proof', 'squared', 'cubed',
+  'exponent', 'denominator', 'numerator', 'fraction', 'asymptote', 'factorial',
+  'summation', 'sigma', 'differentiate',
 ])
 
 // Words that are mathematical in a lecture and ordinary everywhere else.
 // They only count when a word from VOCAB is already present, so "times",
-// "over" and "factor" cannot carry a detection by themselves.
+// "over" and "factor" cannot carry a detection by themselves. Business-ambiguous
+// words like "matrix", "slope", "vector" live here: they are mathematical only
+// when actual math vocabulary (derivative, integral, etc.) is present.
 const WEAK_VOCAB = new Set([
   'times', 'plus', 'minus', 'over', 'equals', 'divided', 'factor', 'variable',
+  'matrix', 'vector', 'slope', 'solve', 'graph', 'log', 'simplify', 'substitute',
 ])
 
 const OPERATOR = /[+\-*/=^<>]/
@@ -56,12 +58,12 @@ export function mathiness(text) {
   // Weak words contribute only in the presence of strong ones.
   const vocab = (strong + weak * 0.25) / words.length
   const d = density(text)
-  // Two signals required together: vocabulary (mathematical terms) and density
-  // (notation, digits, variables). A product enforces both; neither "matrix" in
-  // "risk matrix" (high vocab, zero density) nor "Q2 revenue" (zero vocab, high
-  // density) scores above threshold alone. One incidental digit or variable does
-  // not overpower the requirement for actual mathematical vocabulary.
-  return Math.min(1, vocab * d * 12)
+  // Density provides a floor: vocabulary-heavy text with no notation does not
+  // score. A notation-light lecture (few variables, mostly spelled-out operators)
+  // can pass if vocabulary is strong enough. The curated VOCAB list now excludes
+  // business terms like "matrix" and "slope", so strong vocabulary is trustworthy.
+  if (d < 0.005) return 0
+  return Math.min(1, vocab * 8 + d * 0.8)
 }
 
 // Detection threshold. Tuned so the lecture fixture in math.test.mjs passes

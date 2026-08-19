@@ -57,3 +57,18 @@ test('one incidental digit does not trigger detection', () => {
     for the next quarter so we can solve these problems before the board meeting`
   assert.equal(looksMathy(businessTextWithDigit), false, 'vocabulary plus one digit must not be enough')
 })
+
+test('a notation-light lecture is detected', () => {
+  // A strong lecture on calculus with heavy vocabulary but almost no notation:
+  // strong VOCAB terms (derivative, integral, theorem, polynomial, coefficient)
+  // repeated, but only one single-letter variable. Density is low (one token
+  // out of 51), yet this must be detected because the curated VOCAB list now
+  // excludes business words like "matrix" and "slope", making strong vocabulary
+  // trustworthy to carry the detection when density meets the floor.
+  const lightNotationLecture = `the derivative of equation x is the rate of change and
+    when we use the power theorem we can differentiate a polynomial with many
+    coefficient terms and the integral of that same equation gives us the area
+    under the curve which is fundamental to understanding how these mathematical
+    concepts relate`
+  assert.equal(looksMathy(lightNotationLecture), true, 'strong math vocabulary with minimal notation must be detected')
+})
