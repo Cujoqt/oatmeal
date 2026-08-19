@@ -31,9 +31,16 @@ const OPERATOR = /[+\-*/=^<>]/
 function density(text) {
   const tokens = text.split(/\s+/).filter(Boolean)
   if (!tokens.length) return 0
-  const mathy = tokens.filter(
-    (t) => /\d/.test(t) || OPERATOR.test(t) || /^[a-z]$/i.test(t),
-  ).length
+  const mathy = tokens.filter((t) => {
+    if (/\d/.test(t) || OPERATOR.test(t)) return true
+    // Single letters like x, y, f are mathematical; articles (a) and pronouns (I)
+    // are not. Exclude them to avoid inflating density on ordinary prose.
+    if (/^[a-z]$/i.test(t)) {
+      const lower = t.toLowerCase()
+      return lower !== 'a' && lower !== 'i'
+    }
+    return false
+  }).length
   return mathy / tokens.length
 }
 
@@ -47,7 +54,13 @@ export function mathiness(text) {
   // is present at all, so a finance meeting saying "times" and "over" scores
   // nothing from them.
   const vocab = strong === 0 ? 0 : (strong + weak * 0.25) / words.length
-  return Math.min(1, vocab * 8 + density(text) * 0.8)
+  const d = density(text)
+  // Density is a required gate: vocabulary alone cannot score. Two signals are
+  // required together. Without mathematical notation (digits, operators, or
+  // variables), vocabulary in ordinary speech (e.g., "matrix" in "risk matrix",
+  // "slope" in "slope of the rollout") must not trigger detection.
+  if (d === 0) return 0
+  return Math.min(1, vocab * 8 + d * 0.8)
 }
 
 // Detection threshold. Tuned so the lecture fixture in math.test.mjs passes

@@ -35,3 +35,14 @@ test('a lecture scores strictly higher than a finance meeting', () => {
 test('a short line is never detected on its own', () => {
   assert.equal(looksMathy('the integral of x'), false, 'too short to be sure')
 })
+
+test('vocabulary in ordinary business context is not detected', () => {
+  // VOCAB words (matrix, slope, vector, solve) used in purely business sense,
+  // with no digits or operators: must not trigger detection despite containing
+  // multiple dictionary words. This is the false-positive case the heuristic
+  // exists to prevent.
+  const businessText = `we need to assess the risk matrix and review the slope of
+    this rollout and then discuss the vector of business priorities for the next
+    quarter so we can solve these problems before the board meeting`
+  assert.equal(looksMathy(businessText), false, 'vocabulary alone must not be enough')
+})
