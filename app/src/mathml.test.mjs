@@ -116,8 +116,41 @@ test('symbol commands substitute their unicode character', () => {
     pi: 'π', theta: 'θ', alpha: 'α', beta: 'β', lambda: 'λ', mu: 'μ',
     infty: '∞', cdot: '·', times: '×', div: '÷', leq: '≤', geq: '≥',
     neq: '≠', to: '→', pm: '±', approx: '≈',
+    // Epsilon-delta is the standard construction in a calculus or
+    // real-analysis lecture, and \epsilon/\varepsilon are distinct glyphs.
+    epsilon: 'ϵ', varepsilon: 'ε', delta: 'δ', Delta: 'Δ',
+    partial: '∂', in: '∈', notin: '∉', forall: '∀', exists: '∃',
+    subset: '⊂', subseteq: '⊆', cup: '∪', cap: '∩', equiv: '≡',
+    propto: '∝', sim: '∼', ll: '≪', gg: '≫', mapsto: '↦',
+    rightarrow: '→', Rightarrow: '⇒', nabla: '∇', perp: '⊥',
+    parallel: '∥', angle: '∠', gamma: 'γ', sigma: 'σ', rho: 'ρ',
+    tau: 'τ', phi: 'ϕ', varphi: 'φ', psi: 'ψ', omega: 'ω',
+    Sigma: 'Σ', Omega: 'Ω',
   }
   for (const [cmd, glyph] of Object.entries(cases)) {
     assert.deepEqual(parseLatex('\\' + cmd), [{ t: 'op', v: glyph }])
   }
+})
+
+test('function names added for the lecture whitelist are one token each', () => {
+  for (const fn of [
+    'arcsin', 'arccos', 'arctan', 'sinh', 'cosh', 'tanh',
+    'sec', 'csc', 'cot', 'deg', 'gcd',
+  ]) {
+    assert.deepEqual(parseLatex('\\' + fn), [{ t: 'fn', v: fn }])
+  }
+})
+
+test('\\max, \\min, \\sup, \\inf are bigops that can carry a limit underneath, like \\lim', () => {
+  for (const op of ['max', 'min', 'sup', 'inf']) {
+    assert.deepEqual(parseLatex('\\' + op), [{ t: 'bigop', v: op, under: [], over: [] }])
+  }
+  const [node] = parseLatex('\\max_{x \\in S}')
+  assert.equal(node.t, 'bigop')
+  assert.equal(node.v, 'max')
+  assert.deepEqual(node.under, [
+    { t: 'ident', v: 'x' },
+    { t: 'op', v: '∈' },
+    { t: 'ident', v: 'S' },
+  ])
 })

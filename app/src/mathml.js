@@ -9,12 +9,38 @@
 // every form. Only `toMathML` touches `document`.
 
 const SYMBOLS = {
+  // Lowercase Greek. LaTeX's default math font draws \epsilon and \phi as the
+  // "closed" glyphs (ϵ, ϕ); \varepsilon and \varphi are the curlier variants
+  // most people actually mean when they say the letter's name out loud. Both
+  // spellings are common in lecture transcripts, so both need their own entry.
   pi: 'π', theta: 'θ', alpha: 'α', beta: 'β', lambda: 'λ', mu: 'μ',
+  gamma: 'γ', delta: 'δ', epsilon: 'ϵ', varepsilon: 'ε', sigma: 'σ',
+  rho: 'ρ', tau: 'τ', phi: 'ϕ', varphi: 'φ', psi: 'ψ', omega: 'ω',
+  // Uppercase Greek used as an ordinary symbol (e.g. a small change \Delta,
+  // a general index set \Omega) — distinct from the \sum bigop below, which
+  // keeps its own glyph even though \Sigma is the letter it's named after.
+  Delta: 'Δ', Sigma: 'Σ', Omega: 'Ω',
+  // Operators and relations.
   infty: '∞', cdot: '·', times: '×', div: '÷', leq: '≤', geq: '≥',
-  neq: '≠', to: '→', pm: '±', approx: '≈',
+  neq: '≠', to: '→', pm: '±', approx: '≈', partial: '∂', nabla: '∇',
+  in: '∈', notin: '∉', forall: '∀', exists: '∃', subset: '⊂',
+  subseteq: '⊆', cup: '∪', cap: '∩', equiv: '≡', propto: '∝', sim: '∼',
+  ll: '≪', gg: '≫', mapsto: '↦', rightarrow: '→', Rightarrow: '⇒',
+  perp: '⊥', parallel: '∥', angle: '∠',
 }
-const FUNCTIONS = new Set(['sin', 'cos', 'tan', 'log', 'ln', 'exp'])
-const BIGOPS = { int: '∫', sum: '∑', prod: '∏', lim: 'lim' }
+const FUNCTIONS = new Set([
+  'sin', 'cos', 'tan', 'log', 'ln', 'exp',
+  'arcsin', 'arccos', 'arctan', 'sinh', 'cosh', 'tanh', 'sec', 'csc', 'cot',
+  'deg', 'gcd',
+])
+// \max, \min, \sup, \inf go here rather than in FUNCTIONS because a lecture
+// writes them the same way as \lim — with a constraint stacked underneath
+// (\max_{x \in S}) — and bigop is the node type that already renders a
+// glyph with under/over limits via munderover.
+const BIGOPS = {
+  int: '∫', sum: '∑', prod: '∏', lim: 'lim',
+  max: 'max', min: 'min', sup: 'sup', inf: 'inf',
+}
 
 // parseAtom / parseOne / parseTokens are mutually recursive with no natural
 // base case other than running out of tokens, so a brace group nested deeper

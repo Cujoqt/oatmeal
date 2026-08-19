@@ -562,10 +562,17 @@ worked answer. Questions must test the same techniques the lecture used, not har
 unrelated ones.
 
 Write every mathematical expression in LaTeX between \\( and \\) inline, or between \\[ and \\] \
-on its own line for a displayed equation. Never use dollar signs as math delimiters. Use only \
-\\frac, \\sqrt, \\int, \\sum, \\lim, ^, _, \\pi, \\theta, \\alpha, \\beta, \\infty, \\cdot, \
-\\times, \\div, \\leq, \\geq, \\neq, \\to, \\sin, \\cos, \\tan, \\log, \\ln. Write anything \
-outside that set in words instead.
+on its own line for a displayed equation. Never use dollar signs as math delimiters. You may use \
+only these commands, and no others: \\frac, \\sqrt, \\int, \\sum, \\prod, \\lim, \\max, \\min, \
+\\sup, \\inf, ^, _; the Greek letters \\alpha, \\beta, \\gamma, \\delta, \\Delta, \\epsilon, \
+\\varepsilon, \\theta, \\lambda, \\mu, \\pi, \\rho, \\sigma, \\Sigma, \\tau, \\phi, \\varphi, \
+\\psi, \\omega, \\Omega (no others — if the letter you need is not in this list, spell its \
+name out in words); the functions \\sin, \\cos, \\tan, \\sec, \\csc, \\cot, \\arcsin, \\arccos, \
+\\arctan, \\sinh, \\cosh, \\tanh, \\log, \\ln, \\exp, \\gcd, \\deg; and \\cdot, \\times, \\div, \
+\\pm, \\leq, \\geq, \\neq, \\ll, \\gg, \\to, \\rightarrow, \\Rightarrow, \\mapsto, \\approx, \
+\\equiv, \\propto, \\sim, \\in, \\notin, \\subset, \\subseteq, \\cup, \\cap, \\forall, \\exists, \
+\\partial, \\nabla, \\infty, \\perp, \\parallel, \\angle. Write anything outside that set — \
+including matrices, cases, aligned equations, \\binom, and chemical notation — in words instead.
 
 Be faithful to the transcript. Never invent results, steps or numbers that are not there. If \
 the transcript is too short or too garbled to write up, say so plainly in one sentence and stop.
@@ -1002,6 +1009,19 @@ mod grounding_tests {
         assert!(
             NOTES_SYSTEM.contains(crate::library::VIDEO_DELIMITER),
             "NOTES_SYSTEM does not name {}",
+            crate::library::VIDEO_DELIMITER
+        );
+    }
+
+    #[test]
+    fn the_lecture_prompt_names_the_delimiter_the_sources_actually_carry() {
+        // Same drift risk as NOTES_SYSTEM above: LECTURE_SYSTEM also promises
+        // "(from video)" attribution, so it also has to name the literal
+        // marker library::source_text actually writes between transcript and
+        // video text.
+        assert!(
+            LECTURE_SYSTEM.contains(crate::library::VIDEO_DELIMITER),
+            "LECTURE_SYSTEM does not name {}",
             crate::library::VIDEO_DELIMITER
         );
     }
