@@ -16,8 +16,20 @@ const SYMBOLS = {
 const FUNCTIONS = new Set(['sin', 'cos', 'tan', 'log', 'ln', 'exp'])
 const BIGOPS = { int: '∫', sum: '∑', prod: '∏', lim: 'lim' }
 
+// parseAtom / parseOne / parseTokens are mutually recursive with no natural
+// base case other than running out of tokens, so a brace group nested deeper
+// than this blows the call stack before it ever does that — this is LLM-
+// generated LaTeX, not hand-written, and the never-throw guarantee has to
+// hold against input nobody would write by hand. No real lecture nests 100
+// levels deep, so bailing out to a raw node here costs nothing real.
+const MAX_DEPTH = 100
+
 /// Split into the smallest units the parser cares about. `\,` and `\;` are
 /// LaTeX spacing and carry no meaning here, so they are dropped outright.
+/// `\left` and `\right` only control delimiter sizing (MathML sizes
+/// delimiters itself), so they are dropped the same way — the delimiter
+/// character that follows (e.g. the `(` in `\left(`) is an ordinary
+/// character and gets tokenized normally on the next pass.
 function tokenize(src) {
   const out = []
   let i = 0
@@ -28,6 +40,7 @@ function tokenize(src) {
       if (!m) { out.push({ k: 'raw', v: c }); i += 1; continue }
       i += m[0].length
       if ([',', ';', '!', ' '].includes(m[1])) continue
+      if (m[1] === 'left' || m[1] === 'right') continue
       out.push({ k: 'cmd', v: m[1] })
       continue
     }
@@ -44,27 +57,43 @@ function tokenize(src) {
 }
 
 /// One unit that a `^` or `_` can attach to: a braced group, or a single token.
-function parseAtom(ts, pos) {
+/// `depth` counts brace nesting so far; it is threaded through the three
+/// mutually recursive parse functions purely to enforce MAX_DEPTH.
+function parseAtom(ts, pos, depth) {
   const t = ts[pos]
   if (!t) return [null, pos]
   if (t.k === '{') {
+    if (depth >= MAX_DEPTH) {
+      // Past the ceiling: don't recurse into the contents at all, just walk
+      // past the matching close brace (a plain loop, not recursion — this is
+      // the step that keeps arbitrarily deep leftover nesting from costing
+      // any more stack) and hand back the whole group as raw text.
+      let i = pos + 1
+      let braceDepth = 1
+      while (i < ts.length && braceDepth > 0) {
+        if (ts[i].k === '{') braceDepth += 1
+        else if (ts[i].k === '}') braceDepth -= 1
+        i += 1
+      }
+      return [[{ t: 'raw', v: '{...}' }], i]
+    }
     const items = []
     let i = pos + 1
-    let depth = 1
+    let braceDepth = 1
     const inner = []
     while (i < ts.length) {
-      if (ts[i].k === '{') depth += 1
-      if (ts[i].k === '}') { depth -= 1; if (depth === 0) break }
+      if (ts[i].k === '{') braceDepth += 1
+      if (ts[i].k === '}') { braceDepth -= 1; if (braceDepth === 0) break }
       inner.push(ts[i]); i += 1
     }
-    items.push(...parseTokens(inner))
+    items.push(...parseTokens(inner, depth + 1))
     return [items, i + 1]
   }
-  const [node, next] = parseOne(ts, pos)
+  const [node, next] = parseOne(ts, pos, depth)
   return [node ? [node] : null, next]
 }
 
-function parseOne(ts, pos) {
+function parseOne(ts, pos, depth) {
   const t = ts[pos]
   if (!t) return [null, pos]
   if (t.k === 'num') return [{ t: 'num', v: t.v }, pos + 1]
@@ -72,13 +101,13 @@ function parseOne(ts, pos) {
   if (t.k === 'op') return [{ t: 'op', v: t.v }, pos + 1]
   if (t.k === 'cmd') {
     if (t.v === 'frac') {
-      const [num, p1] = parseAtom(ts, pos + 1)
-      const [den, p2] = parseAtom(ts, p1)
+      const [num, p1] = parseAtom(ts, pos + 1, depth)
+      const [den, p2] = parseAtom(ts, p1, depth)
       if (num && den) return [{ t: 'frac', num, den }, p2]
       return [{ t: 'raw', v: '\\frac' }, pos + 1]
     }
     if (t.v === 'sqrt') {
-      const [arg, p1] = parseAtom(ts, pos + 1)
+      const [arg, p1] = parseAtom(ts, pos + 1, depth)
       if (arg) return [{ t: 'sqrt', arg }, p1]
       return [{ t: 'raw', v: '\\sqrt' }, pos + 1]
     }
@@ -88,7 +117,7 @@ function parseOne(ts, pos) {
     return [{ t: 'raw', v: '\\' + t.v }, pos + 1]
   }
   if (t.k === '{') {
-    const [items, p1] = parseAtom(ts, pos)
+    const [items, p1] = parseAtom(ts, pos, depth)
     // A bare group with no script attached is just its contents, except when
     // it parsed as nothing recognisable — then keep the source text.
     if (items && items.length) return [items.length === 1 ? items[0] : { t: 'group', items }, p1]
@@ -97,11 +126,11 @@ function parseOne(ts, pos) {
   return [{ t: 'raw', v: t.v }, pos + 1]
 }
 
-function parseTokens(ts) {
+function parseTokens(ts, depth) {
   const out = []
   let i = 0
   while (i < ts.length) {
-    let [node, next] = parseOne(ts, i)
+    let [node, next] = parseOne(ts, i, depth)
     if (!node) { i = next > i ? next : i + 1; continue }
     i = next
     // Scripts bind to whatever came immediately before.
@@ -109,7 +138,7 @@ function parseTokens(ts) {
     let over = null
     while (i < ts.length && (ts[i].k === '^' || ts[i].k === '_')) {
       const kind = ts[i].k
-      const [arg, p] = parseAtom(ts, i + 1)
+      const [arg, p] = parseAtom(ts, i + 1, depth)
       i = p
       if (kind === '^') over = arg
       else under = arg
@@ -132,5 +161,5 @@ function parseTokens(ts) {
 /// Parse a LaTeX fragment into nodes. Never throws — unsupported input becomes
 /// `raw` nodes that the emitter renders as plain text.
 export function parseLatex(src) {
-  return parseTokens(tokenize(String(src)))
+  return parseTokens(tokenize(String(src)), 0)
 }

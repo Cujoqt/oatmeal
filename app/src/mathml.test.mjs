@@ -70,3 +70,54 @@ test('a whole lecture expression parses without throwing', () => {
   assert.ok(nodes.some((n) => n.t === 'bigop'))
   assert.ok(nodes.some((n) => n.t === 'frac'))
 })
+
+test('\\left and \\right are dropped; the delimiters they wrap parse as ordinary characters', () => {
+  const nodes = parseLatex('\\left(x\\right)')
+  assert.deepEqual(nodes, [
+    { t: 'op', v: '(' },
+    { t: 'ident', v: 'x' },
+    { t: 'op', v: ')' },
+  ])
+  assert.ok(!nodes.some((n) => n.t === 'raw'))
+})
+
+test('deeply nested braces return a raw node instead of overflowing the stack', () => {
+  const src = '{'.repeat(5000) + 'x' + '}'.repeat(5000)
+  const nodes = parseLatex(src)
+  assert.ok(Array.isArray(nodes))
+  assert.ok(nodes.length > 0)
+})
+
+test('subscript and superscript together on a plain identifier is a subsup, not a bigop', () => {
+  assert.deepEqual(parseLatex('x_1^2'), [
+    {
+      t: 'subsup',
+      base: { t: 'ident', v: 'x' },
+      under: [{ t: 'num', v: '1' }],
+      over: [{ t: 'num', v: '2' }],
+    },
+  ])
+})
+
+test('a bare \\sum with no limits attached', () => {
+  assert.deepEqual(parseLatex('\\sum'), [
+    { t: 'bigop', v: 'sum', under: [], over: [] },
+  ])
+})
+
+test('a bare \\lim with no limits attached', () => {
+  assert.deepEqual(parseLatex('\\lim'), [
+    { t: 'bigop', v: 'lim', under: [], over: [] },
+  ])
+})
+
+test('symbol commands substitute their unicode character', () => {
+  const cases = {
+    pi: 'π', theta: 'θ', alpha: 'α', beta: 'β', lambda: 'λ', mu: 'μ',
+    infty: '∞', cdot: '·', times: '×', div: '÷', leq: '≤', geq: '≥',
+    neq: '≠', to: '→', pm: '±', approx: '≈',
+  }
+  for (const [cmd, glyph] of Object.entries(cases)) {
+    assert.deepEqual(parseLatex('\\' + cmd), [{ t: 'op', v: glyph }])
+  }
+})
