@@ -16,9 +16,10 @@ use std::time::{Duration, Instant};
 /// them.
 pub const MIN_INTERVAL: Duration = Duration::from_secs(6);
 
-/// Longest question worth answering. Anything longer is almost always a run-on of
-/// misrecognized speech rather than a real question, and spending the GPU on it
-/// would delay the answer to the next real one.
+/// Longest line worth sending to the model, whichever feature sends it.
+/// Anything longer is almost always a run-on of misrecognized speech rather
+/// than a real question or expression, and spending the GPU on it would delay
+/// the next real one.
 pub const MAX_QUESTION_CHARS: usize = 500;
 
 /// Single-flight, rate-limited gate shared by every live-panel feature that calls
