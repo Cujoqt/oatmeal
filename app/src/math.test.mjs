@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { looksMathy, mathiness } from './math.js'
+import { looksMathy, mathiness, speechToLatex } from './math.js'
 
 // Real ASR output shape: no punctuation to speak of, spelled-out operators.
 const LECTURE = `so the derivative of x squared is 2 x and if we integrate that
@@ -141,4 +141,88 @@ const REAL_ANALYSIS_LECTURE = `so to prove continuity at this point we need to
 
 test('a proof-heavy real-analysis lecture is detected', () => {
   assert.equal(looksMathy(REAL_ANALYSIS_LECTURE), true)
+})
+
+// speechToLatex — the brief's four verbatim cases, then coverage beyond them.
+// Every emitted command must exist in mathml.js's SYMBOLS/FUNCTIONS/BIGOPS,
+// since that table is the only thing standing between this output and a
+// rendered equation in the live panel.
+
+test('spoken powers', () => {
+  assert.equal(speechToLatex('x squared plus 3 x'), 'x^2 + 3x')
+})
+
+test('spoken roots', () => {
+  assert.equal(speechToLatex('the square root of 2'), '\\sqrt{2}')
+})
+
+test('spoken fractions', () => {
+  assert.equal(speechToLatex('a over b'), '\\frac{a}{b}')
+})
+
+test('what it cannot handle returns null rather than a wrong answer', () => {
+  assert.equal(
+    speechToLatex('the limit as h goes to zero of f of x plus h minus f of x over h'),
+    null,
+    'falling through to the model beats emitting mangled LaTeX',
+  )
+})
+
+test('cubed', () => {
+  assert.equal(speechToLatex('x cubed'), 'x^3')
+})
+
+test('to the power of', () => {
+  assert.equal(speechToLatex('x to the power of 5'), 'x^5')
+})
+
+test('square root without the leading article', () => {
+  assert.equal(speechToLatex('square root of 9'), '\\sqrt{9}')
+})
+
+test('pi via multiplication', () => {
+  assert.equal(speechToLatex('two times pi'), '2 \\times \\pi')
+})
+
+test('theta and equals', () => {
+  assert.equal(speechToLatex('theta equals pi'), '\\theta = \\pi')
+})
+
+test('minus', () => {
+  assert.equal(speechToLatex('x minus 1'), 'x - 1')
+})
+
+test('divided by, spelled-out numbers', () => {
+  assert.equal(speechToLatex('ten divided by two'), '10 \\div 2')
+})
+
+test('the definite integral from A to B', () => {
+  assert.equal(
+    speechToLatex('the integral from zero to one of x squared d x'),
+    '\\int_{0}^{1} x^2 \\, dx',
+  )
+})
+
+test('a decimal number is refused rather than mangled', () => {
+  // Punctuation is a word separator during normalization, so without this
+  // guard "3.5" would tokenize as "3" then "5" and implicit multiplication
+  // would concatenate them into "35" — silently changing the value.
+  assert.equal(speechToLatex('x plus 3.5'), null)
+})
+
+test('ordinary conversation with a number in it returns null', () => {
+  assert.equal(speechToLatex("let's meet at 3 tomorrow"), null)
+})
+
+test('a sentence the table only covers halfway returns null', () => {
+  // Real integral syntax needs "from A to B" — dropping it is a common way
+  // a lecturer's phrasing falls just outside the table's coverage.
+  assert.equal(speechToLatex('the integral of x squared'), null)
+})
+
+test('"over" only forms a fraction when it is the sentence\'s only operator', () => {
+  // "x plus 1 over 2" is genuinely ambiguous — over the whole sum, or just
+  // the 1? Guessing either reading risks emitting the wrong one with no way
+  // for anything downstream to tell, so this falls through to the model.
+  assert.equal(speechToLatex('x plus 1 over 2'), null)
 })
