@@ -540,9 +540,20 @@
     .prose li { margin-bottom: 5px; }
     .prose strong { color: var(--ink); font-weight: 600; }
     .prose .placeholder { color: var(--faint); font-style: italic; }
+    math { font-size: 1.05em; }
+    math[display="block"] { display: block; margin: 10px 0; text-align: center; }
+    .solution {
+      margin: 4px 0 12px 18px; padding: 6px 10px;
+      border-left: 2px solid var(--line-2); border-radius: 0 4px 4px 0;
+    }
+    .solution summary {
+      cursor: pointer; font-size: 12px; color: var(--muted); user-select: none;
+    }
+    .solution[open] summary { color: var(--ink-soft); margin-bottom: 6px; }
+    .solution p { margin: 0; color: var(--ink-soft); }
 
-    /* A speaker's turn: the voice once at the top, then everything they said
-       until somebody else starts or the block runs past the chunk length. */
+    /* One paragraph of transcript: the timestamp once at the top, then
+       everything said until the block runs past the chunk length. */
     .seg-turn { margin: 0 0 14px; }
     .seg-turn .who {
       display: flex; align-items: baseline; gap: 8px; margin-bottom: 3px;
@@ -1114,10 +1125,6 @@
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8" /><circle cx="12" cy="12" r="3.4" fill="currentColor" stroke="none" /></svg>
               Continue recording
             </button>
-            <button class="chip act" id="chipSpeakers" title="Work out who said each line">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3.2" /><path d="M3.5 19c.6-3 2.8-4.6 5.5-4.6S13.9 16 14.5 19" /><path d="M16 6.5a3.4 3.4 0 0 1 0 6.4M18.5 4.6a6.2 6.2 0 0 1 0 10.2" /></svg>
-              Identify speakers
-            </button>
             <button class="chip act" id="chipExport" title="Export as Markdown">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v10M8 10l4 4 4-4M5 18h14" /></svg>
               Export
@@ -1198,7 +1205,6 @@
 
           <div class="set-card">
             <h2>Transcript</h2>
-            <p>“Identify speakers” works out who said each line and rewrites the transcript with their voices. It runs on-device, downloads a ~46 MB model the first time, and takes a few minutes on a long meeting.</p>
             <div class="field">
               <label for="chunkSeconds">Paragraph length</label>
               <select id="chunkSeconds">
@@ -1207,7 +1213,7 @@
                 <option value="60">Long — every minute</option>
                 <option value="180">Very long — every three minutes</option>
               </select>
-              <div class="hint">How much of one person's speech is read as a single block. A new speaker always starts a new one.</div>
+              <div class="hint">How much of the transcript is read as a single paragraph before a new one starts.</div>
             </div>
           </div>
 

@@ -20,11 +20,6 @@ serde_json = "1"
 cpal = "0.15"
 hound = "3.5"
 
-# Speaker labels. sherpa-onnx runs the two ONNX models (pyannote segmentation +
-# a speaker-embedding net) on-device; `static` links its prebuilt library in so
-# the bundle ships no extra dylib, and `download-binaries` fetches that library
-# from the tag pinned in the crate rather than building it from source.
-sherpa-rs = { version = "0.6", default-features = false, features = ["download-binaries", "static"] }
 screencapturekit = "8.0.1"
 whisper-rs = { version = "0.16.0", default-features = false, features = ["metal"] }
 # Pinned to 0.1.141, the newest release whose vendored ggml is ABI-compatible

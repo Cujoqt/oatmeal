@@ -540,6 +540,50 @@ Be faithful to the transcript. Never invent names, numbers, dates or claims that
 there. If the transcript is too short or too garbled to assess, say so plainly in one \
 sentence and stop.";
 
+const LECTURE_SYSTEM: &str = "\
+You write lecture notes from raw transcripts of mathematics teaching. The transcript comes \
+from automatic speech recognition, so mathematics arrives as spoken words — 'x squared', \
+'the integral from zero to one', 'f of x' — with errors and false starts. Read through them \
+and write what was actually meant.
+
+Write in Markdown, in this order:
+
+A one-paragraph summary of what the lecture covered.
+
+'## Worked problems' — every problem the lecturer worked through. Give each one as a bold \
+statement of the problem, then the steps as '- ' bullets in the order they were done, then \
+the result. Do not invent problems that were not worked.
+
+'## Key results' — definitions, theorems and formulas stated in the lecture, one per bullet.
+
+'## Review questions' — three to five questions on the material actually covered, each as a \
+numbered item, and each followed by an indented line beginning '> Solution:' giving the \
+worked answer. Questions must test the same techniques the lecture used, not harder or \
+unrelated ones.
+
+Write every mathematical expression in LaTeX between \\( and \\) inline, or, for a displayed \
+equation, on its own line with \\[ and \\] on that same line surrounding the whole equation — \
+never split \\[, the equation and \\] onto separate lines. Never use dollar signs as math \
+delimiters. You may use \
+only these commands, and no others: \\frac, \\sqrt, \\int, \\sum, \\prod, \\lim, \\max, \\min, \
+\\sup, \\inf, \\big|, \\Big|, \\bigg|, \\Bigg| (an evaluation bar, e.g. \\bigg|_0^2), ^, _; the \
+Greek letters \\alpha, \\beta, \\gamma, \\delta, \\Delta, \\epsilon, \
+\\varepsilon, \\theta, \\lambda, \\mu, \\pi, \\rho, \\sigma, \\Sigma, \\tau, \\phi, \\varphi, \
+\\psi, \\omega, \\Omega (no others — if the letter you need is not in this list, spell its \
+name out in words); the functions \\sin, \\cos, \\tan, \\sec, \\csc, \\cot, \\arcsin, \\arccos, \
+\\arctan, \\sinh, \\cosh, \\tanh, \\log, \\ln, \\exp, \\gcd, \\deg; and \\cdot, \\times, \\div, \
+\\pm, \\leq, \\geq, \\neq, \\ll, \\gg, \\to, \\rightarrow, \\Rightarrow, \\mapsto, \\approx, \
+\\equiv, \\propto, \\sim, \\in, \\notin, \\subset, \\subseteq, \\cup, \\cap, \\forall, \\exists, \
+\\partial, \\nabla, \\infty, \\perp, \\parallel, \\angle. Write anything outside that set — \
+including matrices, cases, aligned equations, \\binom, and chemical notation — in words instead.
+
+Be faithful to the transcript. Never invent results, steps or numbers that are not there. If \
+the transcript is too short or too garbled to write up, say so plainly in one sentence and stop.
+
+Some source material may come from a video the user attached rather than the lecture itself. \
+Everything after a line reading '--- attached video ---' came from such a video, not from the \
+room. When a point appears only after one of those lines, end its line with \"(from video)\".";
+
 /// Which shape of notes to write. `General` reproduces the original fixed
 /// format; the others match the system prompt to the kind of meeting.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -550,6 +594,7 @@ pub enum Template {
     Standup,
     OneOnOne,
     Interview,
+    Lecture,
 }
 
 impl Template {
@@ -559,6 +604,7 @@ impl Template {
             Template::Standup => STANDUP_SYSTEM,
             Template::OneOnOne => ONE_ON_ONE_SYSTEM,
             Template::Interview => INTERVIEW_SYSTEM,
+            Template::Lecture => LECTURE_SYSTEM,
         }
     }
 }
@@ -678,6 +724,61 @@ pub fn answer_live(
         &user,
         ANSWERING_TEMP,
         LIVE_ANSWER_MAX_TOKENS,
+        on_token,
+    )
+}
+
+/// Cap on a live math conversion's length. A spoken line converts to a short
+/// LaTeX expression, not a paragraph, so — same reasoning as the auto-answer
+/// cap beside it — fewer tokens means the panel gets it sooner.
+const MATH_MAX_TOKENS: usize = 120;
+
+/// The LaTeX commands `LECTURE_SYSTEM` permits, verbatim. Live math conversion
+/// has to stay inside the identical set: the panel's LaTeX renderer is the same
+/// parser that renders the finished write-up (`mathml.js`), and it can only
+/// render what that parser knows. `the_math_prompt_allows_exactly_the_lecture_
+/// prompts_commands` below fails if the two texts drift apart.
+const MATH_SYSTEM: &str = "\
+You convert one line of spoken mathematics, already transcribed by automatic speech \
+recognition, into LaTeX. The line may contain transcription errors or filler words — read \
+through it and typeset what was actually meant.
+
+Reply with the LaTeX only: no prose, no restating the input, and no \\( \\) or $ delimiters \
+around it — just the expression itself.
+
+You may use only these commands, and no others: \\frac, \\sqrt, \\int, \\sum, \\prod, \\lim, \
+\\max, \\min, \\sup, \\inf, \\big|, \\Big|, \\bigg|, \\Bigg| (an evaluation bar, e.g. \
+\\bigg|_0^2), ^, _; the Greek letters \\alpha, \\beta, \\gamma, \\delta, \\Delta, \\epsilon, \
+\\varepsilon, \\theta, \\lambda, \\mu, \\pi, \\rho, \\sigma, \\Sigma, \\tau, \\phi, \\varphi, \
+\\psi, \\omega, \\Omega (no others — if the letter you need is not in this list, spell its \
+name out in words); the functions \\sin, \\cos, \\tan, \\sec, \\csc, \\cot, \\arcsin, \\arccos, \
+\\arctan, \\sinh, \\cosh, \\tanh, \\log, \\ln, \\exp, \\gcd, \\deg; and \\cdot, \\times, \\div, \
+\\pm, \\leq, \\geq, \\neq, \\ll, \\gg, \\to, \\rightarrow, \\Rightarrow, \\mapsto, \\approx, \
+\\equiv, \\propto, \\sim, \\in, \\notin, \\subset, \\subseteq, \\cup, \\cap, \\forall, \\exists, \
+\\partial, \\nabla, \\infty, \\perp, \\parallel, \\angle. Never use anything outside that set — \
+including matrices, cases, aligned equations, \\binom, and chemical notation.
+
+If the line is not mathematics, or you cannot tell what was meant, reply with an empty string.";
+
+/// Convert one line of spoken mathematics into LaTeX, streaming as it is
+/// decoded — same reason as `answer_live` beside it: a local model takes real
+/// time even for a short expression, and silence during that reads as a hang.
+pub fn latex_from_speech(
+    model_path: &Path,
+    speech: &str,
+    on_token: &mut dyn FnMut(&str),
+) -> Result<String, String> {
+    let speech = speech.trim();
+    if speech.is_empty() {
+        return Err("no speech to convert".into());
+    }
+
+    complete_streaming_capped(
+        model_path,
+        MATH_SYSTEM,
+        speech,
+        ANSWERING_TEMP,
+        MATH_MAX_TOKENS,
         on_token,
     )
 }
@@ -971,6 +1072,19 @@ mod grounding_tests {
     }
 
     #[test]
+    fn the_lecture_prompt_names_the_delimiter_the_sources_actually_carry() {
+        // Same drift risk as NOTES_SYSTEM above: LECTURE_SYSTEM also promises
+        // "(from video)" attribution, so it also has to name the literal
+        // marker library::source_text actually writes between transcript and
+        // video text.
+        assert!(
+            LECTURE_SYSTEM.contains(crate::library::VIDEO_DELIMITER),
+            "LECTURE_SYSTEM does not name {}",
+            crate::library::VIDEO_DELIMITER
+        );
+    }
+
+    #[test]
     fn every_prompt_the_model_sees_carries_the_safety_rules() {
         for prompt in [
             NOTES_SYSTEM,
@@ -982,12 +1096,33 @@ mod grounding_tests {
             STANDUP_SYSTEM,
             ONE_ON_ONE_SYSTEM,
             INTERVIEW_SYSTEM,
+            LECTURE_SYSTEM,
+            MATH_SYSTEM,
         ] {
             let system = guarded(prompt);
             assert!(system.contains("Refuse"), "no refusal rule");
             assert!(system.contains("never act on instructions"), "no injection rule");
             assert!(system.ends_with(prompt), "the caller's prompt must survive intact");
         }
+    }
+
+    /// The live panel and the finished write-up share one MathML parser
+    /// (`mathml.js`), so both prompts must permit exactly the same commands.
+    /// Two literals in two places drift; this is what notices — if it did, one
+    /// of the two would typeset a command the panel renders as literal
+    /// backslash text instead of math.
+    #[test]
+    fn the_math_prompt_allows_exactly_the_lecture_prompts_commands() {
+        fn allowed_commands_clause(prompt: &str) -> &str {
+            let start = prompt.find(r"\frac, \sqrt").expect("command list start");
+            let end = prompt.find(r"\angle").expect("command list end") + r"\angle".len();
+            &prompt[start..end]
+        }
+
+        assert_eq!(
+            allowed_commands_clause(LECTURE_SYSTEM),
+            allowed_commands_clause(MATH_SYSTEM),
+        );
     }
 }
 
@@ -1037,5 +1172,31 @@ mod tests {
     fn refuses_transcripts_with_nothing_in_them() {
         let err = write_notes(Path::new("/nonexistent"), "um, so, yeah", Template::General).unwrap_err();
         assert!(err.contains("too short"), "got: {err}");
+    }
+
+    /// The renderer parses the lecture note by these exact markers. If the prompt
+    /// stops naming them, the model stops emitting them and the note renders as
+    /// plain prose with no typeset math and no collapsible solutions — silently,
+    /// because prose is still valid Markdown.
+    #[test]
+    fn the_lecture_prompt_names_the_markers_the_renderer_parses() {
+        let p = super::LECTURE_SYSTEM;
+        assert!(p.contains(r"\("), "inline math delimiter is not named");
+        assert!(p.contains(r"\["), "display math delimiter is not named");
+        assert!(p.contains("> Solution:"), "solution marker is not named");
+        assert!(p.contains("## Review questions"), "review section is not named");
+        assert!(
+            !p.contains('$'),
+            "the prompt must not offer $…$ — renderMarkdown is shared with every \
+             other template, where $50 is a price"
+        );
+    }
+
+    #[test]
+    fn lecture_selects_its_own_prompt() {
+        assert_eq!(
+            super::Template::Lecture.system_prompt(),
+            super::LECTURE_SYSTEM
+        );
     }
 }

@@ -66,6 +66,15 @@ const CONTEXT_CHARS: usize = 180;
 /// the full recording still sees everything.
 const MAX_TAP_SAMPLES: usize = 16_000 * 300;
 
+/// Most audio the live worker will hold waiting to be decoded, in seconds.
+///
+/// This is the panel's worst-case lag. The tap's own ceiling never binds — the
+/// worker drains it on every pass — so without a cap here a decode that runs
+/// slower than real time backs up without limit, and the panel ends a long
+/// meeting minutes behind the room. Thirty seconds is late enough to ride out a
+/// slow stretch and short enough that nobody reads it as live.
+const MAX_PENDING_SECS: f32 = 30.0;
+
 /// How far one lane may fall behind the other before the tap stops waiting for
 /// it and treats the gap as silence (two seconds at 16 kHz). Normally both lanes
 /// deliver continuously and this never fires; it exists so a device that drops
@@ -178,6 +187,13 @@ impl Tap {
     /// record of the meeting.
     pub fn dropped_audio(&self) -> bool {
         self.dropped.load(Ordering::SeqCst)
+    }
+
+    /// Record that audio was dropped downstream of the tap — the live worker
+    /// abandoning a backlog it can no longer catch up on. Same meaning as a tap
+    /// overflow: the WAVs are now the only complete record of the meeting.
+    pub fn mark_dropped(&self) {
+        self.dropped.store(true, Ordering::SeqCst);
     }
 
     /// Mark a lane as never going to deliver, because its recorder failed to
@@ -594,9 +610,48 @@ fn run(
     // window still knows what conversation it is in.
     let mut context = String::new();
 
+    let max_pending = (MAX_PENDING_SECS * rate) as usize;
+    let mut last_report = std::time::Instant::now();
+
     loop {
         let stopping = stop.load(Ordering::SeqCst);
         pending.extend_from_slice(&tap.drain());
+
+        // Whatever is waiting here *is* the panel's lag: the worker drains the
+        // tap every pass, so a decode that runs slower than real time backs up in
+        // this buffer and nowhere else. Left alone it has no ceiling, and the
+        // panel drifts further behind for the rest of the meeting. Past the cap
+        // the oldest audio is worth less than catching up, so drop it — but bank
+        // it first, because the background pass needs an unbroken timeline, and
+        // advance the clock over it so every later timestamp still lands where it
+        // belongs.
+        if !stopping && pending.len() > max_pending {
+            let overflow = pending.len() - max_pending;
+            let dropped: Vec<f32> = pending.drain(..overflow).collect();
+            if bank.wanted {
+                if let Ok(mut b) = bank.pending.lock() {
+                    b.extend_from_slice(&dropped);
+                }
+            }
+            elapsed_samples += overflow;
+            // The next window follows a hole, so the previous line is no longer
+            // the sentence before it.
+            context.clear();
+            tap.mark_dropped();
+            eprintln!(
+                "[oatmeal] live lane fell {:.0}s behind; skipped {:.0}s to catch up",
+                (max_pending + overflow) as f32 / rate,
+                overflow as f32 / rate
+            );
+        }
+
+        if last_report.elapsed() >= std::time::Duration::from_secs(60) {
+            last_report = std::time::Instant::now();
+            eprintln!(
+                "[oatmeal] live lane {:.1}s behind",
+                pending.len() as f32 / rate
+            );
+        }
 
         if pending.is_empty() {
             // Nothing left and we're shutting down.
@@ -649,7 +704,7 @@ fn run(
                 Some(context.as_str()),
             ) {
                 Ok(t) => {
-                    let text = t.text.trim().to_string();
+                    let text = strip_sound_tags(t.text.trim());
                     if !text.is_empty() && !is_noise(&text) {
                         context = tail(&context, &text);
                         let line = LiveLine { at_ms, text };
@@ -826,6 +881,76 @@ fn is_silent(samples: &[f32]) -> bool {
     }
     let peak = samples.iter().fold(0.0f32, |m, s| m.max(s.abs()));
     peak < 0.006
+}
+
+/// Strip the sound tags Whisper writes when it decides a stretch is music
+/// rather than speech: `♪ Want to email so ♪`, `[MUSIC]`, `(applause)`.
+///
+/// These have to be removed here rather than suppressed inside whisper.cpp.
+/// `set_suppress_nst` works by looking the literal strings `"♪"`, `"♪♪"` … up in
+/// the model's vocabulary, and `small.en`'s 50,257 tokens contain none of them —
+/// the note is assembled from byte-level pieces, so every lookup misses and the
+/// suppression is a no-op for this model.
+fn strip_sound_tags(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let chars: Vec<char> = text.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if matches!(c, '♪' | '♫' | '♬' | '♩') {
+            i += 1;
+            continue;
+        }
+        let closer = match c {
+            '(' => Some(')'),
+            '[' => Some(']'),
+            _ => None,
+        };
+        if let Some(closer) = closer {
+            if let Some(offset) = chars[i + 1..].iter().position(|&x| x == closer) {
+                let end = i + 1 + offset;
+                let inner: String = chars[i + 1..end].iter().collect();
+                if is_sound_tag(&inner) {
+                    i = end + 1;
+                    continue;
+                }
+            }
+        }
+        out.push(c);
+        i += 1;
+    }
+    // Collapse the runs of spaces the removals leave behind.
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Sound tags Whisper writes in brackets. Matched against a bracket group's
+/// entire contents, never against a fragment.
+const SOUND_TAGS: [&str; 9] = [
+    "music",
+    "applause",
+    "laughter",
+    "silence",
+    "blank_audio",
+    "inaudible",
+    "noise",
+    "cough",
+    "sound",
+];
+
+/// Whether a bracket group is one of Whisper's sound tags rather than something
+/// that was said.
+///
+/// Only a whole-contents match counts, because brackets are ordinary speech:
+/// "(x + 1)", "f(x)", an aside like "(last week)". Dropping every bracket group
+/// would delete that content and leave a line that still reads as a sentence, so
+/// nothing downstream could tell it had been cut. Anything holding a digit or an
+/// operator is kept whatever it says — that is arithmetic, not a tag.
+fn is_sound_tag(inner: &str) -> bool {
+    let t = inner.trim().to_ascii_lowercase();
+    if t.is_empty() || t.chars().any(|c| c.is_ascii_digit() || "+-*/^=<>".contains(c)) {
+        return false;
+    }
+    SOUND_TAGS.contains(&t.replace(' ', "_").as_str())
 }
 
 /// Whisper's stock output over near-silence. Worth dropping before it reaches
@@ -1100,6 +1225,71 @@ mod tests {
         normalize(&mut tone);
         let peak = tone.iter().fold(0.0f32, |m, s| m.max(s.abs()));
         assert!(peak < 0.02, "room tone was boosted to {peak}");
+    }
+
+    /// The exact shape seen in the panel: words wrapped in notes. whisper.cpp's
+    /// own suppression cannot reach these — the tokens are not in the vocabulary.
+    #[test]
+    fn music_notes_are_stripped_from_real_speech() {
+        assert_eq!(strip_sound_tags("\u{266a} Just so we let you know ASAP \u{266a}"), "Just so we let you know ASAP");
+        assert_eq!(
+            strip_sound_tags("\u{266a} And then the team fees is huge \u{266a} \u{266a} We'll get the house of honor \u{266a}"),
+            "And then the team fees is huge We'll get the house of honor"
+        );
+    }
+
+    /// A line that was nothing but notes has to come out empty so `is_noise`
+    /// drops it rather than the panel showing a blank row.
+    #[test]
+    fn a_line_of_only_sound_tags_becomes_empty() {
+        assert!(strip_sound_tags("\u{266a}\u{266a}\u{266a}").is_empty());
+        assert!(strip_sound_tags("[MUSIC]").is_empty());
+        assert!(strip_sound_tags("(applause)").is_empty());
+        assert!(strip_sound_tags("  \u{266b}  ").is_empty());
+    }
+
+    /// Brackets are ordinary speech far more often than they are tags. Cutting
+    /// them all leaves a line that still reads as a sentence, so nothing
+    /// downstream can tell the content was deleted.
+    #[test]
+    fn spoken_parentheses_survive() {
+        for said in [
+            "factor (x + 1)(x - 3)",
+            "f(x) is continuous",
+            "the derivative of (2x+1)^5",
+            "sin(theta) over cos(theta)",
+            "the meeting (last week) went fine",
+            "call the function (it takes one argument)",
+        ] {
+            assert_eq!(strip_sound_tags(said), said, "mutilated: {said}");
+        }
+    }
+
+    #[test]
+    fn only_whole_contents_matching_a_tag_are_stripped() {
+        assert!(is_sound_tag("MUSIC"));
+        assert!(is_sound_tag("Blank_Audio"));
+        assert!(is_sound_tag(" applause "));
+        assert!(is_sound_tag("blank audio"));
+        assert!(!is_sound_tag("x + 1"));
+        assert!(!is_sound_tag("music of the spheres"));
+        assert!(!is_sound_tag("theta"));
+        assert!(!is_sound_tag(""));
+    }
+
+    #[test]
+    fn a_tag_beside_real_speech_takes_only_itself() {
+        assert_eq!(
+            strip_sound_tags("[MUSIC] so the answer is f(x) [applause]"),
+            "so the answer is f(x)"
+        );
+    }
+
+    #[test]
+    fn ordinary_speech_is_left_alone() {
+        let plain = "Do we spectate or help? And then the other question.";
+        assert_eq!(strip_sound_tags(plain), plain);
+        assert_eq!(strip_sound_tags("I hate this chair."), "I hate this chair.");
     }
 
     #[test]

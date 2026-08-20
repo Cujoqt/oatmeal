@@ -57,15 +57,14 @@ pub struct Settings {
     pub followup_style: String,
     /// The instruction to use when `followup_style` is `custom`.
     pub followup_custom: String,
-    /// How many seconds of one voice to read as a single paragraph in the
-    /// transcript. 0 means "whatever the build defaults to" — see
-    /// `DEFAULT_CHUNK_SECS`.
+    /// How many seconds of transcript to read as a single paragraph. 0 means
+    /// "whatever the build defaults to" — see `DEFAULT_CHUNK_SECS`.
     pub chunk_seconds: u32,
 }
 
-/// How long a speaker's turn runs before the transcript breaks it into another
-/// paragraph. Long enough that a normal answer stays in one block, short enough
-/// that a lecture is still readable.
+/// How long a transcript paragraph runs before it is broken into another one.
+/// Long enough that a normal answer stays in one block, short enough that a
+/// lecture is still readable.
 pub const DEFAULT_CHUNK_SECS: u32 = 30;
 
 pub fn load() -> Settings {

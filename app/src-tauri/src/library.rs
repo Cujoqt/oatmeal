@@ -248,6 +248,7 @@ fn summary_filename(template: crate::chat::Template) -> &'static str {
         crate::chat::Template::Standup => "summary-standup.md",
         crate::chat::Template::OneOnOne => "summary-one-on-one.md",
         crate::chat::Template::Interview => "summary-interview.md",
+        crate::chat::Template::Lecture => "summary-lecture.md",
     }
 }
 
@@ -339,6 +340,7 @@ fn has_summary(dir: &Path) -> bool {
         crate::chat::Template::Standup,
         crate::chat::Template::OneOnOne,
         crate::chat::Template::Interview,
+        crate::chat::Template::Lecture,
     ];
     if templates.iter().any(|t| dir.join(summary_filename(*t)).is_file()) {
         return true;

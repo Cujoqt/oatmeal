@@ -13,6 +13,10 @@ export const BACKEND = {
   /// Each piece of a streamed live auto-answer: `{ seq, text }`. Separate from
   /// `chatToken` so the panel's answer never interleaves with a typed one.
   liveAnswer: 'oatmeal://live-answer',
+  /// Each piece of a streamed live math conversion: `{ seq, text }`. Separate
+  /// from `liveAnswer` for the same reason that one is separate from
+  /// `chatToken` — the live-panel streams must never interleave.
+  liveMath: 'oatmeal://live-math',
   /// The machine slept mid-recording: `{ asleep_ms }`. Nothing was captured for
   /// that stretch, so the take is stopped rather than left with a hole in it.
   slept: 'oatmeal://slept',
@@ -34,6 +38,17 @@ export const EVENTS = {
 
 export const LANG_KEY = 'oatmeal.lang'
 
+/// Seconds of transcript read as a single paragraph. Mirrored into localStorage
+/// because both windows render transcripts long before Settings is opened, and
+/// the config lives a Rust call away.
+export const CHUNK_KEY = 'oatmeal.chunkSeconds'
+export const DEFAULT_CHUNK_SECS = 30
+
+export function chunkSeconds() {
+  const v = Number(localStorage.getItem(CHUNK_KEY))
+  return v >= 5 && v <= 300 ? v : DEFAULT_CHUNK_SECS
+}
+
 /// Transcription language code, or '' for auto-detect.
 export function getLang() {
   const v = localStorage.getItem(LANG_KEY)
@@ -44,10 +59,14 @@ export function setLang(code) {
   localStorage.setItem(LANG_KEY, code)
 }
 
-/// Format milliseconds from the start of the meeting as `M:SS`.
+/// Format milliseconds from the start of the meeting as `M:SS`, or `H:MM:SS`
+/// once the meeting has run past an hour.
 export function fmtMs(ms) {
-  const total = Math.floor(ms / 1000)
-  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, '0')}`
+  const total = Math.max(0, Math.floor(ms / 1000))
+  const h = Math.floor(total / 3600)
+  const m = Math.floor((total % 3600) / 60)
+  const pad = (n) => String(n).padStart(2, '0')
+  return h > 0 ? `${h}:${pad(m)}:${pad(total % 60)}` : `${m}:${pad(total % 60)}`
 }
 
 export function escapeHtml(s) {
