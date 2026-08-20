@@ -468,7 +468,16 @@ listen(EVENTS.liveMath, (e) => {
   if (blockText(mathStreamBlock) !== mathStreamText) return // superseded
   if (seq === 1) mathStreamBuf = ''
   mathStreamBuf += piece
-  setBlockLatex(mathStreamDiv, mathStreamBuf)
+  try {
+    setBlockLatex(mathStreamDiv, mathStreamBuf)
+  } catch {
+    // Same never-throw contract as maybeTypeset/requestLatex, same defence in
+    // depth: without this, a throw here would leave data-latex set with an
+    // empty span, and applyFilter()'s rebuild-from-data-latex path would
+    // re-throw on every later search keystroke.
+    delete mathStreamDiv.dataset.latex
+    mathStreamDiv.lastElementChild.textContent = mathStreamText
+  }
 })
 
 // ── events ───────────────────────────────────────────────────────────────────
