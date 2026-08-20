@@ -226,3 +226,40 @@ test('"over" only forms a fraction when it is the sentence\'s only operator', ()
   // for anything downstream to tell, so this falls through to the model.
   assert.equal(speechToLatex('x plus 1 over 2'), null)
 })
+
+// Fix round 1 — F1: compound number words above twenty were concatenating
+// into a wrong digit string ("twenty one" -> "201"), the same failure mode
+// the decimal guard above exists to stop, just on a different code path.
+
+test('a compound number word converts to its actual value', () => {
+  assert.equal(speechToLatex('twenty one'), '21')
+})
+
+test('a compound number word does not corrupt the rest of the expression', () => {
+  assert.equal(speechToLatex('thirteen plus twenty one'), '13 + 21')
+})
+
+test('a compound number word after a power still converts correctly', () => {
+  assert.equal(speechToLatex('x squared plus twenty one'), 'x^2 + 21')
+})
+
+test('two adjacent bare numbers with no operator between them return null', () => {
+  // "two three" is ambiguous — one number misheard as two words, or two
+  // separate numbers? Concatenating into "23" would be a silent guess, so
+  // this must fall through to the model instead.
+  assert.equal(speechToLatex('two three'), null)
+})
+
+test('two adjacent numeral tokens are refused the same way as number words', () => {
+  assert.equal(speechToLatex('12 21'), null)
+})
+
+// Fix round 1 — F2: a square root followed by "plus"/"minus" is the same
+// ambiguous-scope class as "x plus 1 over 2", which already returns null —
+// this makes the square root case refuse consistently instead of guessing.
+
+test('an ambiguous square-root scope returns null instead of picking a reading', () => {
+  // "the square root of x plus one" could mean sqrt(x) + 1 or sqrt(x + 1) —
+  // there is no way to tell from the words alone which the speaker meant.
+  assert.equal(speechToLatex('the square root of x plus one'), null)
+})

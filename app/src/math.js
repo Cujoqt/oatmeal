@@ -215,9 +215,31 @@ const NUMBER_WORDS = {
   nineteen: 19, twenty: 20,
 }
 
+// Tens words that combine with a following ones word (1-9) into a compound
+// number: "twenty one" -> 21. Kept separate from NUMBER_WORDS because the
+// combination is conditional on what follows, not a plain lookup.
+const TENS_WORDS = {
+  twenty: 20, thirty: 30, forty: 40, fifty: 50, sixty: 60, seventy: 70,
+  eighty: 80, ninety: 90,
+}
+
 // Only the two symbols the brief names — see the module comment above for
 // why the rest of the Greek alphabet is left out.
 const SYMBOL_WORDS = { pi: '\\pi', theta: '\\theta' }
+
+/// True when the word at `i` begins a bare number literal — a digit token,
+/// a number word, or a tens word. Used to detect two number atoms sitting
+/// next to each other with no operator between them ("two three", "twenty
+/// one thirteen" past the compound), which implicit multiplication would
+/// otherwise silently concatenate into a wrong digit string.
+function startsBareNumber(words, i) {
+  const w = words[i]
+  if (w === undefined) return false
+  if (/^\d+$/.test(w)) return true
+  if (Object.prototype.hasOwnProperty.call(NUMBER_WORDS, w)) return true
+  if (Object.prototype.hasOwnProperty.call(TENS_WORDS, w)) return true
+  return false
+}
 
 /// A decimal point between digits ("3.5") would otherwise be silently
 /// mangled: normalization below treats punctuation as a word separator, so
@@ -240,17 +262,38 @@ function isOperatorStart(words, i) {
 function makeParser(words) {
   let i = 0
 
+  // A `+`/`-` right after a square root's argument is genuinely ambiguous
+  // scope — "the square root of x plus one" could mean sqrt(x) + 1 or
+  // sqrt(x + 1), and nothing here can tell which the speaker meant. Refusing
+  // it matches the same call already made for "x plus 1 over 2".
+  function sqrtScopeIsAmbiguous() {
+    return words[i] === 'plus' || words[i] === 'minus'
+  }
+
   function parseFactor() {
     if (i >= words.length) return null
     if (words[i] === 'the' && words[i + 1] === 'square' && words[i + 2] === 'root' && words[i + 3] === 'of') {
       i += 4
       const inner = parseFactor()
-      return inner === null ? null : `\\sqrt{${inner}}`
+      if (inner === null || sqrtScopeIsAmbiguous()) return null
+      return `\\sqrt{${inner}}`
     }
     if (words[i] === 'square' && words[i + 1] === 'root' && words[i + 2] === 'of') {
       i += 3
       const inner = parseFactor()
-      return inner === null ? null : `\\sqrt{${inner}}`
+      if (inner === null || sqrtScopeIsAmbiguous()) return null
+      return `\\sqrt{${inner}}`
+    }
+    // Tens word, optionally combined with a following ones word (1-9) into
+    // a compound: "twenty" -> 20, "twenty one" -> 21. Checked before the
+    // plain NUMBER_WORDS lookup below so the compound wins over treating
+    // "twenty" and "one" as two separate factors.
+    if (Object.prototype.hasOwnProperty.call(TENS_WORDS, words[i])) {
+      const tens = TENS_WORDS[words[i]]
+      const ones = NUMBER_WORDS[words[i + 1]]
+      if (ones !== undefined && ones >= 1 && ones <= 9) { i += 2; return String(tens + ones) }
+      i += 1
+      return String(tens)
     }
     const w = words[i]
     if (/^\d+$/.test(w)) { i += 1; return w }
@@ -282,11 +325,22 @@ function makeParser(words) {
   // mathml.js's own parser attaches `^` to whatever single node preceded it.
   function parseTerm() {
     const parts = []
+    let prevWasNumber = false
     while (i < words.length && !isOperatorStart(words, i)) {
+      const numberHere = startsBareNumber(words, i)
+      // Two bare numbers back to back with no operator between them is
+      // genuinely ambiguous ("two three" — one number misheard as two
+      // words, or two separate numbers?) and implicit multiplication would
+      // otherwise concatenate them into a wrong digit string, the same
+      // mechanism the decimal guard above exists to stop. Leave the second
+      // number unconsumed; the leftover-word check in speechToLatex turns
+      // that into null for the whole expression rather than a guess.
+      if (prevWasNumber && numberHere) break
       const start = i
       const f = parseFactorWithSuffix()
       if (f === null) { i = start; break }
       parts.push(f)
+      prevWasNumber = numberHere
     }
     if (!parts.length) return null
     // Concatenate bare numbers/letters directly ("3 x" -> "3x"), but keep a
