@@ -541,6 +541,7 @@ listen(EVENTS.toggleRecord, () => {
   recording ? stopRecording() : startRecording()
 })
 listen(EVENTS.hideTranscript, () => showTranscriptWindow(false))
+listen(EVENTS.quitBlockedNotes, () => setStatus('Still writing notes — let it finish before quitting.', true))
 
 expandBtn.addEventListener('click', async () => {
   const visible = await invoke('is_transcript_window_visible').catch(() => false)

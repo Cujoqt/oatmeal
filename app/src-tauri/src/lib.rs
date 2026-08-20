@@ -18,7 +18,7 @@ pub mod video;
 mod window;
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Mutex;
 use tauri::Manager;
 
@@ -43,6 +43,12 @@ const LIVE_MATH_EVENT: &str = "oatmeal://live-math";
 /// audio for that stretch does not exist, so the take is stopped rather than
 /// left with a hole in it.
 const SLEPT_EVENT: &str = "oatmeal://slept";
+
+/// Event telling the UI that quitting was refused because notes are still
+/// being written. `write_notes` builds the whole summary in memory and only
+/// saves it once done, so killing the process mid-call loses it outright —
+/// unlike a recording, which is already safe on disk in its WAV segments.
+const QUIT_BLOCKED_NOTES_EVENT: &str = "oatmeal://quit-blocked-notes";
 
 /// Label of the floating live-transcript window declared in `tauri.conf.json`.
 const TRANSCRIPT_WINDOW: &str = "transcript";
@@ -79,6 +85,11 @@ pub struct AppState {
     /// mathematics to LaTeX — so none of them can starve the live transcription
     /// that shares the same GPU.
     pub model_gate: Mutex<autoanswer::Gate>,
+    /// Count of `write_notes` calls in flight. It builds the summary in memory
+    /// and only writes it once finished, so quitting mid-call loses it with
+    /// nothing to recover — this is what `RunEvent::ExitRequested` checks to
+    /// refuse quitting while it is non-zero.
+    pub notes_generating: AtomicUsize,
 }
 
 impl Default for AppState {
@@ -101,6 +112,7 @@ impl Default for AppState {
             pending_notes: Mutex::new(None),
             last_dir: Mutex::new(None),
             model_gate: Mutex::new(autoanswer::Gate::default()),
+            notes_generating: AtomicUsize::new(0),
         }
     }
 }
@@ -673,10 +685,34 @@ fn meeting_segments(id: String) -> Result<Vec<library::TranscriptLine>, String> 
     library::transcript_lines(&id)
 }
 
+/// Decrements `AppState::notes_generating` on drop, so quitting stays blocked
+/// for exactly as long as a `write_notes` call is actually in flight — even if
+/// it returns early via `?` or panics.
+struct NotesGenerating<'a>(&'a AtomicUsize);
+
+impl<'a> NotesGenerating<'a> {
+    fn begin(counter: &'a AtomicUsize) -> Self {
+        counter.fetch_add(1, Ordering::SeqCst);
+        Self(counter)
+    }
+}
+
+impl Drop for NotesGenerating<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 /// Write structured notes for a past meeting and cache them next to the
 /// transcript, so reopening a note doesn't re-run the model.
 #[tauri::command(async)]
-fn write_notes(id: String, template: chat::Template, force: bool) -> Result<String, String> {
+fn write_notes(
+    state: tauri::State<'_, AppState>,
+    id: String,
+    template: chat::Template,
+    force: bool,
+) -> Result<String, String> {
+    let _generating = NotesGenerating::begin(&state.notes_generating);
     library::write_notes(&id, template, force)
 }
 
@@ -1276,11 +1312,50 @@ pub fn run() {
                     let _ = win.set_focus();
                 }
             }
+            // ⌘Q (or Quit from the menu) reaches here before the process
+            // actually exits. `write_notes` only saves once fully generated,
+            // so quitting mid-call would lose the summary outright — refuse
+            // and let the UI say why, rather than the window-close guard
+            // above, which only stops a *window* from closing, not the app.
+            if let tauri::RunEvent::ExitRequested { api, .. } = _event {
+                let generating = _app
+                    .state::<AppState>()
+                    .notes_generating
+                    .load(Ordering::SeqCst)
+                    > 0;
+                if generating {
+                    api.prevent_exit();
+                    use tauri::Emitter;
+                    let _ = _app.emit(QUIT_BLOCKED_NOTES_EVENT, ());
+                }
+            }
         });
 }
 
 #[cfg(test)]
 mod tests {
+    use super::NotesGenerating;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// `write_notes` builds the whole summary in memory and only saves it once
+    /// done, so `RunEvent::ExitRequested` refuses to quit while this counter is
+    /// non-zero. The guard must raise it for exactly the call's duration, and
+    /// drop it back down even when the call returns early.
+    #[test]
+    fn the_guard_counts_only_while_generating() {
+        let counter = AtomicUsize::new(0);
+        {
+            let _first = NotesGenerating::begin(&counter);
+            assert_eq!(counter.load(Ordering::SeqCst), 1);
+            {
+                let _second = NotesGenerating::begin(&counter);
+                assert_eq!(counter.load(Ordering::SeqCst), 2, "two calls in flight at once");
+            }
+            assert_eq!(counter.load(Ordering::SeqCst), 1, "one call finishing leaves the other counted");
+        }
+        assert_eq!(counter.load(Ordering::SeqCst), 0, "back to zero once every call has returned");
+    }
+
     /// A plain `#[tauri::command]` runs its body inline on the main thread, so a
     /// command that downloads a model, opens an audio device or runs Whisper
     /// freezes the window until it returns — the spinning-wait-cursor on the

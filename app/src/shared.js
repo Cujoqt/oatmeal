@@ -20,6 +20,10 @@ export const BACKEND = {
   /// The machine slept mid-recording: `{ asleep_ms }`. Nothing was captured for
   /// that stretch, so the take is stopped rather than left with a hole in it.
   slept: 'oatmeal://slept',
+  /// Quitting was refused because notes are still being written — killing the
+  /// process now would lose the summary outright, since it only saves once
+  /// the whole thing is generated.
+  quitBlockedNotes: 'oatmeal://quit-blocked-notes',
 }
 
 /// Events the two windows use to talk to each other.
