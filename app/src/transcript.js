@@ -335,8 +335,9 @@ function replaceAll(incoming) {
 // unused here — Dylan dropped auto-detection after evidence it fires on
 // ordinary meetings and misses most branches of math. What gates the model
 // call instead is much narrower: not "is this a lecture", just "does this
-// line contain the kind of words spoken math uses". Its worst case is one
-// wasted, rate-limited model call — not a mis-rendered transcript line.
+// line contain the kind of words spoken math uses" — see looksLikeMathCue
+// below for how narrow, and why a false positive there is not the free
+// wasted-model-call it looks like.
 
 const MATH_KEY = 'oatmeal.mathMode'
 let mathOn = false
