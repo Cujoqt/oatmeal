@@ -34,6 +34,11 @@ const CHAT_TOKEN_EVENT: &str = "oatmeal://chat-token";
 /// answer the user typed into the note window's ask box.
 const LIVE_ANSWER_EVENT: &str = "oatmeal://live-answer";
 
+/// Pieces of a streamed live math conversion: `{ seq, text }`. Separate from
+/// `LIVE_ANSWER_EVENT` for the same reason that one is separate from
+/// `CHAT_TOKEN_EVENT` — the two live-panel streams must never interleave.
+const LIVE_MATH_EVENT: &str = "oatmeal://live-math";
+
 /// Event telling the UI the machine slept mid-recording: `{ asleep_ms }`. The
 /// audio for that stretch does not exist, so the take is stopped rather than
 /// left with a hole in it.
@@ -69,9 +74,11 @@ pub struct AppState {
     /// Folder of the most recent meeting, so notes typed *after* it stopped keep
     /// landing next to that meeting's audio instead of vanishing.
     pub last_dir: Mutex<Option<String>>,
-    /// Rate limiter for the live panel's auto-answers, so answering questions
-    /// can't starve the live transcription that shares the same GPU.
-    pub auto_answer: Mutex<autoanswer::Gate>,
+    /// Rate limiter shared by every live-panel feature that calls the local
+    /// model — auto-answering a spotted question, and converting spoken
+    /// mathematics to LaTeX — so none of them can starve the live transcription
+    /// that shares the same GPU.
+    pub model_gate: Mutex<autoanswer::Gate>,
 }
 
 impl Default for AppState {
@@ -93,7 +100,7 @@ impl Default for AppState {
             live: Mutex::new(None),
             pending_notes: Mutex::new(None),
             last_dir: Mutex::new(None),
-            auto_answer: Mutex::new(autoanswer::Gate::default()),
+            model_gate: Mutex::new(autoanswer::Gate::default()),
         }
     }
 }
@@ -710,8 +717,9 @@ fn ask_meeting(
 /// panel calls it on its own when it detects a spoken question, so the limits
 /// that protect the recording live here, not in the UI.
 ///
-/// - Only one answer runs at a time and a minimum interval sits between them
-///   (`autoanswer::Gate`), because Whisper and this model share the GPU.
+/// - Only one call runs at a time across every live-panel feature, and a
+///   minimum interval sits between them (`autoanswer::Gate`, shared with
+///   `latex_from_speech`), because Whisper and this model share the GPU.
 /// - Over-long "questions" are dropped as misrecognized run-ons.
 /// - The reply stays on the machine (local model) and is never written into the
 ///   meeting; the panel shows it as unverified.
@@ -733,16 +741,16 @@ fn answer_live_question(
     }
 
     // Claim the gate up front and release it no matter how the answer ends. A
-    // poisoned lock means some other answer panicked mid-flight; treat that as
+    // poisoned lock means some other call panicked mid-flight; treat that as
     // "busy" rather than trying to recover the count.
     {
-        let mut gate = state.auto_answer.lock().map_err(|_| "auto-answer busy")?;
+        let mut gate = state.model_gate.lock().map_err(|_| "model is busy")?;
         if !gate.try_begin(std::time::Instant::now()) {
             return Err("auto-answer is rate limited".into());
         }
     }
     let result = generate_live_answer(&app, &state, question);
-    if let Ok(mut gate) = state.auto_answer.lock() {
+    if let Ok(mut gate) = state.model_gate.lock() {
         gate.finish();
     }
     result
@@ -780,6 +788,69 @@ fn live_answer_sink(app: tauri::AppHandle) -> impl FnMut(&str) {
         seq += 1;
         let _ = app.emit(
             LIVE_ANSWER_EVENT,
+            serde_json::json!({ "seq": seq, "text": piece }),
+        );
+    }
+}
+
+/// Convert a line of spoken mathematics into LaTeX for math-lecture mode's live
+/// typesetting, streaming a short reply from the resident local model. Modeled
+/// on `answer_live_question` beside it: same gate discipline, because this is
+/// the second live-panel feature contending for the one GPU Whisper also
+/// needs, and the same short-cap streaming shape.
+///
+/// A refused claim returns an error the panel treats as "skip this one" — the
+/// line stays untyped rather than blocking on the gate, so a busy GPU never
+/// holds up the live transcript.
+#[tauri::command(async)]
+fn latex_from_speech(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    speech: String,
+) -> Result<String, String> {
+    let speech = speech.trim();
+    if speech.is_empty() {
+        return Err("no speech to convert".into());
+    }
+    if speech.chars().count() > autoanswer::MAX_QUESTION_CHARS {
+        return Err("speech is too long to convert".into());
+    }
+
+    // Same discipline as answer_live_question: claim up front, release no
+    // matter how conversion ends, and treat a poisoned lock as "busy" rather
+    // than trying to recover the count.
+    {
+        let mut gate = state.model_gate.lock().map_err(|_| "model is busy")?;
+        if !gate.try_begin(std::time::Instant::now()) {
+            return Err("math conversion is rate limited".into());
+        }
+    }
+    let result = generate_latex(&app, speech);
+    if let Ok(mut gate) = state.model_gate.lock() {
+        gate.finish();
+    }
+    result
+}
+
+/// The generation half of `latex_from_speech`, split out so the gate is always
+/// released even when this returns early. Unlike `generate_live_answer`, this
+/// needs no transcript context from `state` — a spoken line of math converts
+/// on its own, with no reference like "that" or "she" to resolve.
+fn generate_latex(app: &tauri::AppHandle, speech: &str) -> Result<String, String> {
+    let path = model::ensure_chat_model()?;
+    chat::latex_from_speech(&path, speech, &mut live_math_sink(app.clone()))
+}
+
+/// Sink that streams a live math conversion's tokens to the panel on its own
+/// event. `seq` starts at 1 so the panel can tell the first token — which
+/// clears the previous conversion — from the rest.
+fn live_math_sink(app: tauri::AppHandle) -> impl FnMut(&str) {
+    use tauri::Emitter;
+    let mut seq = 0u32;
+    move |piece: &str| {
+        seq += 1;
+        let _ = app.emit(
+            LIVE_MATH_EVENT,
             serde_json::json!({ "seq": seq, "text": piece }),
         );
     }
@@ -1114,6 +1185,7 @@ pub fn run() {
             meeting_typed_notes,
             ask_meeting,
             answer_live_question,
+            latex_from_speech,
             warm_chat_model,
             ask_library,
             draft_followup,
@@ -1227,6 +1299,7 @@ mod tests {
             "write_notes",
             "ask_meeting",
             "answer_live_question",
+            "latex_from_speech",
             "warm_chat_model",
             "ask_library",
             "draft_followup",

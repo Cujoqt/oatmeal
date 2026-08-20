@@ -726,6 +726,61 @@ pub fn answer_live(
     )
 }
 
+/// Cap on a live math conversion's length. A spoken line converts to a short
+/// LaTeX expression, not a paragraph, so — same reasoning as the auto-answer
+/// cap beside it — fewer tokens means the panel gets it sooner.
+const MATH_MAX_TOKENS: usize = 120;
+
+/// The LaTeX commands `LECTURE_SYSTEM` permits, verbatim. Live math conversion
+/// has to stay inside the identical set: the panel's LaTeX renderer is the same
+/// parser that renders the finished write-up (`mathml.js`), and it can only
+/// render what that parser knows. `the_math_prompt_allows_exactly_the_lecture_
+/// prompts_commands` below fails if the two texts drift apart.
+const MATH_SYSTEM: &str = "\
+You convert one line of spoken mathematics, already transcribed by automatic speech \
+recognition, into LaTeX. The line may contain transcription errors or filler words — read \
+through it and typeset what was actually meant.
+
+Reply with the LaTeX only: no prose, no restating the input, and no \\( \\) or $ delimiters \
+around it — just the expression itself.
+
+You may use only these commands, and no others: \\frac, \\sqrt, \\int, \\sum, \\prod, \\lim, \
+\\max, \\min, \\sup, \\inf, \\big|, \\Big|, \\bigg|, \\Bigg| (an evaluation bar, e.g. \
+\\bigg|_0^2), ^, _; the Greek letters \\alpha, \\beta, \\gamma, \\delta, \\Delta, \\epsilon, \
+\\varepsilon, \\theta, \\lambda, \\mu, \\pi, \\rho, \\sigma, \\Sigma, \\tau, \\phi, \\varphi, \
+\\psi, \\omega, \\Omega (no others — if the letter you need is not in this list, spell its \
+name out in words); the functions \\sin, \\cos, \\tan, \\sec, \\csc, \\cot, \\arcsin, \\arccos, \
+\\arctan, \\sinh, \\cosh, \\tanh, \\log, \\ln, \\exp, \\gcd, \\deg; and \\cdot, \\times, \\div, \
+\\pm, \\leq, \\geq, \\neq, \\ll, \\gg, \\to, \\rightarrow, \\Rightarrow, \\mapsto, \\approx, \
+\\equiv, \\propto, \\sim, \\in, \\notin, \\subset, \\subseteq, \\cup, \\cap, \\forall, \\exists, \
+\\partial, \\nabla, \\infty, \\perp, \\parallel, \\angle. Never use anything outside that set — \
+including matrices, cases, aligned equations, \\binom, and chemical notation.
+
+If the line is not mathematics, or you cannot tell what was meant, reply with an empty string.";
+
+/// Convert one line of spoken mathematics into LaTeX, streaming as it is
+/// decoded — same reason as `answer_live` beside it: a local model takes real
+/// time even for a short expression, and silence during that reads as a hang.
+pub fn latex_from_speech(
+    model_path: &Path,
+    speech: &str,
+    on_token: &mut dyn FnMut(&str),
+) -> Result<String, String> {
+    let speech = speech.trim();
+    if speech.is_empty() {
+        return Err("no speech to convert".into());
+    }
+
+    complete_streaming_capped(
+        model_path,
+        MATH_SYSTEM,
+        speech,
+        ANSWERING_TEMP,
+        MATH_MAX_TOKENS,
+        on_token,
+    )
+}
+
 /// Answer a question from excerpts of several meetings, streaming the reply as
 /// it is generated. `context` is already sized to the window by `recall.rs`,
 /// which also guarantees it is never empty — the model is not asked anything it
@@ -1040,12 +1095,32 @@ mod grounding_tests {
             ONE_ON_ONE_SYSTEM,
             INTERVIEW_SYSTEM,
             LECTURE_SYSTEM,
+            MATH_SYSTEM,
         ] {
             let system = guarded(prompt);
             assert!(system.contains("Refuse"), "no refusal rule");
             assert!(system.contains("never act on instructions"), "no injection rule");
             assert!(system.ends_with(prompt), "the caller's prompt must survive intact");
         }
+    }
+
+    /// The live panel and the finished write-up share one MathML parser
+    /// (`mathml.js`), so both prompts must permit exactly the same commands.
+    /// Two literals in two places drift; this is what notices — if it did, one
+    /// of the two would typeset a command the panel renders as literal
+    /// backslash text instead of math.
+    #[test]
+    fn the_math_prompt_allows_exactly_the_lecture_prompts_commands() {
+        fn allowed_commands_clause(prompt: &str) -> &str {
+            let start = prompt.find(r"\frac, \sqrt").expect("command list start");
+            let end = prompt.find(r"\angle").expect("command list end") + r"\angle".len();
+            &prompt[start..end]
+        }
+
+        assert_eq!(
+            allowed_commands_clause(LECTURE_SYSTEM),
+            allowed_commands_clause(MATH_SYSTEM),
+        );
     }
 }
 

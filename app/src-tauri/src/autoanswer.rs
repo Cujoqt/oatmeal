@@ -1,15 +1,19 @@
-// Rate limiting for the live panel's auto-answers.
+// Rate limiting for the live panel's calls into the local model.
 //
-// When the panel spots a spoken question it asks the local model to answer it.
-// Whisper and that model share the one GPU, so an answer per sentence would
-// starve live transcription — and the transcript is what the user actually came
-// for. Two limits keep the feature from taking the recording down with it: only
-// one answer generates at a time, and a minimum interval sits between the *starts*
-// of consecutive answers.
+// Whisper and that model share the one GPU, so calling it too often would starve
+// live transcription — and the transcript is what the user actually came for. Two
+// features share this gate: auto-answering a spotted question, and converting
+// spoken mathematics to LaTeX for math-lecture mode. Giving each its own gate
+// would mean two independent six-second windows contending against the same
+// device — twelve seconds of contention per minute against one transcript.
+// Two limits keep either feature from taking the recording down with it: only
+// one call runs at a time, and a minimum interval sits between the *starts* of
+// consecutive calls, no matter which feature made them.
 
 use std::time::{Duration, Instant};
 
-/// Least time between the starts of two auto-answers.
+/// Least time between the starts of two calls, regardless of which feature made
+/// them.
 pub const MIN_INTERVAL: Duration = Duration::from_secs(6);
 
 /// Longest question worth answering. Anything longer is almost always a run-on of
@@ -17,8 +21,10 @@ pub const MIN_INTERVAL: Duration = Duration::from_secs(6);
 /// would delay the answer to the next real one.
 pub const MAX_QUESTION_CHARS: usize = 500;
 
-/// Single-flight, rate-limited gate. One instance lives in `AppState`; it is not
-/// `Clone`, so there is exactly one owner of the "an answer is running" fact.
+/// Single-flight, rate-limited gate shared by every live-panel feature that calls
+/// the local model. One instance lives in `AppState`; it is not `Clone`, so there
+/// is exactly one owner of the "a call is running" fact, no matter how many
+/// features claim it.
 #[derive(Default)]
 pub struct Gate {
     in_flight: bool,
@@ -26,11 +32,11 @@ pub struct Gate {
 }
 
 impl Gate {
-    /// Claim the gate for an answer starting at `now`, returning whether the
-    /// caller may proceed. Refuses — changing nothing — if an answer is already
-    /// running or the last one started less than `MIN_INTERVAL` ago. On `true`
-    /// the caller must pair this with `finish()` when the answer ends, success or
-    /// failure, or the gate stays claimed forever.
+    /// Claim the gate for a call starting at `now`, returning whether the caller
+    /// may proceed. Refuses — changing nothing — if a call is already running or
+    /// the last one started less than `MIN_INTERVAL` ago, whichever feature
+    /// started it. On `true` the caller must pair this with `finish()` when the
+    /// call ends, success or failure, or the gate stays claimed forever.
     pub fn try_begin(&mut self, now: Instant) -> bool {
         if self.in_flight {
             return false;
@@ -46,7 +52,8 @@ impl Gate {
     }
 
     /// Release the gate. The interval still counts from `try_begin`, so a quick
-    /// answer waits out the rest of the window before the next one can start.
+    /// call waits out the rest of the window before the next one — from either
+    /// feature — can start.
     pub fn finish(&mut self) {
         self.in_flight = false;
     }
@@ -79,6 +86,17 @@ mod tests {
             g.try_begin(t0 + MIN_INTERVAL),
             "allowed once the interval has passed"
         );
+    }
+
+    #[test]
+    fn math_and_auto_answer_contend_for_the_same_gate() {
+        let mut g = Gate::default();
+        let t = Instant::now();
+        assert!(g.try_begin(t), "an auto-answer claims it");
+        assert!(!g.try_begin(t), "a math conversion cannot start alongside it");
+        g.finish();
+        assert!(!g.try_begin(t + Duration::from_secs(1)), "still inside the interval");
+        assert!(g.try_begin(t + MIN_INTERVAL), "allowed once the interval passes");
     }
 
     #[test]
