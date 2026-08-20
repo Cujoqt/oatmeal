@@ -238,6 +238,26 @@ function renderMarkdown(md, target) {
     const line = raw.trim()
     if (!line) { list = null; continue }
 
+    // A Lecture note follows each review question with this line, but the
+    // model has been observed nesting it as a list item (`- > Solution:
+    // ...`) instead of the bare blockquote the prompt asks for. Match with
+    // an optional leading bullet marker, and check this *before* the bullet
+    // branch below, so a bulleted solution can't be captured as an ordinary
+    // list item first.
+    const solution = line.match(/^(?:[-*]\s+)?>\s*Solution:\s*(.*)$/i)
+    if (solution) {
+      list = null
+      const d = document.createElement('details')
+      d.className = 'solution'
+      const s = document.createElement('summary')
+      s.textContent = 'Show solution'
+      const body = document.createElement('p')
+      inline(body, solution[1])
+      d.append(s, body)
+      target.appendChild(d)
+      continue
+    }
+
     const bullet = line.match(/^[-*]\s+(.*)$/)
     if (bullet) {
       if (!list) { list = document.createElement('ul'); target.appendChild(list) }
@@ -253,21 +273,6 @@ function renderMarkdown(md, target) {
       const el = document.createElement(heading[1].length <= 2 ? 'h2' : 'h3')
       inline(el, heading[2])
       target.appendChild(el)
-      continue
-    }
-
-    // A Lecture note follows each review question with this line; collapse it
-    // rather than let the answer sit in plain sight above the question.
-    const solution = line.match(/^>\s*Solution:\s*(.*)$/i)
-    if (solution) {
-      const d = document.createElement('details')
-      d.className = 'solution'
-      const s = document.createElement('summary')
-      s.textContent = 'Show solution'
-      const body = document.createElement('p')
-      inline(body, solution[1])
-      d.append(s, body)
-      target.appendChild(d)
       continue
     }
 

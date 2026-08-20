@@ -564,7 +564,8 @@ unrelated ones.
 Write every mathematical expression in LaTeX between \\( and \\) inline, or between \\[ and \\] \
 on its own line for a displayed equation. Never use dollar signs as math delimiters. You may use \
 only these commands, and no others: \\frac, \\sqrt, \\int, \\sum, \\prod, \\lim, \\max, \\min, \
-\\sup, \\inf, ^, _; the Greek letters \\alpha, \\beta, \\gamma, \\delta, \\Delta, \\epsilon, \
+\\sup, \\inf, \\big|, \\Big|, \\bigg|, \\Bigg| (an evaluation bar, e.g. \\bigg|_0^2), ^, _; the \
+Greek letters \\alpha, \\beta, \\gamma, \\delta, \\Delta, \\epsilon, \
 \\varepsilon, \\theta, \\lambda, \\mu, \\pi, \\rho, \\sigma, \\Sigma, \\tau, \\phi, \\varphi, \
 \\psi, \\omega, \\Omega (no others — if the letter you need is not in this list, spell its \
 name out in words); the functions \\sin, \\cos, \\tan, \\sec, \\csc, \\cot, \\arcsin, \\arccos, \

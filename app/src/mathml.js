@@ -55,7 +55,11 @@ const MAX_DEPTH = 100
 /// `\left` and `\right` only control delimiter sizing (MathML sizes
 /// delimiters itself), so they are dropped the same way — the delimiter
 /// character that follows (e.g. the `(` in `\left(`) is an ordinary
-/// character and gets tokenized normally on the next pass.
+/// character and gets tokenized normally on the next pass. `\big`, `\Big`,
+/// `\bigg` and `\Bigg` are the same story: they only pick a fixed delimiter
+/// size (e.g. the evaluation bar in `\bigg|_0^2`), and MathML sizes
+/// delimiters itself, so they're dropped the same way — the `|` that
+/// follows falls through to the plain-op case below and renders as `<mo>`.
 function tokenize(src) {
   const out = []
   let i = 0
@@ -66,7 +70,7 @@ function tokenize(src) {
       if (!m) { out.push({ k: 'raw', v: c }); i += 1; continue }
       i += m[0].length
       if ([',', ';', '!', ' '].includes(m[1])) continue
-      if (m[1] === 'left' || m[1] === 'right') continue
+      if (['left', 'right', 'big', 'Big', 'bigg', 'Bigg'].includes(m[1])) continue
       out.push({ k: 'cmd', v: m[1] })
       continue
     }

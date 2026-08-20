@@ -154,3 +154,21 @@ test('\\max, \\min, \\sup, \\inf are bigops that can carry a limit underneath, l
     { t: 'ident', v: 'S' },
   ])
 })
+
+test('\\big, \\Big, \\bigg, \\Bigg are dropped like \\left/\\right; the bar that follows is an ordinary operator', () => {
+  for (const size of ['big', 'Big', 'bigg', 'Bigg']) {
+    assert.deepEqual(parseLatex('\\' + size + '|'), [{ t: 'op', v: '|' }])
+  }
+  // A bare bar, with no size command at all, is already an ordinary operator.
+  assert.deepEqual(parseLatex('|'), [{ t: 'op', v: '|' }])
+})
+
+test('a definite-integral evaluation bar (the real observed \\bigg| shape) parses with its limits attached', () => {
+  const [node] = parseLatex('\\bigg|_0^2')
+  assert.deepEqual(node, {
+    t: 'subsup',
+    base: { t: 'op', v: '|' },
+    under: [{ t: 'num', v: '0' }],
+    over: [{ t: 'num', v: '2' }],
+  })
+})
