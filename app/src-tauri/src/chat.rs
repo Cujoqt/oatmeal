@@ -561,8 +561,10 @@ numbered item, and each followed by an indented line beginning '> Solution:' giv
 worked answer. Questions must test the same techniques the lecture used, not harder or \
 unrelated ones.
 
-Write every mathematical expression in LaTeX between \\( and \\) inline, or between \\[ and \\] \
-on its own line for a displayed equation. Never use dollar signs as math delimiters. You may use \
+Write every mathematical expression in LaTeX between \\( and \\) inline, or, for a displayed \
+equation, on its own line with \\[ and \\] on that same line surrounding the whole equation — \
+never split \\[, the equation and \\] onto separate lines. Never use dollar signs as math \
+delimiters. You may use \
 only these commands, and no others: \\frac, \\sqrt, \\int, \\sum, \\prod, \\lim, \\max, \\min, \
 \\sup, \\inf, \\big|, \\Big|, \\bigg|, \\Bigg| (an evaluation bar, e.g. \\bigg|_0^2), ^, _; the \
 Greek letters \\alpha, \\beta, \\gamma, \\delta, \\Delta, \\epsilon, \

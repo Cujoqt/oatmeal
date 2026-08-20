@@ -263,3 +263,14 @@ test('an ambiguous square-root scope returns null instead of picking a reading',
   // there is no way to tell from the words alone which the speaker meant.
   assert.equal(speechToLatex('the square root of x plus one'), null)
 })
+
+// Final review — F5: a power suffix right after a square root is the same
+// ambiguous-scope class as "plus"/"minus" above — "the square root of x
+// squared" means sqrt(x^2) in English, but without this guard the suffix
+// attached to the completed \sqrt{...} instead, giving (root x)^2.
+
+test('a square root followed by a power suffix returns null instead of picking a reading', () => {
+  assert.equal(speechToLatex('the square root of x squared'), null)
+  assert.equal(speechToLatex('the square root of x cubed'), null)
+  assert.equal(speechToLatex('the square root of x to the power of 4'), null)
+})

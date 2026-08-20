@@ -247,11 +247,23 @@ function emit(node) {
     case 'bigop': {
       const glyph = m('mo', BIGOPS[node.v])
       if (!node.under.length && !node.over.length) return glyph
-      // munderover stacks the limits above and below, which is what makes a
-      // definite integral read as one.
-      const u = m('munderover')
-      u.append(glyph, row(node.under), row(node.over))
-      return u
+      // A three-child munderover with an empty <mrow> in the unused slot
+      // still reserves that slot's space — WKWebView renders \lim_{h \to 0}
+      // with a blank band above it. Use the two-child element that matches
+      // which limit is actually present, and munderover only when both are.
+      if (node.under.length && node.over.length) {
+        const u = m('munderover')
+        u.append(glyph, row(node.under), row(node.over))
+        return u
+      }
+      if (node.under.length) {
+        const u = m('munder')
+        u.append(glyph, row(node.under))
+        return u
+      }
+      const o = m('mover')
+      o.append(glyph, row(node.over))
+      return o
     }
     default: return m('mtext', String(node.v ?? ''))
   }

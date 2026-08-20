@@ -40,6 +40,16 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      # JS tests need no node_modules — math.js/mathml.js/transcript.js's tests
+      # import only node:test, node:assert and local files — so this is just
+      # the runtime, no install step.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: JS tests
+        run: npm test
+
       # Cargo's registry and the compiled deps dominate a cold build (~8 min).
       - uses: actions/cache@v4
         with:

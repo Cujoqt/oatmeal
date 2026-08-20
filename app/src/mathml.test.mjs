@@ -1,6 +1,19 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { parseLatex } from './mathml.js'
+import { parseLatex, toMathML } from './mathml.js'
+
+// mathml.js only touches `document` inside toMathML (never at module scope,
+// per its own header comment), so a minimal element stub is enough to test
+// the emitted tag shape without pulling in a real DOM implementation.
+class FakeElement {
+  constructor(tag) { this.tagName = tag; this.children = [] }
+  set textContent(v) { this._text = v; this.children = [] }
+  get textContent() { return this._text ?? '' }
+  appendChild(el) { this.children.push(el); return el }
+  append(...els) { this.children.push(...els) }
+  setAttribute(k, v) { this[k] = v }
+}
+globalThis.document = { createElementNS: (_ns, tag) => new FakeElement(tag) }
 
 test('digits and identifiers', () => {
   assert.deepEqual(parseLatex('2x'), [
@@ -171,4 +184,35 @@ test('a definite-integral evaluation bar (the real observed \\bigg| shape) parse
     under: [{ t: 'num', v: '0' }],
     over: [{ t: 'num', v: '2' }],
   })
+})
+
+// Final review — F4: a bigop with only one of under/over used to always build
+// a three-child munderover, leaving an empty <mrow> in the unused slot.
+// WKWebView still reserves that slot's space, so \lim_{h \to 0} rendered with
+// a blank band above it. Emit the two-child element that matches which limit
+// is actually present, and munderover only when both are.
+
+function bigopChild(latex) {
+  const math = toMathML(latex)
+  const mrow = math.children[0]
+  assert.equal(mrow.tagName, 'mrow')
+  return mrow.children[0]
+}
+
+test('a bigop with only an under limit emits munder, not munderover', () => {
+  const el = bigopChild('\\lim_{h \\to 0}')
+  assert.equal(el.tagName, 'munder')
+  assert.equal(el.children.length, 2, 'glyph + under row only, no empty over slot')
+})
+
+test('a bigop with only an over limit emits mover, not munderover', () => {
+  const el = bigopChild('\\sum^{n}')
+  assert.equal(el.tagName, 'mover')
+  assert.equal(el.children.length, 2, 'glyph + over row only, no empty under slot')
+})
+
+test('a bigop with both limits emits munderover', () => {
+  const el = bigopChild('\\int_0^1')
+  assert.equal(el.tagName, 'munderover')
+  assert.equal(el.children.length, 3)
 })

@@ -366,12 +366,16 @@ let mathStreamBuf = ''
 const MATH_CUES = /\b(plus|minus|times|equals|squared|cubed|divided by|square root|to the power|raised to the power|the integral|pi|theta)\b/i
 
 function looksLikeMathCue(text) {
-  // The bare-operator branch fires on any hyphen, slash or equals — "follow-
-  // up", a date — which is broader than the named-word branch above. Kept
-  // anyway: ASR output carries almost no punctuation (see math.js's module
-  // comment), so this rarely matches prose in practice, and a false positive
-  // here only costs one wasted, rate-limited model call.
-  return MATH_CUES.test(text) || /[+\-*/=^]/.test(text)
+  // Narrowed to `=`/`^` only. The bare-operator branch used to match any of
+  // `+-*/=^`, which fires on any hyphen or slash — "follow-up", "well-known",
+  // "and/or", any date — far broader than the named-word branch above. A
+  // false positive here is not free: it reaches requestLatex() below, and a
+  // model asked to typeset non-math prose can answer anyway instead of
+  // returning empty, which is what let ordinary speech overwrite a real
+  // transcript line. looksLikeLatex() in requestLatex() is the fix that
+  // actually closes that; this narrowing just cuts how often the model gets
+  // asked about text that was never math.
+  return MATH_CUES.test(text) || /[=^]/.test(text)
 }
 
 function setMathUI(on) {
@@ -385,7 +389,16 @@ mathBtn.addEventListener('click', () => {
   const on = !mathOn
   setMathUI(on)
   localStorage.setItem(MATH_KEY, on ? '1' : '0')
-  setNote(on ? 'Math typesetting on — spoken equations render as they’re heard.' : 'Math typesetting off.')
+  if (on) {
+    // Load the model now so the first spoken equation isn't paying the load
+    // cost — same reason auto-answer's toggle does this (see setAutoUI's
+    // click handler above). Without it, the first equation triggers a cold
+    // ~1.9 GB load on the GPU Whisper is already using.
+    invoke('warm_chat_model').catch(() => {})
+    setNote('Math typesetting on — spoken equations render as they’re heard.')
+  } else {
+    setNote('Math typesetting off.')
+  }
 })
 
 /// Typeset `latex` into a block's span and record it on the block element as
@@ -425,6 +438,33 @@ function maybeTypeset(block, div) {
   }
 }
 
+/// Refuse-don't-guess gate on the model's reply, mirroring speechToLatex's
+/// own discipline across this seam. The model is told to return LaTeX or
+/// nothing, but `looksLikeMathCue` above is a loose enough pre-filter that
+/// ordinary prose ("so let's do a quick follow-up on last week") reaches it,
+/// and a 1.9 GB model asked to typeset that will produce *something* rather
+/// than reliably returning empty. Reject anything that reads like prose
+/// instead of trusting it straight into the transcript.
+function looksLikeLatex(s) {
+  // Sentence-final punctuation: a period, `!` or `?` followed by whitespace
+  // or the end of the string. Decimal points ("3.14") don't match — the `.`
+  // there is followed by a digit, not a space or end.
+  if (/[.!?](\s|$)/.test(s)) return false
+  // Three or more bare alphabetic words in a row (apostrophes allowed, for
+  // "let's"). Real LaTeX output is commands and symbols, not strings of
+  // plain English words back to back.
+  let run = 0
+  for (const w of s.trim().split(/\s+/)) {
+    if (/^[A-Za-z']+$/.test(w)) {
+      run += 1
+      if (run >= 3) return false
+    } else {
+      run = 0
+    }
+  }
+  return true
+}
+
 async function requestLatex(block, div, text) {
   if (mathConverting) return
   if (Date.now() - lastMathAt < MATH_MIN_GAP_MS) return
@@ -444,8 +484,18 @@ async function requestLatex(block, div, text) {
     // and stamping old math over new words would be worse than plain text —
     // and only if the toggle is still on, so a request started before the
     // user switched it off doesn't paint math into a panel told to stop.
-    if (full && mathOn && div.isConnected && blockText(block) === text) setBlockLatex(div, full)
-  } catch {
+    if (full && mathOn && div.isConnected && blockText(block) === text) {
+      if (looksLikeLatex(full)) {
+        setBlockLatex(div, full)
+      } else {
+        // The model answered with something, but it doesn't read like LaTeX —
+        // treat it the same as a refusal rather than stamp it over the
+        // user's real words.
+        delete div.dataset.latex
+        div.lastElementChild.textContent = text
+      }
+    }
+  } catch (err) {
     // Fail soft: a gate refusal, a timeout, a model error. Nothing streamed
     // survives either — put the block back to its own current plain text
     // rather than leave a partial equation on screen.
@@ -453,6 +503,12 @@ async function requestLatex(block, div, text) {
       delete div.dataset.latex
       div.lastElementChild.textContent = text
     }
+    // A rate-limit/busy refusal isn't worth showing — same gate askAuto
+    // uses. Any other error (e.g. the chat model isn't downloaded) is
+    // surfaced, so the toggle doesn't sit on doing nothing forever with no
+    // feedback.
+    const msg = String(err)
+    if (!/rate limited|busy|too long/.test(msg)) setNote(msg, true)
   } finally {
     mathConverting = false
     mathStreamBlock = null
@@ -464,8 +520,17 @@ async function requestLatex(block, div, text) {
 // same discipline as the liveAnswer listener above.
 listen(EVENTS.liveMath, (e) => {
   const { seq, text: piece } = e.payload || {}
-  if (!piece || !mathOn || !mathStreamDiv || !mathStreamDiv.isConnected) return
+  if (!piece || !mathStreamDiv || !mathStreamDiv.isConnected) return
   if (blockText(mathStreamBlock) !== mathStreamText) return // superseded
+  if (!mathOn) {
+    // The toggle went off mid-stream. A chunk already painted here before
+    // requestLatex()'s own mathOn check skips the final commit would
+    // otherwise leave half an equation on screen — restore plain text the
+    // same way the catch branch below does for a failed conversion.
+    delete mathStreamDiv.dataset.latex
+    mathStreamDiv.lastElementChild.textContent = mathStreamText
+    return
+  }
   if (seq === 1) mathStreamBuf = ''
   mathStreamBuf += piece
   try {

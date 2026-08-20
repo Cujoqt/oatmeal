@@ -37,6 +37,11 @@
 // This runs per live block and once over a finished transcript, so it is a
 // string check and nothing more — the model is never woken merely to classify,
 // the same reason `looksLikeQuestion` in transcript.js is a heuristic.
+//
+// Nothing calls `looksMathy`/`mathiness` today — Dylan dropped auto-detection
+// after evidence it fired on ordinary meetings and missed most branches of
+// math — but both stay deliberately, kept for their tests, which pin down the
+// classifier's failure map in case detection is ever revisited.
 
 // Spoken-math phrases. ASR output has almost no punctuation, so these are
 // matched against normalized (lowercased, punctuation-stripped) text as
@@ -265,9 +270,13 @@ function makeParser(words) {
   // A `+`/`-` right after a square root's argument is genuinely ambiguous
   // scope — "the square root of x plus one" could mean sqrt(x) + 1 or
   // sqrt(x + 1), and nothing here can tell which the speaker meant. Refusing
-  // it matches the same call already made for "x plus 1 over 2".
+  // it matches the same call already made for "x plus 1 over 2". A power
+  // suffix is the same kind of ambiguity: "the square root of x squared"
+  // means sqrt(x^2) in English, but parseFactorWithSuffix would otherwise
+  // attach the suffix to the completed \sqrt{...}, giving (root x)^2 instead.
   function sqrtScopeIsAmbiguous() {
-    return words[i] === 'plus' || words[i] === 'minus'
+    return words[i] === 'plus' || words[i] === 'minus' || words[i] === 'squared' ||
+      words[i] === 'cubed' || words[i] === 'to'
   }
 
   function parseFactor() {

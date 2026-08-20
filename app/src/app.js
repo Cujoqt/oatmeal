@@ -201,6 +201,14 @@ function showToast(msg, isErr = false) {
 // never inject markup.
 
 function renderMarkdown(md, target) {
+  // The prompt asks for a displayed equation's \[ and \] on the same line as
+  // the equation, but nothing enforces that the model obeys — belt and
+  // braces. The loop below is line-based (MATH doesn't match across a `\n`),
+  // so a \[...\] pair broken onto three lines would otherwise render as two
+  // literal-backslash paragraphs bracketing a raw-LaTeX paragraph. Join any
+  // such pair onto one line first.
+  md = md.replace(/\\\[([\s\S]*?)\\\]/g, (_, body) => `\\[${body.replace(/\s*\n\s*/g, ' ')}\\]`)
+
   target.innerHTML = ''
   let list = null
 
