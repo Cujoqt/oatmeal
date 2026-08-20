@@ -73,7 +73,7 @@
      * A dismissible card for the answer to a question overheard in the room.
      * In flow above the note, not floating, so it never lies across the last
      * transcript line or the footer. */
-    #autoBtn.on, #pin.on { color: var(--green); }
+    #autoBtn.on, #pin.on, #mathBtn.on { color: var(--green); }
     #answer {
       flex: 0 0 auto; margin: .2rem .8rem .4rem;
       background: var(--surface-2); border: 1px solid var(--line);
@@ -146,6 +146,11 @@
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
             <path d="M9.5 9a2.5 2.5 0 1 1 3.5 2.3c-.9.4-1.5 1-1.5 2M11.5 18h.01" />
             <circle cx="12" cy="12" r="9" />
+          </svg>
+        </button>
+        <button class="icon-btn" id="mathBtn" title="Typeset spoken math (off)" aria-pressed="false">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M4 13l3 6 4-15h9" />
           </svg>
         </button>
         <button class="icon-btn" id="settings" title="Transcription settings">

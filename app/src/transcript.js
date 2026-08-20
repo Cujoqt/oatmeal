@@ -11,6 +11,8 @@
 // The note window owns the session. This window only renders and asks.
 
 import { EVENTS, LANG_KEY, chunkSeconds, getLang, setLang, fmtMs, escapeHtml } from '/shared.js'
+import { speechToLatex } from '/math.js'
+import { toMathML } from '/mathml.js'
 
 const { invoke } = window.__TAURI__.core
 const { listen, emit } = window.__TAURI__.event
@@ -28,6 +30,7 @@ const searchBtn = el('searchBtn')
 const searchEl = el('search')
 const langEl = el('lang')
 const autoBtn = el('autoBtn')
+const mathBtn = el('mathBtn')
 const pinBtn = el('pin')
 const answerEl = el('answer')
 const ansQEl = el('ansQ')
@@ -120,15 +123,23 @@ function addLine(line) {
   if (!text) return
   const at_ms = line.at_ms || 0
   const open = blocks[blocks.length - 1]
+  let block, div
 
   if (open && at_ms - open.at_ms < chunkSeconds() * 1000) {
     open.texts.push(text)
-    // Re-rendered as plain text; a live search paints its marks back on below.
-    linesEl.lastElementChild.lastElementChild.textContent = blockText(open)
+    block = open
+    div = linesEl.lastElementChild
+    // Re-rendered as plain text; a live search paints its marks back on
+    // below, and maybeTypeset() below re-derives math from the grown block —
+    // any typesetting from before this line merged in must not survive
+    // unchanged, or a stale equation could outlive the words it came from.
+    delete div.dataset.latex
+    div.lastElementChild.textContent = blockText(open)
   } else {
-    const block = { at_ms, texts: [text] }
+    block = { at_ms, texts: [text] }
     blocks.push(block)
-    linesEl.appendChild(rowFor(block))
+    div = rowFor(block)
+    linesEl.appendChild(div)
   }
 
   // Drop the oldest paragraphs past the ceiling, keeping `blocks` and the DOM in
@@ -139,6 +150,7 @@ function addLine(line) {
   }
 
   refresh()
+  maybeTypeset(block, div)
   // Only the newest paragraph changed, but a search still has to re-decide it.
   if (filtering) applyFilter()
 
@@ -299,11 +311,148 @@ function replaceAll(incoming) {
   }
   blocks = blocks.slice(-MAX_ROWS)
   linesEl.innerHTML = ''
-  for (const b of blocks) linesEl.appendChild(rowFor(b))
+  for (const b of blocks) {
+    const div = rowFor(b)
+    linesEl.appendChild(div)
+    maybeTypeset(b, div)
+  }
   refresh()
   applyFilter()
   toBottom()
 }
+
+// ── live math typesetting ───────────────────────────────────────────────────
+//
+// When the toggle is on, a paragraph that reads as spoken mathematics is
+// typeset in place. `speechToLatex` (math.js) is the free path — a pure
+// phrase table, tried first, no model involved. Only when it returns null
+// *and* the text contains vocabulary spoken maths actually uses does the
+// line go to the gated model call `latex_from_speech`, which shares its
+// single-flight, six-second-minimum rate limit with auto-answer because both
+// compete with Whisper for the GPU.
+//
+// `looksMathy`/`mathiness` (also in math.js) are dead code and deliberately
+// unused here — Dylan dropped auto-detection after evidence it fires on
+// ordinary meetings and misses most branches of math. What gates the model
+// call instead is much narrower: not "is this a lecture", just "does this
+// line contain the kind of words spoken math uses". Its worst case is one
+// wasted, rate-limited model call — not a mis-rendered transcript line.
+
+const MATH_KEY = 'oatmeal.mathMode'
+let mathOn = false
+
+/// Mirrors AUTO_MIN_GAP_MS: a client-side pre-filter so a burst of math-y
+/// lines doesn't fire a request per line the backend gate would only refuse.
+/// The backend gate — shared with auto-answer — is still the authority.
+const MATH_MIN_GAP_MS = 6000
+/// True while a conversion is in flight, so a second line never stacks a
+/// request on top of one the shared gate would reject anyway.
+let mathConverting = false
+let lastMathAt = 0
+
+/// The block/div/source-text a model conversion is currently running for, so
+/// the streamed tokens below land on the right row and a result that arrives
+/// after the paragraph grew past what was asked about gets discarded instead
+/// of stamping stale math over new words.
+let mathStreamBlock = null
+let mathStreamDiv = null
+let mathStreamText = ''
+let mathStreamBuf = ''
+
+/// Vocabulary and symbols `speechToLatex`'s own grammar recognises — plus,
+/// minus, times, equals, powers, roots, pi, theta, the integral opener, and
+/// the bare operator characters. Not a lecture classifier: just whether this
+/// particular line is worth the model's time after the free path passed on it.
+const MATH_CUES = /\b(plus|minus|times|equals|squared|cubed|divided by|square root|to the power|raised to the power|the integral|pi|theta)\b/i
+
+function looksLikeMathCue(text) {
+  return MATH_CUES.test(text) || /[+\-*/=^]/.test(text)
+}
+
+function setMathUI(on) {
+  mathOn = on
+  mathBtn.classList.toggle('on', on)
+  mathBtn.setAttribute('aria-pressed', String(on))
+  mathBtn.title = on ? 'Typeset spoken math (on)' : 'Typeset spoken math (off)'
+}
+
+mathBtn.addEventListener('click', () => {
+  const on = !mathOn
+  setMathUI(on)
+  localStorage.setItem(MATH_KEY, on ? '1' : '0')
+  setNote(on ? 'Math typesetting on — spoken equations render as they’re heard.' : 'Math typesetting off.')
+})
+
+/// Typeset `latex` into a block's span and record it on the block element as
+/// the source of truth. applyFilter() rewrites every span's markup wholesale
+/// on each search keystroke, which would otherwise destroy the MathML nodes —
+/// `data-latex` is what lets it rebuild them afterward instead of losing them.
+function setBlockLatex(div, latex) {
+  div.dataset.latex = latex
+  const span = div.lastElementChild
+  span.textContent = ''
+  span.appendChild(toMathML(latex))
+}
+
+/// Try to typeset a block's current text. Called whenever a block's content
+/// changes — a new paragraph, another line merged into an open one, or the
+/// initial catch-up render — so a paragraph that turns out to be pure spoken
+/// math gets typeset regardless of when it finished. A block that doesn't
+/// convert is left exactly as it already renders: plain text.
+function maybeTypeset(block, div) {
+  if (!mathOn) return
+  const text = blockText(block)
+  const latex = speechToLatex(text)
+  if (latex !== null) {
+    setBlockLatex(div, latex)
+    return
+  }
+  if (looksLikeMathCue(text)) requestLatex(block, div, text)
+}
+
+async function requestLatex(block, div, text) {
+  if (mathConverting) return
+  if (Date.now() - lastMathAt < MATH_MIN_GAP_MS) return
+  mathConverting = true
+  lastMathAt = Date.now()
+  mathStreamBlock = block
+  mathStreamDiv = div
+  mathStreamText = text
+  mathStreamBuf = ''
+  try {
+    // The streamed tokens paint the block live via the liveMath listener
+    // below; the returned string is the finished conversion, which also
+    // covers the case where nothing streamed.
+    const full = await invoke('latex_from_speech', { speech: text })
+    // Only commit if the block still reads exactly as it did when asked —
+    // more speech may have merged into the paragraph while the model ran,
+    // and stamping old math over new words would be worse than plain text.
+    if (full && div.isConnected && blockText(block) === text) setBlockLatex(div, full)
+  } catch {
+    // Fail soft: a gate refusal, a timeout, a model error. Nothing streamed
+    // survives either — put the block back to its own current plain text
+    // rather than leave a partial equation on screen.
+    if (div.isConnected && blockText(block) === text) {
+      delete div.dataset.latex
+      div.lastElementChild.textContent = text
+    }
+  } finally {
+    mathConverting = false
+    mathStreamBlock = null
+    mathStreamDiv = null
+  }
+}
+
+// textContent throughout toMathML, so model output can never inject markup —
+// same discipline as the liveAnswer listener above.
+listen(EVENTS.liveMath, (e) => {
+  const { seq, text: piece } = e.payload || {}
+  if (!piece || !mathStreamDiv || !mathStreamDiv.isConnected) return
+  if (blockText(mathStreamBlock) !== mathStreamText) return // superseded
+  if (seq === 1) mathStreamBuf = ''
+  mathStreamBuf += piece
+  setBlockLatex(mathStreamDiv, mathStreamBuf)
+})
 
 // ── events ───────────────────────────────────────────────────────────────────
 
@@ -386,18 +535,26 @@ function applyFilter() {
   filtering = Boolean(q)
 
   for (let i = 0; i < nodes.length; i++) {
-    const span = nodes[i].lastElementChild
+    const div = nodes[i]
+    const span = div.lastElementChild
     const text = blocks[i] ? blockText(blocks[i]) : span.textContent
     if (!q) {
-      nodes[i].classList.remove('hide')
+      div.classList.remove('hide')
       span.textContent = text
-      continue
+    } else {
+      const match = text.toLowerCase().includes(q)
+      div.classList.toggle('hide', !match)
+      if (match) {
+        hits++
+        span.innerHTML = highlight(text, q)
+      }
     }
-    const match = text.toLowerCase().includes(q)
-    nodes[i].classList.toggle('hide', !match)
-    if (match) {
-      hits++
-      span.innerHTML = highlight(text, q)
+    // The rewrites above just replaced this span's markup wholesale, which
+    // would silently destroy any typeset MathML node. Rebuild it from the
+    // block's own recorded LaTeX — the source of truth data-latex exists for.
+    if (div.dataset.latex) {
+      span.textContent = ''
+      span.appendChild(toMathML(div.dataset.latex))
     }
   }
 
@@ -437,6 +594,7 @@ async function boot() {
   })
 
   setAutoUI(localStorage.getItem(AUTO_KEY) === '1')
+  setMathUI(localStorage.getItem(MATH_KEY) === '1')
   applyPin(localStorage.getItem(PIN_KEY) === '1')
 
   setRecordingUI(false)

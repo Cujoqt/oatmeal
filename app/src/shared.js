@@ -13,6 +13,10 @@ export const BACKEND = {
   /// Each piece of a streamed live auto-answer: `{ seq, text }`. Separate from
   /// `chatToken` so the panel's answer never interleaves with a typed one.
   liveAnswer: 'oatmeal://live-answer',
+  /// Each piece of a streamed live math conversion: `{ seq, text }`. Separate
+  /// from `liveAnswer` for the same reason that one is separate from
+  /// `chatToken` — the live-panel streams must never interleave.
+  liveMath: 'oatmeal://live-math',
   /// The machine slept mid-recording: `{ asleep_ms }`. Nothing was captured for
   /// that stretch, so the take is stopped rather than left with a hole in it.
   slept: 'oatmeal://slept',
