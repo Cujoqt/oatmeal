@@ -2218,7 +2218,7 @@ dependencies = [
 
 [[package]]
 name = "oatmeal-app"
-version = "1.9.0"
+version = "1.10.0"
 dependencies = [
  "block2",
  "cocoa",
