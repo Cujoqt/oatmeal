@@ -366,6 +366,11 @@ let mathStreamBuf = ''
 const MATH_CUES = /\b(plus|minus|times|equals|squared|cubed|divided by|square root|to the power|raised to the power|the integral|pi|theta)\b/i
 
 function looksLikeMathCue(text) {
+  // The bare-operator branch fires on any hyphen, slash or equals — "follow-
+  // up", a date — which is broader than the named-word branch above. Kept
+  // anyway: ASR output carries almost no punctuation (see math.js's module
+  // comment), so this rarely matches prose in practice, and a false positive
+  // here only costs one wasted, rate-limited model call.
   return MATH_CUES.test(text) || /[+\-*/=^]/.test(text)
 }
 
@@ -402,12 +407,22 @@ function setBlockLatex(div, latex) {
 function maybeTypeset(block, div) {
   if (!mathOn) return
   const text = blockText(block)
-  const latex = speechToLatex(text)
-  if (latex !== null) {
-    setBlockLatex(div, latex)
-    return
+  try {
+    const latex = speechToLatex(text)
+    if (latex !== null) {
+      setBlockLatex(div, latex)
+      return
+    }
+    if (looksLikeMathCue(text)) requestLatex(block, div, text)
+  } catch {
+    // speechToLatex and toMathML both document a never-throw contract, but
+    // this runs inside addLine()'s per-line hot path — a throw here would
+    // skip applyFilter(), toBottom() and maybeAutoAnswer() for the line, not
+    // just lose the typesetting. Defence in depth: leave the line as plain
+    // text rather than let a throw here degrade the live transcript.
+    delete div.dataset.latex
+    div.lastElementChild.textContent = text
   }
-  if (looksLikeMathCue(text)) requestLatex(block, div, text)
 }
 
 async function requestLatex(block, div, text) {
@@ -426,8 +441,10 @@ async function requestLatex(block, div, text) {
     const full = await invoke('latex_from_speech', { speech: text })
     // Only commit if the block still reads exactly as it did when asked —
     // more speech may have merged into the paragraph while the model ran,
-    // and stamping old math over new words would be worse than plain text.
-    if (full && div.isConnected && blockText(block) === text) setBlockLatex(div, full)
+    // and stamping old math over new words would be worse than plain text —
+    // and only if the toggle is still on, so a request started before the
+    // user switched it off doesn't paint math into a panel told to stop.
+    if (full && mathOn && div.isConnected && blockText(block) === text) setBlockLatex(div, full)
   } catch {
     // Fail soft: a gate refusal, a timeout, a model error. Nothing streamed
     // survives either — put the block back to its own current plain text
@@ -447,7 +464,7 @@ async function requestLatex(block, div, text) {
 // same discipline as the liveAnswer listener above.
 listen(EVENTS.liveMath, (e) => {
   const { seq, text: piece } = e.payload || {}
-  if (!piece || !mathStreamDiv || !mathStreamDiv.isConnected) return
+  if (!piece || !mathOn || !mathStreamDiv || !mathStreamDiv.isConnected) return
   if (blockText(mathStreamBlock) !== mathStreamText) return // superseded
   if (seq === 1) mathStreamBuf = ''
   mathStreamBuf += piece
