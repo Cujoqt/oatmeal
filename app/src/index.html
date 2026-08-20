@@ -540,6 +540,17 @@
     .prose li { margin-bottom: 5px; }
     .prose strong { color: var(--ink); font-weight: 600; }
     .prose .placeholder { color: var(--faint); font-style: italic; }
+    math { font-size: 1.05em; }
+    math[display="block"] { display: block; margin: 10px 0; text-align: center; }
+    .solution {
+      margin: 4px 0 12px 18px; padding: 6px 10px;
+      border-left: 2px solid var(--line-2); border-radius: 0 4px 4px 0;
+    }
+    .solution summary {
+      cursor: pointer; font-size: 12px; color: var(--muted); user-select: none;
+    }
+    .solution[open] summary { color: var(--ink-soft); margin-bottom: 6px; }
+    .solution p { margin: 0; color: var(--ink-soft); }
 
     /* One paragraph of transcript: the timestamp once at the top, then
        everything said until the block runs past the chunk length. */

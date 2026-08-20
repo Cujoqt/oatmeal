@@ -11,6 +11,7 @@ const $ = (id) => document.getElementById(id)
 
 import { CHUNK_KEY, DEFAULT_CHUNK_SECS, EVENTS, chunkSeconds, getLang, setLang } from '/shared.js'
 import { createDatePicker } from '/datepicker.js'
+import { toMathML } from '/mathml.js'
 
 const btn = $('btn')
 const cluster = $('cluster')
@@ -123,6 +124,7 @@ const TEMPLATES = [
   { id: 'standup', label: 'Standup' },
   { id: 'one_on_one', label: '1:1' },
   { id: 'interview', label: 'Interview' },
+  { id: 'lecture', label: 'Lecture' },
 ]
 
 let recording = false
@@ -202,7 +204,12 @@ function renderMarkdown(md, target) {
   target.innerHTML = ''
   let list = null
 
-  const inline = (el, text) => {
+  // \(…\) is inline math, \[…\] is displayed. Dollar signs are deliberately not
+  // a delimiter: this renderer is shared with every other template, where $50
+  // is a price and not an equation.
+  const MATH = /\\\((.+?)\\\)|\\\[(.+?)\\\]/g
+
+  const bold = (el, text) => {
     // **bold** is the only inline form the prompts ask for.
     const parts = text.split(/\*\*(.+?)\*\*/g)
     parts.forEach((part, i) => {
@@ -215,6 +222,16 @@ function renderMarkdown(md, target) {
         el.appendChild(document.createTextNode(part))
       }
     })
+  }
+
+  const inline = (el, text) => {
+    let last = 0
+    for (const m of text.matchAll(MATH)) {
+      if (m.index > last) bold(el, text.slice(last, m.index))
+      el.appendChild(toMathML(m[1] ?? m[2], m[2] !== undefined))
+      last = m.index + m[0].length
+    }
+    if (last < text.length) bold(el, text.slice(last))
   }
 
   for (const raw of md.split('\n')) {
@@ -236,6 +253,21 @@ function renderMarkdown(md, target) {
       const el = document.createElement(heading[1].length <= 2 ? 'h2' : 'h3')
       inline(el, heading[2])
       target.appendChild(el)
+      continue
+    }
+
+    // A Lecture note follows each review question with this line; collapse it
+    // rather than let the answer sit in plain sight above the question.
+    const solution = line.match(/^>\s*Solution:\s*(.*)$/i)
+    if (solution) {
+      const d = document.createElement('details')
+      d.className = 'solution'
+      const s = document.createElement('summary')
+      s.textContent = 'Show solution'
+      const body = document.createElement('p')
+      inline(body, solution[1])
+      d.append(s, body)
+      target.appendChild(d)
       continue
     }
 
