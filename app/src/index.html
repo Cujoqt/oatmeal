@@ -411,6 +411,22 @@
     }
     #status:empty { background: none; }
     #status.err { color: var(--danger); }
+    /* Indeterminate — there's no real percentage to report (Whisper and the
+       note-writing model don't report progress back to the UI), so this only
+       promises "still working", not "this much done". */
+    .status-progress {
+      position: sticky; bottom: 70px; z-index: 7; height: 2px; margin: 0 32px;
+      border-radius: 1px; background: var(--line); overflow: hidden; flex: none;
+    }
+    .status-progress[hidden] { display: none; }
+    .status-progress i {
+      display: block; width: 40%; height: 100%; border-radius: 1px;
+      background: var(--accent); animation: status-slide 1.1s ease-in-out infinite;
+    }
+    @keyframes status-slide {
+      0% { transform: translateX(-100%); }
+      100% { transform: translateX(350%); }
+    }
 
     /* ── onboarding card ───────────────────────────────────────────────── */
     #intro {
@@ -540,6 +556,16 @@
     .prose li { margin-bottom: 5px; }
     .prose strong { color: var(--ink); font-weight: 600; }
     .prose .placeholder { color: var(--faint); font-style: italic; }
+    .prose .sk-caption { color: var(--faint); font-style: italic; margin: 0 0 16px; }
+    .prose .sk-line {
+      height: 12px; border-radius: 6px; margin: 12px 0;
+      background: linear-gradient(90deg, var(--line) 25%, var(--line-2) 37%, var(--line) 63%);
+      background-size: 400% 100%; animation: sk-shimmer 1.4s ease infinite;
+    }
+    @keyframes sk-shimmer {
+      0% { background-position: 100% 0; }
+      100% { background-position: 0 0; }
+    }
     math { font-size: 1.05em; }
     math[display="block"] { display: block; margin: 10px 0; text-align: center; }
     .solution {
@@ -1089,6 +1115,7 @@
         <!-- Above the dock, and before it in flow: both stick to the bottom of the
              scroller, so the status line has to come first to stay clear of it. -->
         <div id="status" role="status" aria-live="polite"></div>
+        <div class="status-progress" id="statusProgress" hidden><i></i></div>
         <div class="dock">
           <div class="cluster" id="cluster" title="Start recording">
             <span class="dots"><i></i><i></i><i></i></span>

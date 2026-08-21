@@ -25,6 +25,7 @@ const expandBtn = $('expand')
 const homeAsk = $('homeAsk')
 const timerEl = $('timer')
 const statusEl = $('status')
+const statusProgressEl = $('statusProgress')
 const themeBtn = $('theme')
 const themeIcon = $('themeIcon')
 const hideEl = $('hide')
@@ -179,6 +180,13 @@ function setStatus(msg, isErr = false) {
   statusEl.textContent = msg
   statusEl.classList.toggle('err', isErr)
   if (!viewHome.classList.contains('on')) showToast(msg, isErr)
+}
+
+/// Indeterminate bar under `#status` for the one stretch that's actually a long
+/// wait on-device: transcribing after a stop. No percentage — Whisper doesn't
+/// report one back to the UI — so this only promises "still working".
+function setBusy(on) {
+  statusProgressEl.hidden = !on
 }
 
 function showToast(msg, isErr = false) {
@@ -437,6 +445,7 @@ async function stopRecording() {
   stopTimer()
   document.body.classList.remove('recording')
   setStatus('Transcribing on-device — this can take a moment…')
+  setBusy(true)
 
   emit(EVENTS.state, { state: 'finishing', message: 'Writing the final transcript…' })
 
@@ -465,6 +474,7 @@ async function stopRecording() {
   } catch (e) {
     setStatus(String(e), true)
   } finally {
+    setBusy(false)
     recording = false
     continuingId = null
     liveLines = []
@@ -1403,9 +1413,20 @@ async function appendTypedNotes(id) {
   renderMarkdown(typed, noteBody.appendChild(document.createElement('div')))
 }
 
+/// A caption plus a handful of shimmering bars, standing in for text noteBody
+/// hasn't fetched yet. Widths vary so it reads as lines, not a stack of boxes.
+function skeletonHTML(caption) {
+  const widths = [92, 78, 85, 60]
+  return (
+    `<div class="skeleton"><p class="sk-caption">${caption}</p>` +
+    widths.map((w) => `<div class="sk-line" style="width:${w}%"></div>`).join('') +
+    '</div>'
+  )
+}
+
 async function renderTranscript() {
   const m = currentMeeting()
-  noteBody.innerHTML = '<p class="placeholder">Loading transcript…</p>'
+  noteBody.innerHTML = skeletonHTML('Loading transcript…')
   if (!m || !m.transcribed) {
     noteBody.innerHTML = '<p class="placeholder">This recording has no transcript — it was stopped before Whisper ran, or no speech was detected.</p>'
     return
@@ -1497,7 +1518,7 @@ async function renderNotes(force = false, regenerate = false) {
     return
   }
 
-  noteBody.innerHTML = '<p class="placeholder">Reading the transcript and writing it up… this takes a minute on first run.</p>'
+  noteBody.innerHTML = skeletonHTML('Reading the transcript and writing it up… this takes a minute on first run.')
   setModelChip('busy', 'Writing notes…')
   const asked = m.id
   try {
