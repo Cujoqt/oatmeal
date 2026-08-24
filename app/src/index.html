@@ -528,6 +528,8 @@
     .chip.danger:hover { color: var(--danger); border-color: var(--danger); }
     /* Transparent grouping element so its chip children lay out directly in the .chips row. */
     .tmpl-chips { display: contents; }
+    /* `display: contents` outranks the UA rule for [hidden], same as .chip above. */
+    .tmpl-chips[hidden] { display: none; }
     .video-panel { display: flex; flex-direction: column; gap: 8px; margin: 14px 0 4px; padding: 12px; border: 1px solid var(--line); border-radius: 10px; }
     /* Same override `.chip[hidden]` needs above: `.video-panel` sets display,
        which outranks the UA stylesheet's rule for the hidden attribute. */
@@ -598,6 +600,63 @@
     .gen:disabled { opacity: .55; cursor: default; }
     .note-empty { text-align: center; padding: 40px 0; }
     .note-empty p { color: var(--muted); font-size: 14px; max-width: 400px; margin: 0 auto 18px; line-height: 1.6; }
+
+    /* Study tab — settings, then the three generated surfaces. Every colour
+       here is an existing token, so both dark-mode blocks already cover it. */
+    .study { max-width: 720px; margin: 0 auto; }
+    .study-settings {
+      background: var(--card); border: 1px solid var(--line); border-radius: 14px;
+      padding: 18px 20px 6px; margin-bottom: 26px;
+    }
+    .study-fields { display: flex; flex-wrap: wrap; gap: 0 18px; }
+    .study-fields .field { flex: 1 1 150px; }
+    .study-fields .field.wide { flex: 1 1 100%; }
+    .study-actions { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; padding-bottom: 14px; }
+    .study-part { margin-bottom: 34px; }
+    .study-part h2 {
+      font: 600 12px var(--sans); letter-spacing: .07em; text-transform: uppercase;
+      color: var(--muted); margin: 0 0 12px;
+    }
+    .study-part .placeholder { color: var(--muted); font-size: 14px; }
+
+    /* One card at a time: a deck is read, not scanned. */
+    .flashcard {
+      background: var(--card); border: 1px solid var(--line-2); border-radius: 14px;
+      padding: 28px 24px; min-height: 128px; display: flex; align-items: center;
+      justify-content: center; text-align: center; cursor: pointer;
+      font-size: 16px; line-height: 1.55; color: var(--ink);
+    }
+    .flashcard .back { color: var(--ink-soft); }
+    .flashcard:hover { border-color: var(--ink-soft); }
+    .card-nav { display: flex; align-items: center; gap: 12px; margin-top: 12px; justify-content: center; }
+    .card-nav .count { font: 500 12.5px var(--mono); color: var(--muted); min-width: 62px; text-align: center; }
+    .card-nav button {
+      background: transparent; border: 1px solid var(--line-2); color: var(--ink-soft);
+      border-radius: 9px; padding: 6px 13px; cursor: pointer; font: 500 12.5px var(--sans);
+    }
+    .card-nav button:hover:not(:disabled) { border-color: var(--ink-soft); color: var(--ink); }
+    .card-nav button:disabled { opacity: .4; cursor: default; }
+
+    .quiz-q { margin-bottom: 22px; }
+    .quiz-q .q { font-size: 15px; line-height: 1.55; margin-bottom: 10px; }
+    .quiz-q .q b { font: 600 12px var(--mono); color: var(--accent); margin-right: 8px; }
+    .quiz-opt {
+      display: flex; gap: 10px; align-items: flex-start; padding: 9px 12px; border-radius: 10px;
+      border: 1px solid var(--line); margin-bottom: 6px; cursor: pointer; font-size: 14.5px;
+      line-height: 1.5; color: var(--ink-soft);
+    }
+    .quiz-opt:hover { background: var(--hover); }
+    .quiz-opt input { margin-top: 3px; accent-color: var(--accent); flex: none; }
+    /* After grading: the answer they picked, and — only if they missed it — the
+       one that was right. Marking every untouched option would be noise. */
+    .quiz-opt.right { border-color: var(--good-ink); background: var(--good-bg); color: var(--ink); }
+    .quiz-opt.wrong { border-color: var(--danger); color: var(--ink); }
+    .quiz-opt .mark { margin-left: auto; font: 600 11.5px var(--sans); flex: none; }
+    .quiz-opt.right .mark { color: var(--good-ink); }
+    .quiz-opt.wrong .mark { color: var(--danger); }
+    .quiz-graded .quiz-opt { cursor: default; }
+    .quiz-graded .quiz-opt:hover { background: none; }
+    .quiz-score { font: 600 15px var(--sans); color: var(--ink); margin-left: 14px; }
 
     /* Ask bar — pinned to the bottom of the note view. */
     .askbar { position: sticky; bottom: 0; background: linear-gradient(to top, var(--bg) 62%, transparent); padding: 14px 32px 18px; }
@@ -1139,6 +1198,7 @@
                 Enhanced
               </button>
               <button id="tabRaw">Transcript</button>
+              <button id="tabStudy">Study</button>
             </div>
             <div class="tmpl-chips" id="tmplChips"></div>
           </div>
@@ -1181,6 +1241,52 @@
           </div>
 
           <div class="prose" id="noteBody"></div>
+
+          <div class="study" id="studyBody" hidden>
+            <div class="study-settings">
+              <div class="study-fields">
+                <div class="field">
+                  <label for="studyCount">How many</label>
+                  <input id="studyCount" type="number" min="3" max="30" step="1" value="10" />
+                  <div class="hint">Flashcards and questions</div>
+                </div>
+                <div class="field">
+                  <label for="studyDifficulty">Difficulty</label>
+                  <select id="studyDifficulty">
+                    <option value="easy">Easy</option>
+                    <option value="medium" selected>Medium</option>
+                    <option value="hard">Hard</option>
+                  </select>
+                  <div class="hint">How demanding the questions are</div>
+                </div>
+                <div class="field wide">
+                  <label for="studyFocus">Topic focus</label>
+                  <input id="studyFocus" maxlength="200" placeholder="e.g. just the pricing section" />
+                  <div class="hint">Leave blank to use the whole recording</div>
+                </div>
+              </div>
+              <div class="study-actions">
+                <button class="gen" id="studyGenerate">Generate study material</button>
+                <span class="note-line" id="studyNote"></span>
+              </div>
+            </div>
+
+            <section class="study-part" id="studyPlanPart">
+              <h2>Study plan</h2>
+              <div class="prose" id="studyPlanOut"></div>
+            </section>
+
+            <section class="study-part" id="studyCardsPart">
+              <h2>Flashcards</h2>
+              <div id="studyCardsOut"></div>
+            </section>
+
+            <section class="study-part" id="studyQuizPart">
+              <h2>Quiz</h2>
+              <div id="studyQuizOut"></div>
+            </section>
+          </div>
+
           <div class="answers" id="answers"></div>
         </div>
 

@@ -10,6 +10,7 @@ pub mod recall;
 pub mod session;
 pub mod settings;
 pub mod store;
+pub mod study;
 mod sleep;
 mod sysaudio;
 pub mod transcribe;
@@ -716,6 +717,69 @@ fn write_notes(
     library::write_notes(&id, template, force)
 }
 
+/// Build a study plan from a past meeting's material and cache it, so
+/// reopening the Study tab doesn't re-run the model.
+#[tauri::command(async)]
+fn generate_study_plan(
+    state: tauri::State<'_, AppState>,
+    id: String,
+    settings: study::StudySettings,
+    force: bool,
+) -> Result<String, String> {
+    let _generating = NotesGenerating::begin(&state.notes_generating);
+    study::generate_study_plan(&id, &settings, force)
+}
+
+/// Build flashcards from a past meeting's material and cache them.
+#[tauri::command(async)]
+fn generate_flashcards(
+    state: tauri::State<'_, AppState>,
+    id: String,
+    settings: study::StudySettings,
+    force: bool,
+) -> Result<Vec<study::Flashcard>, String> {
+    let _generating = NotesGenerating::begin(&state.notes_generating);
+    study::generate_flashcards(&id, &settings, force)
+}
+
+/// Build a multiple-choice quiz from a past meeting's material and cache it.
+/// The correct answer rides along with each question so grading a finished
+/// quiz never has to run the model again.
+#[tauri::command(async)]
+fn generate_quiz(
+    state: tauri::State<'_, AppState>,
+    id: String,
+    settings: study::StudySettings,
+    force: bool,
+) -> Result<Vec<study::QuizQuestion>, String> {
+    let _generating = NotesGenerating::begin(&state.notes_generating);
+    study::generate_quiz(&id, &settings, force)
+}
+
+/// What the Study tab already has on disk for a meeting. Plain reads — nothing
+/// here touches the model.
+#[tauri::command]
+fn cached_study_plan(id: String) -> Result<Option<String>, String> {
+    study::cached_study_plan(&id)
+}
+
+#[tauri::command]
+fn cached_flashcards(id: String) -> Result<Option<Vec<study::Flashcard>>, String> {
+    study::cached_flashcards(&id)
+}
+
+#[tauri::command]
+fn cached_quiz(id: String) -> Result<Option<Vec<study::QuizQuestion>>, String> {
+    study::cached_quiz(&id)
+}
+
+/// The count and difficulty the material on disk was generated under, so the
+/// settings form reopens showing what produced what is on screen.
+#[tauri::command]
+fn last_study_settings(id: String) -> Result<Option<study::StudySettings>, String> {
+    study::last_settings(&id)
+}
+
 /// Answer a question about a meeting. `id` empty means the meeting currently
 /// being recorded, answered from the live transcript so far.
 #[tauri::command(async)]
@@ -1217,6 +1281,13 @@ pub fn run() {
             ensure_chat_model,
             chat_model_status,
             write_notes,
+            generate_study_plan,
+            generate_flashcards,
+            generate_quiz,
+            cached_study_plan,
+            cached_flashcards,
+            cached_quiz,
+            last_study_settings,
             meeting_segments,
             meeting_typed_notes,
             ask_meeting,
@@ -1372,6 +1443,9 @@ mod tests {
             "finish_meeting",
             "ensure_chat_model",
             "write_notes",
+            "generate_study_plan",
+            "generate_flashcards",
+            "generate_quiz",
             "ask_meeting",
             "answer_live_question",
             "latex_from_speech",
