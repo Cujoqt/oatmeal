@@ -278,26 +278,81 @@ impl Transcriber {
             .full(params, samples)
             .map_err(|e| format!("whisper inference failed: {e}"))?;
 
-        let mut segments = Vec::new();
-        let mut text = String::new();
+        let mut raw_segments = Vec::new();
         for seg in state.as_iter() {
             let s = seg.to_str_lossy().map(|c| c.into_owned()).unwrap_or_default();
-            let trimmed = s.trim();
+            raw_segments.push(Segment {
+                start_cs: seg.start_timestamp(),
+                end_cs: seg.end_timestamp(),
+                text: s,
+            });
+        }
+        let segments = collapse_repeated_segments(raw_segments);
+
+        let mut text = String::new();
+        for seg in &segments {
+            let trimmed = seg.text.trim();
             if !trimmed.is_empty() {
                 if !text.is_empty() {
                     text.push(' ');
                 }
                 text.push_str(trimmed);
             }
-            segments.push(Segment {
-                start_cs: seg.start_timestamp(),
-                end_cs: seg.end_timestamp(),
-                text: s,
-            });
         }
 
         Ok(Transcript { segments, text })
     }
+}
+
+/// How many consecutive occurrences of the same segment text survive before
+/// the rest are dropped.
+///
+/// whisper.cpp feeds each decoded window's text back in as the prompt for the
+/// next window, with no escape hatch: once a window locks onto a short
+/// phrase, that phrase primes every window after it to repeat itself, and the
+/// repeat stays confident enough that the temperature-fallback retry never
+/// fires to break the loop. Two real transcripts hit this — a quiet stretch
+/// spiraled into "Okay." for the rest of a recording, and mid-sentence real
+/// speech spiraled into "I make more money." for thirty-odd lines before
+/// recovering on its own. Collapsing runs of identical consecutive segments
+/// is the only lever available outside whisper.cpp itself.
+const MAX_CONSECUTIVE_REPEATS: usize = 2;
+
+/// Normalize a segment's text for repeat comparison: trims whitespace and a
+/// trailing sentence terminator, folds case. Whisper's own repeats vary in
+/// exactly this — "Okay." vs "okay" vs "Okay" — so an exact-string compare
+/// would miss most real loops.
+fn normalize_for_repeat_check(s: &str) -> String {
+    s.trim()
+        .trim_end_matches(|c: char| matches!(c, '.' | '!' | '?'))
+        .to_lowercase()
+}
+
+/// Drop segments beyond `MAX_CONSECUTIVE_REPEATS` identical consecutive
+/// repeats, keeping segment order and timestamps for everything that survives.
+fn collapse_repeated_segments(raw: Vec<Segment>) -> Vec<Segment> {
+    let mut out = Vec::with_capacity(raw.len());
+    let mut last_norm = String::new();
+    let mut run = 0usize;
+    for seg in raw {
+        let norm = normalize_for_repeat_check(&seg.text);
+        if norm.is_empty() {
+            last_norm.clear();
+            run = 0;
+            out.push(seg);
+            continue;
+        }
+        if norm == last_norm {
+            run += 1;
+        } else {
+            last_norm = norm;
+            run = 1;
+        }
+        if run <= MAX_CONSECUTIVE_REPEATS {
+            out.push(seg);
+        }
+    }
+    out
 }
 
 /// Read a WAV (i16 or f32, any channel count / sample rate) and return 16 kHz
@@ -436,5 +491,47 @@ mod tests {
         // L+R average cancels to near silence.
         let peak = mono.iter().fold(0.0f32, |m, &s| m.max(s.abs()));
         assert!(peak < 0.05, "expected near-silent downmix, peak {peak}");
+    }
+
+    fn seg(text: &str) -> Segment {
+        Segment { start_cs: 0, end_cs: 0, text: text.to_string() }
+    }
+
+    #[test]
+    fn collapses_silence_hallucination_loop() {
+        // Reproduces the observed bug: whisper.cpp's beam-search pass locked
+        // onto "Okay." over a quiet stretch and repeated it for the rest of
+        // the recording.
+        let raw: Vec<Segment> = std::iter::repeat_with(|| seg(" Okay.")).take(50).collect();
+        let out = collapse_repeated_segments(raw);
+        assert_eq!(out.len(), MAX_CONSECUTIVE_REPEATS);
+    }
+
+    #[test]
+    fn collapses_mid_sentence_hallucination_loop() {
+        // Reproduces the second observed case: real speech ("I make more
+        // money. I buy more of those things.") spiraled into repeating
+        // "I make more money." for ~30 lines before recovering on its own.
+        let mut raw = vec![seg("Yeah."), seg("Confident is movies burgers pizzas.")];
+        raw.extend(std::iter::repeat_with(|| seg("I make more money.")).take(30));
+        raw.push(seg("Okay. Some goods I think we use."));
+
+        let out = collapse_repeated_segments(raw);
+
+        let repeats = out
+            .iter()
+            .filter(|s| normalize_for_repeat_check(&s.text) == "i make more money")
+            .count();
+        assert_eq!(repeats, MAX_CONSECUTIVE_REPEATS);
+        // Everything before and after the loop survives untouched.
+        assert_eq!(out.first().unwrap().text, "Yeah.");
+        assert_eq!(out.last().unwrap().text, "Okay. Some goods I think we use.");
+    }
+
+    #[test]
+    fn leaves_legitimate_short_runs_alone() {
+        let raw = vec![seg("No."), seg("No."), seg("I mean it.")];
+        let out = collapse_repeated_segments(raw);
+        assert_eq!(out.len(), 3);
     }
 }
