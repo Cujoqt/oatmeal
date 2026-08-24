@@ -1,6 +1,6 @@
 [package]
 name = "oatmeal-app"
-version = "1.10.3"
+version = "1.10.4"
 description = "Oatmeal — local meeting recorder, invisible to screen sharing"
 authors = ["Oatmeal"]
 edition = "2021"
@@ -48,7 +48,6 @@ cocoa = "0.26"
 objc = "0.2"
 
 [profile.release]
-codegen-units = 1
-lto = true
+lto = "thin"
 opt-level = "s"
 strip = true
