@@ -33,7 +33,7 @@ use std::thread::JoinHandle;
 
 use serde::Serialize;
 
-use crate::transcribe::{Quality, Transcriber, WHISPER_RATE};
+use crate::transcribe::{normalize_for_repeat_check, Quality, Transcriber, WHISPER_RATE};
 
 /// Don't decode until at least this much audio has accumulated.
 ///
@@ -58,6 +58,19 @@ const PAUSE_DYNAMIC_RANGE: f32 = 1.5;
 /// How much of the previous line to hand the decoder as context. A sentence or
 /// two is enough to keep names consistent; more just crowds the prompt.
 const CONTEXT_CHARS: usize = 180;
+
+/// How many consecutive live lines may say the same thing before the rest are
+/// dropped.
+///
+/// `Transcriber::run` already collapses repeated segments, but its guard starts
+/// over on every call, and the live lane calls it once per window — so a
+/// repetition loop that emits the phrase once per window walks straight past it.
+/// The loop is also self-feeding here: `tail` hands the repeated line to the
+/// next window as its prompt, and `Quality::Fast` turns off the temperature
+/// fallback that is whisper.cpp's own way out of one. Observed live as
+/// "I don't know." and "Our orange juice is going to decrease." filling the
+/// panel for minutes while the offline pass over the same audio came out clean.
+const MAX_REPEATED_LINES: usize = 2;
 
 /// Hard ceiling on one lane's backlog, in samples at 16 kHz (five minutes). The
 /// audio callback can outrun the decoder on a slow machine; without a cap that
@@ -609,6 +622,7 @@ fn run(
     // The tail of what has been said, carried into the next decode so a short
     // window still knows what conversation it is in.
     let mut context = String::new();
+    let mut repeats = RepeatGuard::default();
 
     let max_pending = (MAX_PENDING_SECS * rate) as usize;
     let mut last_report = std::time::Instant::now();
@@ -706,6 +720,13 @@ fn run(
                 Ok(t) => {
                     let text = strip_sound_tags(t.text.trim());
                     if !text.is_empty() && !is_noise(&text) {
+                        if repeats.is_looping(&text) {
+                            // Whisper is looping. Drop the line, and clear the
+                            // context so the next window isn't prompted with the
+                            // phrase that is keeping the loop going.
+                            context.clear();
+                            continue;
+                        }
                         context = tail(&context, &text);
                         let line = LiveLine { at_ms, text };
                         if let Ok(mut l) = lines.lock() {
@@ -826,6 +847,29 @@ fn find_cut(samples: &[f32], min_window: usize, max_window: usize) -> usize {
 
 /// The last `CONTEXT_CHARS` of `previous` followed by `latest`, cut on a
 /// character boundary so the prompt is always valid UTF-8.
+/// Counts how many windows in a row have decoded to the same line, so a
+/// repetition loop can be cut off across windows the way
+/// `collapse_repeated_segments` cuts it off inside one.
+#[derive(Default)]
+struct RepeatGuard {
+    last: String,
+    run: usize,
+}
+
+impl RepeatGuard {
+    /// Record `text` and report whether it is one repeat too many.
+    fn is_looping(&mut self, text: &str) -> bool {
+        let norm = normalize_for_repeat_check(text);
+        if norm == self.last {
+            self.run += 1;
+        } else {
+            self.last = norm;
+            self.run = 1;
+        }
+        self.run > MAX_REPEATED_LINES
+    }
+}
+
 fn tail(previous: &str, latest: &str) -> String {
     let joined = if previous.is_empty() {
         latest.to_string()
@@ -1299,5 +1343,39 @@ mod tests {
         assert!(is_noise("[BLANK_AUDIO]"));
         assert!(is_noise("Thank you."));
         assert!(!is_noise("So the midterm covers chapters four through six."));
+    }
+
+    /// The observed bug: one window per repeat, so the per-window collapse in
+    /// `Transcriber::run` never sees two of them together and the panel fills
+    /// with the same sentence for minutes.
+    #[test]
+    fn a_phrase_repeating_across_windows_is_cut_off() {
+        let mut guard = RepeatGuard::default();
+        let kept = (0..40)
+            .filter(|_| !guard.is_looping("Our orange juice is going to decrease."))
+            .count();
+        assert_eq!(kept, MAX_REPEATED_LINES);
+    }
+
+    /// Whisper's own repeats vary in case and final punctuation, so the compare
+    /// has to be normalized or most real loops slip through.
+    #[test]
+    fn repeats_are_matched_past_case_and_final_punctuation() {
+        let mut guard = RepeatGuard::default();
+        assert!(!guard.is_looping("I don't know."));
+        assert!(!guard.is_looping("I don't know"));
+        assert!(guard.is_looping("i don't know!"));
+    }
+
+    /// Real speech after the loop has to come through, and the run has to reset
+    /// so the same phrase can be said again later.
+    #[test]
+    fn real_speech_survives_and_resets_the_run() {
+        let mut guard = RepeatGuard::default();
+        for _ in 0..10 {
+            guard.is_looping("I don't know.");
+        }
+        assert!(!guard.is_looping("What the demand curve was."));
+        assert!(!guard.is_looping("I don't know."));
     }
 }

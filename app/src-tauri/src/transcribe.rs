@@ -284,7 +284,7 @@ impl Transcriber {
             raw_segments.push(Segment {
                 start_cs: seg.start_timestamp(),
                 end_cs: seg.end_timestamp(),
-                text: s,
+                text: collapse_repeated_sentences(&s),
             });
         }
         let segments = collapse_repeated_segments(raw_segments);
@@ -304,8 +304,8 @@ impl Transcriber {
     }
 }
 
-/// How many consecutive occurrences of the same segment text survive before
-/// the rest are dropped.
+/// How many consecutive occurrences of the same text survive before the rest
+/// are dropped — both of whole segments, and of sentences inside one segment.
 ///
 /// whisper.cpp feeds each decoded window's text back in as the prompt for the
 /// next window, with no escape hatch: once a window locks onto a short
@@ -322,10 +322,75 @@ const MAX_CONSECUTIVE_REPEATS: usize = 2;
 /// trailing sentence terminator, folds case. Whisper's own repeats vary in
 /// exactly this — "Okay." vs "okay" vs "Okay" — so an exact-string compare
 /// would miss most real loops.
-fn normalize_for_repeat_check(s: &str) -> String {
+pub(crate) fn normalize_for_repeat_check(s: &str) -> String {
     s.trim()
         .trim_end_matches(|c: char| matches!(c, '.' | '!' | '?'))
         .to_lowercase()
+}
+
+/// Split `text` into sentences, keeping each terminator and the spacing before
+/// the next sentence attached to the sentence it follows, so rejoining the
+/// pieces reproduces the input exactly.
+fn sentences(text: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let bytes = text.as_bytes();
+    let mut start = 0;
+    let mut i = 0;
+    while i < bytes.len() {
+        if matches!(bytes[i], b'.' | b'!' | b'?') {
+            // Run past a whole "?!" or "..." rather than cutting inside it.
+            while i + 1 < bytes.len() && matches!(bytes[i + 1], b'.' | b'!' | b'?') {
+                i += 1;
+            }
+            let mut end = i + 1;
+            while end < bytes.len() && bytes[end] == b' ' {
+                end += 1;
+            }
+            out.push(&text[start..end]);
+            start = end;
+            i = end;
+            continue;
+        }
+        i += 1;
+    }
+    if start < text.len() {
+        out.push(&text[start..]);
+    }
+    out
+}
+
+/// Drop sentences beyond `MAX_CONSECUTIVE_REPEATS` identical consecutive
+/// repeats *inside one segment*.
+///
+/// This is the shape the loop actually arrives in. Replaying the audio that
+/// looped, with the phrase as the decoder's prompt, reproduces it every time
+/// and returns all forty-odd repeats as the text of a **single** segment — so
+/// `collapse_repeated_segments`, which compares one segment against the next,
+/// has nothing to compare and lets the whole run through.
+fn collapse_repeated_sentences(text: &str) -> String {
+    let parts = sentences(text);
+    let mut out = String::with_capacity(text.len());
+    let mut last_norm = String::new();
+    let mut run = 0usize;
+    for part in parts {
+        let norm = normalize_for_repeat_check(part);
+        if norm.is_empty() {
+            last_norm.clear();
+            run = 0;
+            out.push_str(part);
+            continue;
+        }
+        if norm == last_norm {
+            run += 1;
+        } else {
+            last_norm = norm;
+            run = 1;
+        }
+        if run <= MAX_CONSECUTIVE_REPEATS {
+            out.push_str(part);
+        }
+    }
+    out
 }
 
 /// Drop segments beyond `MAX_CONSECUTIVE_REPEATS` identical consecutive
@@ -533,5 +598,53 @@ mod tests {
         let raw = vec![seg("No."), seg("No."), seg("I mean it.")];
         let out = collapse_repeated_segments(raw);
         assert_eq!(out.len(), 3);
+    }
+
+    /// The shape the loop actually arrives in: one segment, forty-four repeats
+    /// inside it. Replaying the audio that looped, primed with the phrase,
+    /// reproduces this exactly.
+    #[test]
+    fn collapses_a_loop_that_arrives_inside_one_segment() {
+        let looped = " I don't know.".repeat(44);
+        let out = collapse_repeated_sentences(&looped);
+        // The spacing whisper emitted is kept as-is; `run` trims it when it
+        // joins segments into the transcript text.
+        assert_eq!(out.trim(), "I don't know. I don't know.");
+    }
+
+    /// The loop usually ends mid-phrase, and the words after it are real speech
+    /// that has to survive.
+    #[test]
+    fn speech_after_an_intra_segment_loop_survives() {
+        let text = "Yeah. Okay. Okay. Okay. Okay. Okay. What the demand curve was.";
+        assert_eq!(
+            collapse_repeated_sentences(text),
+            "Yeah. Okay. Okay. What the demand curve was."
+        );
+    }
+
+    #[test]
+    fn a_segment_with_no_repeats_is_returned_unchanged() {
+        for text in [
+            " Supply goes down, production costs have increased.",
+            "Which curve, which way, and why?",
+            "Wait... what? No!",
+            "no terminator at all",
+            "",
+        ] {
+            assert_eq!(collapse_repeated_sentences(text), text, "mangled: {text:?}");
+        }
+    }
+
+    #[test]
+    fn splitting_into_sentences_loses_nothing() {
+        for text in [
+            " One. Two.  Three",
+            "Wait... what?! Fine.",
+            "trailing space. ",
+            "",
+        ] {
+            assert_eq!(sentences(text).concat(), text, "lossy: {text:?}");
+        }
     }
 }

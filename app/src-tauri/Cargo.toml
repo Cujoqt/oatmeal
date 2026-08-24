@@ -1,6 +1,6 @@
 [package]
 name = "oatmeal-app"
-version = "1.10.4"
+version = "1.10.5"
 description = "Oatmeal — local meeting recorder, invisible to screen sharing"
 authors = ["Oatmeal"]
 edition = "2021"
