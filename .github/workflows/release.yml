@@ -56,6 +56,7 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
+            ~/.cargo/bin
             app/src-tauri/target
           # Keyed on the image, not just the OS: artifacts built against an older
           # macOS SDK can't be reused here.
@@ -66,9 +67,20 @@ jobs:
         working-directory: app/src-tauri
         run: cargo test --lib
 
+      # Prebuilt binary instead of `cargo install tauri-cli` — that recompiled the
+      # CLI from source on every single run, uncached, costing several minutes for
+      # a tool that never changes within a release.
+      - name: Install tauri-cli
+        run: |
+          if ! command -v cargo-tauri >/dev/null; then
+            curl -fsSL https://github.com/tauri-apps/tauri/releases/download/tauri-cli-v2.11.4/cargo-tauri-aarch64-apple-darwin.zip -o cargo-tauri.zip
+            unzip -o cargo-tauri.zip -d ~/.cargo/bin
+            rm cargo-tauri.zip
+          fi
+
       - name: Build bundle
         working-directory: app
-        run: cargo install tauri-cli --version "^2" --locked && cargo tauri build
+        run: cargo tauri build
 
       - name: Name the artifact for humans
         id: artifact
