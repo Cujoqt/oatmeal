@@ -1168,6 +1168,13 @@ fn app_version() -> &'static str {
     update::current_version()
 }
 
+/// The notes GitHub published with the release this build came from — what the
+/// version in the title bar opens. Network-bound, hence `(async)`.
+#[tauri::command(async)]
+fn release_notes() -> Result<update::ReleaseNotes, String> {
+    update::notes()
+}
+
 /// Open a release page or its DMG in the browser. Refuses links outside the
 /// project's own repository. Spawning `open` and waiting on it blocks, so it
 /// stays off the main thread like everything else here that blocks.
@@ -1318,6 +1325,7 @@ pub fn run() {
             data_status,
             app_version,
             check_for_update,
+            release_notes,
             open_update_download,
             install_update,
             video_probe,
@@ -1453,6 +1461,7 @@ mod tests {
             "ask_library",
             "draft_followup",
             "check_for_update",
+            "release_notes",
             "open_update_download",
             "install_update",
             "video_probe",

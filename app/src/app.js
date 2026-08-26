@@ -1270,15 +1270,17 @@ newFolderBtn.addEventListener('click', () => {
 
 // ── views ────────────────────────────────────────────────────────────────────
 
-/// Five surfaces share the content pane: the Coming-up dashboard, the blank
-/// note you type into, a recorded meeting, Settings, and Homework. One function
-/// owns which is lit so the nav highlight can never drift from the view.
+/// Six surfaces share the content pane: the Coming-up dashboard, the blank
+/// note you type into, a recorded meeting, Settings, Homework, and the release
+/// notes. One function owns which is lit so the nav highlight can never drift
+/// from the view. `notes` lights no nav entry — it has none.
 function showView(view) {
   viewDash.classList.toggle('on', view === 'dash')
   viewHome.classList.toggle('on', view === 'draft')
   viewNote.classList.toggle('on', view === 'note')
   viewSettings.classList.toggle('on', view === 'settings')
   viewHomework.classList.toggle('on', view === 'homework')
+  viewNotes.classList.toggle('on', view === 'notes')
   navHome.classList.toggle('on', view === 'dash')
   navSettings.classList.toggle('on', view === 'settings')
   navHomework.classList.toggle('on', view === 'homework')
@@ -1319,6 +1321,71 @@ function showHomework() {
 }
 
 navHomework.addEventListener('click', showHomework)
+
+// ── release notes ────────────────────────────────────────────────────────────
+//
+// Opened by the version in the title bar and by nothing else, so Back has to
+// put you back where you were rather than guessing at Home.
+
+function returnToCurrentView() {
+  if (viewNote.classList.contains('on') && openId) {
+    const id = openId
+    return () => openNote(id)
+  }
+  if (viewHome.classList.contains('on')) return showDraft
+  if (viewSettings.classList.contains('on')) return showSettings
+  if (viewHomework.classList.contains('on')) return showHomework
+  return showHome
+}
+
+async function showReleaseNotes() {
+  // Clicking the version again while already here must not overwrite the way
+  // back with wherever this page happens to be.
+  if (!viewNotes.classList.contains('on')) notesBack.onclick = returnToCurrentView()
+  openId = null
+  showView('notes')
+  renderSidebar()
+
+  notesTitle.textContent = `Oatmeal ${brandVersionEl.textContent}`
+  notesName.hidden = true
+  notesBody.innerHTML = ''
+  notesOpen.hidden = true
+  notesStatus.classList.remove('err')
+  notesStatus.textContent = 'Reading the notes for this version…'
+
+  try {
+    const r = await invoke('release_notes')
+    notesTitle.textContent = `Oatmeal ${r.tag}`
+    notesStatus.textContent = ''
+    if (r.name && r.name !== r.tag) {
+      notesName.textContent = r.name
+      notesName.hidden = false
+    }
+    if (r.body) {
+      renderMarkdown(r.body, notesBody)
+    } else {
+      // A release can be published with an empty body. Say so, rather than
+      // showing a blank card that reads as a failure.
+      const p = document.createElement('p')
+      p.className = 'placeholder'
+      p.textContent = `${r.tag} was published without notes.`
+      notesBody.appendChild(p)
+    }
+    if (r.releaseUrl) {
+      notesOpen.hidden = false
+      notesOpen.onclick = () => {
+        invoke('open_update_download', { url: r.releaseUrl }).catch((e) => setStatus(String(e), true))
+      }
+    }
+  } catch (e) {
+    // Unlike the update check, this one is allowed to say it failed: someone
+    // asked for the page, so an empty screen would be a lie.
+    notesStatus.classList.add('err')
+    notesStatus.textContent = String(e)
+  }
+}
+
+brandVersionEl.addEventListener('click', showReleaseNotes)
 
 function currentMeeting() {
   return meetings.find((m) => m.id === openId)
@@ -2818,7 +2885,10 @@ async function boot() {
   loadAgenda()
   setInterval(loadAgenda, AGENDA_REFRESH_MS)
   invoke('app_version')
-    .then((v) => { brandVersionEl.textContent = `v${v}` })
+    .then((v) => {
+      brandVersionEl.textContent = `v${v}`
+      brandVersionEl.hidden = false
+    })
     .catch(() => {})
   // Not awaited: a slow network must not hold up the window, and the gate can
   // arrive a moment after the UI does.
