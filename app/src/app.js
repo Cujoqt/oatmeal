@@ -95,6 +95,16 @@ const chipDelete = $('chipDelete')
 const tmplChips = $('tmplChips')
 const tabNotes = $('tabNotes')
 const tabRaw = $('tabRaw')
+const tabStudy = $('tabStudy')
+const studyBody = $('studyBody')
+const studyCount = $('studyCount')
+const studyDifficulty = $('studyDifficulty')
+const studyFocus = $('studyFocus')
+const studyGenerate = $('studyGenerate')
+const studyNote = $('studyNote')
+const studyPlanOut = $('studyPlanOut')
+const studyCardsOut = $('studyCardsOut')
+const studyQuizOut = $('studyQuizOut')
 const answersEl = $('answers')
 const suggestEl = $('suggest')
 const askInput = $('askInput')
@@ -1320,6 +1330,10 @@ async function openNote(id) {
   noteTab = 'notes'
   showView('note')
   answersEl.innerHTML = ''
+  // setTab owns these, but it is not reached when the meeting is missing —
+  // without this the previous note's Study panel would stay on screen.
+  studyBody.hidden = true
+  noteBody.hidden = false
   resetVideoPanel()
   renderSidebar()
   renderSuggestions()
@@ -1391,11 +1405,21 @@ function setTab(tab) {
   noteTab = tab
   tabNotes.classList.toggle('on', tab === 'notes')
   tabRaw.classList.toggle('on', tab === 'raw')
-  tab === 'notes' ? renderNotes() : renderTranscript()
+  tabStudy.classList.toggle('on', tab === 'study')
+  // Study is its own surface rather than more prose, so the two swap places.
+  studyBody.hidden = tab !== 'study'
+  noteBody.hidden = tab === 'study'
+  // The template chips pick how the *notes* are written — nothing to do with
+  // study material, and clicking one here would silently rewrite the other tab.
+  tmplChips.hidden = tab === 'study'
+  if (tab === 'notes') renderNotes()
+  else if (tab === 'raw') renderTranscript()
+  else renderStudy()
 }
 
 tabNotes.addEventListener('click', () => setTab('notes'))
 tabRaw.addEventListener('click', () => setTab('raw'))
+tabStudy.addEventListener('click', () => setTab('study'))
 
 /// Show what the user typed during the meeting under the model's write-up. The
 /// two used to share one file, which is why typing during a meeting appeared in
@@ -1541,6 +1565,243 @@ async function renderNotes(force = false, regenerate = false) {
   } finally {
     refreshModelChip()
   }
+}
+
+/// The Study tab: a study plan, a deck of flashcards and a graded quiz, all
+/// built from the same source text the notes come from.
+///
+/// Opening the tab only reads what is already on disk. Generating is a long
+/// model run, so it stays behind a deliberate press, exactly as the notes do.
+async function renderStudy() {
+  const m = currentMeeting()
+  if (!m) return
+
+  if (!m.transcribed) {
+    studyDisabled('Nothing to study — this recording has no transcript.')
+    return
+  }
+  studyGenerate.disabled = false
+  studyGenerate.textContent = modelReady
+    ? 'Generate study material'
+    : `Download model (~${modelMb} MB) and generate`
+
+  const asked = m.id
+  const last = await invoke('last_study_settings', { id: asked }).catch(() => null)
+  if (openId !== asked || noteTab !== 'study') return
+  if (last) {
+    studyCount.value = last.count
+    studyDifficulty.value = last.difficulty
+    studyFocus.value = last.topicFocus || ''
+  }
+
+  note(studyNote, '')
+  await showCachedStudy(asked)
+}
+
+/// Render whatever is on disk for this meeting. This is the truth after a
+/// generation as well as before one: each of the three is cached by its own
+/// command, so a run where only some succeeded still has those on disk.
+async function showCachedStudy(asked) {
+  const [plan, cards, quiz] = await Promise.all([
+    invoke('cached_study_plan', { id: asked }).catch(() => null),
+    invoke('cached_flashcards', { id: asked }).catch(() => null),
+    invoke('cached_quiz', { id: asked }).catch(() => null),
+  ])
+  // The user may have opened another meeting or switched tabs meanwhile.
+  if (openId !== asked || noteTab !== 'study') return
+
+  if (plan || cards || quiz) studyGenerate.textContent = 'Regenerate'
+  renderStudyPlan(plan)
+  renderFlashcards(cards)
+  renderQuiz(quiz)
+}
+
+/// No transcript: say so once, in place of all three surfaces.
+function studyDisabled(msg) {
+  studyGenerate.disabled = true
+  note(studyNote, '')
+  for (const out of [studyPlanOut, studyCardsOut, studyQuizOut]) out.innerHTML = ''
+  studyPlanOut.appendChild(el('p', 'placeholder', msg))
+}
+
+function studySettings() {
+  const asked = Number(studyCount.value)
+  // The backend clamps this too — this is so the field shows what was used.
+  const count = Math.min(30, Math.max(3, Number.isFinite(asked) ? Math.round(asked) : 10))
+  studyCount.value = count
+  return { count, difficulty: studyDifficulty.value, topicFocus: studyFocus.value.trim() }
+}
+
+studyGenerate.addEventListener('click', generateStudy)
+
+/// All three are generated from one press: they answer one question ("help me
+/// study this") and share the settings above them.
+async function generateStudy() {
+  const m = currentMeeting()
+  if (!m) return
+
+  const settings = studySettings()
+  const asked = m.id
+  studyGenerate.disabled = true
+  note(studyNote, 'Generating… this takes a minute on first run.')
+  setModelChip('busy', 'Writing study material…')
+  for (const out of [studyPlanOut, studyCardsOut, studyQuizOut]) {
+    out.innerHTML = skeletonHTML('')
+  }
+
+  try {
+    const [plan, cards, quiz] = await Promise.all([
+      invoke('generate_study_plan', { id: asked, settings, force: true }),
+      invoke('generate_flashcards', { id: asked, settings, force: true }),
+      invoke('generate_quiz', { id: asked, settings, force: true }),
+    ])
+    if (openId !== asked || noteTab !== 'study') return
+    note(studyNote, 'Done.', 'ok')
+    studyGenerate.textContent = 'Regenerate'
+    renderStudyPlan(plan)
+    renderFlashcards(cards)
+    renderQuiz(quiz)
+  } catch (e) {
+    if (openId !== asked || noteTab !== 'study') return
+    note(studyNote, String(e), 'err')
+    // One of the three failed, but the others may have been written. Show what
+    // actually landed rather than three empty panels the next open would fill.
+    await showCachedStudy(asked)
+  } finally {
+    studyGenerate.disabled = false
+    refreshModelChip()
+  }
+}
+
+function renderStudyPlan(md) {
+  studyPlanOut.innerHTML = ''
+  if (!md) {
+    studyPlanOut.appendChild(el('p', 'placeholder', 'Generate to build a study plan from this recording.'))
+    return
+  }
+  renderMarkdown(md, studyPlanOut)
+}
+
+/// A deck is read one card at a time, so this shows one: click to turn it over,
+/// then move on. Position is local to this render — reopening starts at the top.
+function renderFlashcards(cards) {
+  studyCardsOut.innerHTML = ''
+  if (!cards || !cards.length) {
+    studyCardsOut.appendChild(el('p', 'placeholder', 'Generate to build a deck of flashcards.'))
+    return
+  }
+
+  let at = 0
+  let showingBack = false
+
+  const card = el('div', 'flashcard')
+  card.setAttribute('role', 'button')
+  card.setAttribute('tabindex', '0')
+
+  const prev = el('button', '', 'Back')
+  const next = el('button', '', 'Next')
+  const count = el('div', 'count')
+  const nav = el('div', 'card-nav')
+  nav.append(prev, count, next)
+
+  function draw() {
+    card.innerHTML = ''
+    const face = el('div', showingBack ? 'back' : 'front', showingBack ? cards[at].back : cards[at].front)
+    card.appendChild(face)
+    card.title = showingBack ? 'Click to see the question' : 'Click to see the answer'
+    count.textContent = `${at + 1} / ${cards.length}`
+    prev.disabled = at === 0
+    next.disabled = at === cards.length - 1
+  }
+
+  function flip() {
+    showingBack = !showingBack
+    draw()
+  }
+  function step(by) {
+    at = Math.min(cards.length - 1, Math.max(0, at + by))
+    showingBack = false
+    draw()
+  }
+
+  card.addEventListener('click', flip)
+  card.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); flip() }
+  })
+  prev.addEventListener('click', () => step(-1))
+  next.addEventListener('click', () => step(1))
+
+  draw()
+  studyCardsOut.append(card, nav)
+}
+
+/// Every question at once, one Submit. Grading is a comparison against the
+/// `correct_index` cached with each question — the model is not asked again.
+function renderQuiz(questions) {
+  studyQuizOut.innerHTML = ''
+  if (!questions || !questions.length) {
+    studyQuizOut.appendChild(el('p', 'placeholder', 'Generate to build a quiz on this recording.'))
+    return
+  }
+
+  const form = el('div', 'quiz-form')
+  const picked = new Array(questions.length).fill(-1)
+
+  questions.forEach((q, qi) => {
+    const block = el('div', 'quiz-q')
+    const question = el('div', 'q')
+    question.appendChild(el('b', '', String(qi + 1)))
+    question.appendChild(document.createTextNode(q.question))
+    block.appendChild(question)
+
+    q.options.forEach((text, oi) => {
+      const opt = el('label', 'quiz-opt')
+      const radio = el('input')
+      radio.type = 'radio'
+      radio.name = `quiz-${qi}`
+      radio.value = String(oi)
+      radio.addEventListener('change', () => {
+        picked[qi] = oi
+        submit.disabled = picked.some((p) => p < 0)
+      })
+      opt.append(radio, el('span', '', text))
+      block.appendChild(opt)
+    })
+
+    form.appendChild(block)
+  })
+
+  const submit = el('button', 'gen', 'Check answers')
+  submit.disabled = true
+  const score = el('span', 'quiz-score')
+  const actions = el('div', 'study-actions')
+  actions.append(submit, score)
+
+  submit.addEventListener('click', () => {
+    let right = 0
+    const blocks = form.querySelectorAll('.quiz-q')
+    questions.forEach((q, qi) => {
+      const opts = blocks[qi].querySelectorAll('.quiz-opt')
+      const correct = q.correct_index
+      if (picked[qi] === correct) right++
+      opts.forEach((opt, oi) => {
+        opt.querySelector('input').disabled = true
+        // Mark what they chose, and the right answer only when they missed it.
+        if (oi === picked[qi]) {
+          opt.classList.add(oi === correct ? 'right' : 'wrong')
+          opt.appendChild(el('span', 'mark', oi === correct ? 'Correct' : 'Your answer'))
+        } else if (oi === correct) {
+          opt.classList.add('right')
+          opt.appendChild(el('span', 'mark', 'Correct answer'))
+        }
+      })
+    })
+    form.classList.add('quiz-graded')
+    submit.disabled = true
+    score.textContent = `${right} / ${questions.length}`
+  })
+
+  studyQuizOut.append(form, actions)
 }
 
 /// A source was added to this meeting after the model wrote it up — more audio
