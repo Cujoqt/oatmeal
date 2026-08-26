@@ -96,7 +96,12 @@
       display: flex; align-items: center; gap: 8px; pointer-events: none;
       font-size: 12.5px; font-weight: 500; color: var(--faint);
     }
-    .brand-ver { font-size: 11px; color: var(--hint); letter-spacing: .2px; }
+    .brand-ver {
+      font-size: 11px; color: var(--hint); letter-spacing: .2px;
+      pointer-events: auto; cursor: pointer; background: none; border: 0;
+      padding: 2px 5px; border-radius: 5px; font-family: inherit;
+    }
+    .brand-ver:hover { color: var(--ink); background: var(--hover); }
     .brand .mark { display: flex; align-items: center; gap: 1.5px; height: 12px; }
     .brand .mark i { width: 2px; border-radius: 2px; background: var(--ink-soft); }
     .brand .mark i:nth-child(4), .brand .mark i:nth-child(5) { background: var(--accent); }
@@ -933,6 +938,9 @@
     /* ── settings ──────────────────────────────────────────────────────────*/
     #viewSettings { padding: 0; }
     .set-wrap { width: 100%; max-width: 720px; margin: 0 auto; padding: 30px 34px 44px; }
+    #notesBack { margin-bottom: 14px; }
+    #notesTitle + #notesName { margin: -14px 0 22px; }
+    #notesFoot { margin-top: 26px; }
     .set-wrap h1 {
       font-family: var(--display); font-weight: 400; font-size: 34px;
       letter-spacing: -.5px; margin: 0 0 22px;
@@ -1027,8 +1035,12 @@
         <i style="height:26%"></i><i style="height:44%"></i><i style="height:56%"></i><i style="height:62%"></i><i style="height:32%"></i>
       </span>Oatmeal
       <!-- Filled from `app_version` at boot, and left empty if that ever fails
-           rather than showing a "v" with nothing after it. -->
-      <span class="brand-ver" id="brandVersion"></span>
+           rather than showing a "v" with nothing after it. Clicking it opens
+           the release notes for exactly this build — a surface with no nav
+           entry, reachable only from here. `.brand` is a drag region with
+           pointer events off, so the button turns them back on for itself. -->
+      <button class="brand-ver" id="brandVersion" hidden
+              title="What's new in this version"></button>
     </div>
     <div class="bar-actions">
       <button id="theme" title="Switch theme" aria-label="Switch theme">
@@ -1444,6 +1456,25 @@
           <div class="set-card">
             <h2>Upcoming</h2>
             <div id="hwList"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Release notes for exactly this build. No nav entry on purpose: the
+           version in the title bar is the only way in, and the only way out is
+           back to wherever you were. -->
+      <section class="view" id="viewNotes">
+        <div class="set-wrap">
+          <button class="btn quiet sm" id="notesBack">Back</button>
+          <h1 id="notesTitle">What's new</h1>
+          <!-- Not a .set-card: `.set-card h2` is defined after `.prose h2` and
+               would win on source order, flattening every heading the notes
+               are written with. -->
+          <p class="note-line" id="notesName" hidden></p>
+          <div class="prose" id="notesBody"></div>
+          <div class="btn-row" id="notesFoot">
+            <button class="btn quiet sm" id="notesOpen" hidden>Open on GitHub</button>
+            <span class="note-line" id="notesStatus" role="status" aria-live="polite"></span>
           </div>
         </div>
       </section>

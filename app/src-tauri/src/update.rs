@@ -28,6 +28,10 @@ use serde::Serialize;
 /// Releases API for the repository the app ships from.
 const RELEASES_LATEST: &str = "https://api.github.com/repos/Cujoqt/oatmeal/releases/latest";
 
+/// Releases API for one tag — how the release-notes page finds the notes that
+/// belong to the build actually running, rather than the newest published one.
+const RELEASES_BY_TAG: &str = "https://api.github.com/repos/Cujoqt/oatmeal/releases/tags/";
+
 /// Only URLs under this prefix are ever handed to `open`, so a surprising API
 /// response can't turn into "Oatmeal opened something else".
 const REPO_PREFIX: &str = "https://github.com/Cujoqt/oatmeal/";
@@ -208,6 +212,100 @@ fn fetch_latest_release() -> Result<Vec<u8>, String> {
         .arg("-H")
         .arg("Accept: application/vnd.github+json")
         .arg(RELEASES_LATEST)
+        .output();
+
+    match out {
+        Ok(o) if o.status.success() => Ok(o.stdout),
+        Ok(o) => Err(format!(
+            "could not reach GitHub (curl exited {})",
+            o.status.code().unwrap_or(-1)
+        )),
+        Err(e) => Err(format!("could not run curl: {e}")),
+    }
+}
+
+// ── Release notes for the running build ──────────────────────────────────────
+
+/// The notes GitHub holds for one published release. `body` is the Markdown the
+/// release was published with, rendered by the frontend's own renderer.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReleaseNotes {
+    pub tag: String,
+    /// The release title. Falls back to the tag when a release was published
+    /// without one, so the page never shows an empty heading.
+    pub name: String,
+    pub body: String,
+    /// The release page, only when GitHub gave one inside this repository.
+    pub release_url: Option<String>,
+}
+
+/// Pull the notes out of a release document fetched by tag. Split from the
+/// network call so the shape handling is testable without GitHub.
+fn notes_from_release(doc: &serde_json::Value, tag: &str) -> ReleaseNotes {
+    let name = doc
+        .get("name")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(tag)
+        .to_string();
+    ReleaseNotes {
+        tag: doc
+            .get("tag_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or(tag)
+            .to_string(),
+        name,
+        body: doc
+            .get("body")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string(),
+        release_url: doc
+            .get("html_url")
+            .and_then(|v| v.as_str())
+            .filter(|u| u.starts_with(REPO_PREFIX))
+            .map(|s| s.to_string()),
+    }
+}
+
+/// The notes for the release this build was compiled as. Unlike `check`, this
+/// one reports its failures: the page exists because someone asked to read the
+/// notes, so "GitHub is unreachable" is the answer, not silence.
+pub fn notes() -> Result<ReleaseNotes, String> {
+    notes_with(current_version(), fetch_release_by_tag)
+}
+
+fn notes_with(
+    version: &str,
+    fetch: impl FnOnce(&str) -> Result<Vec<u8>, String>,
+) -> Result<ReleaseNotes, String> {
+    let tag = format!("v{version}");
+    let body = fetch(&tag)?;
+    let doc: serde_json::Value = serde_json::from_slice(&body)
+        .map_err(|e| format!("could not read the release: {e}"))?;
+    // A tag with no release comes back as a `message` document, not a release.
+    if doc.get("tag_name").is_none() {
+        return Err(format!("GitHub has no published release for {tag}"));
+    }
+    Ok(notes_from_release(&doc, &tag))
+}
+
+fn fetch_release_by_tag(tag: &str) -> Result<Vec<u8>, String> {
+    // The tag is built from the compiled-in version, so there is nothing
+    // user-supplied in this URL.
+    let url = format!("{RELEASES_BY_TAG}{tag}");
+    let out = Command::new("curl")
+        .arg("-fsSL")
+        .arg("--max-time")
+        .arg("10")
+        .arg("-H")
+        .arg("User-Agent: Oatmeal")
+        .arg("-H")
+        .arg("Accept: application/vnd.github+json")
+        .arg(&url)
         .output();
 
     match out {
@@ -615,5 +713,56 @@ mod tests {
             assert!(s.minimum.is_some(), "should have found a minimum in: {body}");
             assert!(s.mandatory, "should gate 1.2.0: {body}");
         }
+    }
+
+    #[test]
+    fn notes_are_asked_for_by_the_running_version_s_tag() {
+        let mut asked = String::new();
+        let got = notes_with("1.10.6", |tag| {
+            asked = tag.to_string();
+            Ok(br#"{"tag_name":"v1.10.6","name":"Quieter startup","body":"- Fixed a thing\n","html_url":"https://github.com/Cujoqt/oatmeal/releases/tag/v1.10.6"}"#.to_vec())
+        })
+        .expect("a well-formed release should parse");
+        assert_eq!(asked, "v1.10.6");
+        assert_eq!(got.name, "Quieter startup");
+        assert_eq!(got.body, "- Fixed a thing");
+        assert!(got.release_url.is_some());
+    }
+
+    /// A release published without a title must still show a heading.
+    #[test]
+    fn a_nameless_release_falls_back_to_its_tag() {
+        let doc = serde_json::json!({ "tag_name": "v1.4.0", "name": "  ", "body": "x" });
+        assert_eq!(notes_from_release(&doc, "v1.4.0").name, "v1.4.0");
+    }
+
+    /// GitHub answers an unreleased tag with a `message` document. That is a
+    /// missing release, not notes with no body.
+    #[test]
+    fn a_tag_with_no_release_is_an_error_not_empty_notes() {
+        let err = notes_with("9.9.9", |_| Ok(br#"{"message":"Not Found"}"#.to_vec()))
+            .expect_err("a message document is not a release");
+        assert!(err.contains("v9.9.9"), "should name the tag it looked for: {err}");
+    }
+
+    /// Unlike the update check, this one reports the failure — the user asked
+    /// for the page, so an empty screen would be a lie.
+    #[test]
+    fn an_unreachable_github_is_reported() {
+        let err = notes_with("1.0.0", |_| Err("could not reach GitHub".into()))
+            .expect_err("a failed fetch must surface");
+        assert_eq!(err, "could not reach GitHub");
+    }
+
+    /// An `html_url` outside the project's repository is dropped, exactly as the
+    /// update check drops it — nothing off-repo ever reaches `open`.
+    #[test]
+    fn a_release_url_outside_the_repo_is_dropped() {
+        let doc = serde_json::json!({
+            "tag_name": "v1.4.0",
+            "body": "x",
+            "html_url": "https://example.com/not-us"
+        });
+        assert_eq!(notes_from_release(&doc, "v1.4.0").release_url, None);
     }
 }
