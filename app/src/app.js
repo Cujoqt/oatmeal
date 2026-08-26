@@ -82,17 +82,15 @@ const noteBody = $('noteBody')
 const chipWhen = $('chipWhen')
 const chipFinish = $('chipFinish')
 const chipContinue = $('chipContinue')
-const chipExport = $('chipExport')
-const chipFollowup = $('chipFollowup')
-const chipVideo = $('chipVideo')
+const moreBtn = $('moreBtn')
 const videoPanel = $('videoPanel')
 const videoUrl = $('videoUrl')
 const videoMeta = $('videoMeta')
 const videoStart = $('videoStart')
 const videoEnd = $('videoEnd')
 const videoImport = $('videoImport')
-const chipDelete = $('chipDelete')
-const tmplChips = $('tmplChips')
+const tmplBtn = $('tmplBtn')
+const tmplName = $('tmplName')
 const tabNotes = $('tabNotes')
 const tabRaw = $('tabRaw')
 const tabStudy = $('tabStudy')
@@ -934,11 +932,12 @@ async function deleteMeeting(id) {
 
 /// One row menu at a time, anchored under the button that opened it.
 ///
-/// Items are `{ label, danger, confirm, run }`, plus `{ head }`, `{ hint }` and
-/// `{ sep }` for the non-clickable parts. `confirm` arms the item on the first
-/// click and runs it on the second — the two-step the note view's delete chip
-/// uses, rather than a native `confirm()`, which blocks the webview and looks
-/// like a browser rather than Oatmeal.
+/// Items are `{ label, danger, on, confirm, run }`, plus `{ head }`, `{ hint }`
+/// and `{ sep }` for the non-clickable parts. `on` marks the choice already in
+/// force. `confirm` arms the item on the first click and runs it on the second
+/// — the two-step the note view's delete uses, rather than a native
+/// `confirm()`, which blocks the webview and looks like a browser rather than
+/// Oatmeal.
 let menuEl = null
 
 function closeMenu() {
@@ -966,7 +965,7 @@ function openMenu(anchorEl, items) {
     if (it.head) { menu.appendChild(el('div', 'head', it.head)); continue }
     if (it.hint) { menu.appendChild(el('div', 'hint', it.hint)); continue }
     if (it.sep) { menu.appendChild(el('div', 'sep')); continue }
-    const b = el('button', it.danger ? 'danger' : '', it.label)
+    const b = el('button', it.danger ? 'danger' : it.on ? 'on' : '', it.label)
     b.addEventListener('click', (e) => {
       e.stopPropagation()
       if (it.confirm && b.dataset.armed !== '1') {
@@ -1342,8 +1341,8 @@ async function openNote(id) {
   if (!m) return
   noteTitle.value = m.title
   chipWhen.textContent = [fmtWhen(new Date(m.started_at)), fmtDuration(m.duration_secs)].filter(Boolean).join(' · ')
-  renderTemplateChips()
   renderNoteActions()
+  // Draws the template picker too, once `noteTab` is the tab it belongs to.
   setTab('notes')
 }
 
@@ -1380,24 +1379,33 @@ chipFinish.addEventListener('click', () => {
 /// Which shape of notes to write, remembered per meeting in `meta.json` once
 /// generated. Picking a different template on a meeting that already has notes
 /// regenerates them; picking one before the first generation just selects it.
-function renderTemplateChips() {
+function renderTemplatePicker() {
   const m = currentMeeting()
-  tmplChips.innerHTML = ''
-  if (!m || !m.transcribed) return
+  // Nothing to shape until there is a transcript, and a template picks how the
+  // *notes* are written — it has nothing to do with study material, and using
+  // one from that tab would silently rewrite the other.
+  const off = !m || !m.transcribed || noteTab === 'study'
+  tmplBtn.hidden = off
+  if (off) return
   const current = m.template || 'general'
-  for (const t of TEMPLATES) {
-    const b = document.createElement('button')
-    b.className = 'chip act' + (t.id === current ? ' sel' : '')
-    b.textContent = t.label
-    b.addEventListener('click', () => selectTemplate(m, t.id))
-    tmplChips.appendChild(b)
-  }
+  tmplName.textContent = (TEMPLATES.find(t => t.id === current) || TEMPLATES[0]).label
 }
+
+tmplBtn.addEventListener('click', () => {
+  const m = currentMeeting()
+  if (!m) return
+  const current = m.template || 'general'
+  openMenu(tmplBtn, TEMPLATES.map(t => ({
+    label: t.label,
+    on: t.id === current,
+    run: () => selectTemplate(m, t.id),
+  })))
+})
 
 async function selectTemplate(m, id) {
   if (id === (m.template || 'general')) return
   m.template = id
-  renderTemplateChips()
+  renderTemplatePicker()
   if (m.has_notes) await renderNotes(true, true)
 }
 
@@ -1409,9 +1417,7 @@ function setTab(tab) {
   // Study is its own surface rather than more prose, so the two swap places.
   studyBody.hidden = tab !== 'study'
   noteBody.hidden = tab === 'study'
-  // The template chips pick how the *notes* are written — nothing to do with
-  // study material, and clicking one here would silently rewrite the other tab.
-  tmplChips.hidden = tab === 'study'
+  renderTemplatePicker()
   if (tab === 'notes') renderNotes()
   else if (tab === 'raw') renderTranscript()
   else renderStudy()
@@ -1839,7 +1845,23 @@ async function commitTitle() {
   }
 }
 
-chipExport.addEventListener('click', async () => {
+/// Everything that is not the next thing to do with a meeting. These four used
+/// to sit in the header as pills indistinguishable from the view switcher, so
+/// Delete looked exactly like Export.
+moreBtn.addEventListener('click', () => {
+  const m = currentMeeting()
+  if (!m) return
+  openMenu(moreBtn, [
+    { label: 'Export', run: exportMeeting },
+    { label: 'Draft follow-up', run: draftFollowup },
+    { label: videoPanel.hidden ? 'Add video' : 'Hide video', run: toggleVideoPanel },
+    { sep: true },
+    // Same delete the sidebar row menu runs, two-step confirm included.
+    { label: 'Delete', danger: true, confirm: true, run: () => deleteMeeting(m.id) },
+  ])
+})
+
+async function exportMeeting() {
   const m = currentMeeting()
   if (!m) return
   try {
@@ -1848,31 +1870,7 @@ chipExport.addEventListener('click', async () => {
   } catch (e) {
     setStatus(String(e), true)
   }
-})
-
-chipDelete.addEventListener('click', async () => {
-  const m = currentMeeting()
-  if (!m) return
-  if (chipDelete.dataset.armed !== '1') {
-    chipDelete.dataset.armed = '1'
-    chipDelete.lastChild.textContent = ' Really delete?'
-    setTimeout(() => {
-      chipDelete.dataset.armed = ''
-      chipDelete.lastChild.textContent = ' Delete'
-    }, 4000)
-    return
-  }
-  try {
-    await invoke('delete_meeting', { id: m.id })
-    await loadMeetings()
-    showHome()
-  } catch (e) {
-    setStatus(String(e), true)
-  } finally {
-    chipDelete.dataset.armed = ''
-    chipDelete.lastChild.textContent = ' Delete'
-  }
-})
+}
 
 // ── slept mid-recording ──────────────────────────────────────────────────────
 //
@@ -1976,7 +1974,7 @@ async function draftFollowup() {
 /// different answers list and a different send button. Everything else — the
 /// pending placeholder, the token stream, the model chip, re-enabling on
 /// failure — is identical, and there is deliberately only one copy of it.
-async function runChat(prompt, pending, generate, { into = answersEl, disable = [askSend, chipFollowup] } = {}) {
+async function runChat(prompt, pending, generate, { into = answersEl, disable = [askSend, moreBtn] } = {}) {
   const qa = document.createElement('div')
   qa.className = 'qa'
   const q = document.createElement('div')
@@ -2109,7 +2107,6 @@ function renderCitations(answerEl, sources) {
   answerEl.after(cites)
 }
 
-chipFollowup.addEventListener('click', draftFollowup)
 
 /// The video whose title and length the panel is currently showing, or null.
 /// The import button stays disabled until a probe has succeeded: a range can't
@@ -2132,14 +2129,14 @@ function resetVideoPanel() {
   videoImport.disabled = true
 }
 
-chipVideo.addEventListener('click', () => {
+function toggleVideoPanel() {
   if (videoPanel.hidden) {
     videoPanel.hidden = false
     videoUrl.focus()
   } else {
     resetVideoPanel()
   }
-})
+}
 
 videoUrl.addEventListener('change', async () => {
   const url = videoUrl.value.trim()
