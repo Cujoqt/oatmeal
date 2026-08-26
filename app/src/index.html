@@ -287,6 +287,9 @@
     }
     .menu button:hover { background: var(--hover); color: var(--ink); }
     .menu button.danger:hover { color: var(--danger); }
+    /* Which template is already in force — the trigger names it too, but a
+       five-item list with nothing marked reads as five equal choices. */
+    .menu button.on { background: var(--key-bg); color: var(--ink); }
     .menu .head {
       font: 600 10px var(--sans); text-transform: uppercase; letter-spacing: .5px;
       color: var(--hint); padding: 6px 9px 3px;
@@ -382,7 +385,8 @@
       border: 1px solid var(--line-2); border-radius: 20px;
       background: transparent; color: var(--muted); transition: background .14s, color .14s;
     }
-    .round-btn:hover { background: var(--hover); color: var(--ink); }
+    .round-btn:hover:not(:disabled) { background: var(--hover); color: var(--ink); }
+    .round-btn:disabled { opacity: .45; cursor: default; }
     .round-btn svg { width: 16px; height: 16px; }
     .round-btn.sm { width: 24px; height: 24px; border: 0; }
     .round-btn.sm svg { width: 14px; height: 14px; }
@@ -506,13 +510,49 @@
       color: var(--ink); background: transparent; border: 0; outline: none; width: 100%;
       padding: 0 0 8px;
     }
-    .chips { display: flex; flex-wrap: wrap; gap: 8px; }
-    /* Two real sections, not one wrapping row: `.chips-top` picks how the note
-       is rendered (Enhanced/Transcript, template); `.chips-bottom` is metadata
-       and actions. Siblings rather than flex order so the split holds at every
-       window width. */
-    .chips-top { margin-bottom: 8px; }
-    .chips-bottom { margin-bottom: 20px; }
+    .note-meta { font: 400 12.5px var(--sans); color: var(--muted); margin-top: 7px; }
+    /* One strip, read left to right: which view, how the notes are written,
+       then the single action there is to take next. Everything rarer sits
+       behind `#moreBtn`. This was eleven identical pills wrapping over three
+       rows, where Delete looked exactly like Export and the view switcher
+       looked exactly like the metadata. */
+    .note-bar {
+      display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+      margin: 16px 0 22px; padding: 6px 7px;
+      border: 1px solid var(--line); border-radius: 22px; background: var(--panel);
+    }
+    /* Already inside a bordered strip — a second outline around the tabs. */
+    .note-bar .seg-toggle { border-color: transparent; }
+    .note-bar .spacer { flex: 1; }
+    /* The strip's own trailing button, not the 34px one the title bars use. */
+    .note-bar .round-btn { width: 30px; height: 30px; border: 0; }
+    .picker {
+      display: inline-flex; align-items: center; gap: 6px; padding: 6px 10px 6px 13px;
+      border: 1px solid var(--line-2); border-radius: 20px; background: transparent;
+      color: var(--ink-soft); font: 500 12.5px var(--sans); cursor: pointer; white-space: nowrap;
+    }
+    /* Same override `.chip[hidden]` needs below: `.picker` sets display, which
+       outranks the UA stylesheet's rule for the hidden attribute. */
+    .picker[hidden] { display: none; }
+    .picker:hover { background: var(--hover); color: var(--ink); }
+    .picker svg { width: 12px; height: 12px; opacity: .7; }
+    .bar-btn {
+      display: inline-flex; align-items: center; gap: 7px; padding: 7px 14px;
+      border: 0; border-radius: 20px; background: var(--key-bg); color: var(--ink);
+      font: 600 12.5px var(--sans); cursor: pointer; white-space: nowrap;
+      transition: background .14s, color .14s;
+    }
+    .bar-btn[hidden] { display: none; }
+    .bar-btn:hover { background: var(--line-2); }
+    .bar-btn svg { width: 14px; height: 14px; }
+    /* `--bg` reads on both accents: cream on orange in light, near-black on
+       lime in dark. Plain white fails the lime. */
+    .bar-btn.primary { background: var(--accent); color: var(--bg); }
+    .bar-btn.primary:hover { background: var(--accent-deep); }
+    /* Last, so it wins over `.primary` when the button turns into Stop
+       recording — same specificity, so this is source order doing the work. */
+    .bar-btn.danger { background: var(--danger); color: var(--bg); }
+    .bar-btn.danger:hover { background: var(--danger); filter: brightness(1.08); }
     .chip {
       display: inline-flex; align-items: center; gap: 7px; padding: 6px 12px; border-radius: 20px;
       border: 1px solid var(--line-2); background: transparent; color: var(--ink-soft);
@@ -523,13 +563,7 @@
     .chip[hidden] { display: none; }
     .chip.act { cursor: pointer; }
     .chip.act:hover { background: var(--hover); }
-    .chip.sel { background: var(--key-bg); border-color: transparent; color: var(--ink); }
     .chip svg { width: 14px; height: 14px; }
-    .chip.danger:hover { color: var(--danger); border-color: var(--danger); }
-    /* Transparent grouping element so its chip children lay out directly in the .chips row. */
-    .tmpl-chips { display: contents; }
-    /* `display: contents` outranks the UA rule for [hidden], same as .chip above. */
-    .tmpl-chips[hidden] { display: none; }
     .video-panel { display: flex; flex-direction: column; gap: 8px; margin: 14px 0 4px; padding: 12px; border: 1px solid var(--line); border-radius: 10px; }
     /* Same override `.chip[hidden]` needs above: `.video-panel` sets display,
        which outranks the UA stylesheet's rule for the hidden attribute. */
@@ -1191,7 +1225,8 @@
       <section class="view" id="viewNote">
         <div class="note-wrap">
           <input class="note-title" id="noteTitle" />
-          <div class="chips chips-top">
+          <div class="note-meta" id="chipWhen"></div>
+          <div class="note-bar">
             <div class="seg-toggle">
               <button id="tabNotes" class="on">
                 <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.6 4.4L18 9l-4.4 1.6L12 15l-1.6-4.4L6 9l4.4-1.6z" /></svg>
@@ -1200,33 +1235,21 @@
               <button id="tabRaw">Transcript</button>
               <button id="tabStudy">Study</button>
             </div>
-            <div class="tmpl-chips" id="tmplChips"></div>
-          </div>
-          <div class="chips chips-bottom">
-            <span class="chip" id="chipWhen"></span>
-            <button class="chip act" id="chipFinish" hidden title="Transcribe the audio this recording never got written up">
+            <button class="picker" id="tmplBtn" aria-haspopup="menu" title="How these notes are written">
+              <span id="tmplName">General</span>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6" /></svg>
+            </button>
+            <span class="spacer"></span>
+            <button class="bar-btn" id="chipFinish" hidden title="Transcribe the audio this recording never got written up">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a9 9 0 1 1-8.5 6" /><path d="M3 4v5h5" /></svg>
               Finish transcribing
             </button>
-            <button class="chip act" id="chipContinue" title="Keep recording into this meeting">
+            <button class="bar-btn primary" id="chipContinue" title="Keep recording into this meeting">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8" /><circle cx="12" cy="12" r="3.4" fill="currentColor" stroke="none" /></svg>
               Continue recording
             </button>
-            <button class="chip act" id="chipExport" title="Export as Markdown">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v10M8 10l4 4 4-4M5 18h14" /></svg>
-              Export
-            </button>
-            <button class="chip act" id="chipFollowup" title="Draft a follow-up message">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 11l19-9-9 19-2-8-8-2z" /></svg>
-              Draft follow-up
-            </button>
-            <button class="chip act" id="chipVideo" title="Add a YouTube video as a source for this note">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="3" /><path d="M10 9.5l5 2.5-5 2.5z" /></svg>
-              Add video
-            </button>
-            <button class="chip act danger" id="chipDelete" title="Move to Trash">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M9.5 7V5.2A1.2 1.2 0 0 1 10.7 4h2.6a1.2 1.2 0 0 1 1.2 1.2V7M6.5 7l.8 12a1.6 1.6 0 0 0 1.6 1.5h6.2a1.6 1.6 0 0 0 1.6-1.5l.8-12" /></svg>
-              Delete
+            <button class="round-btn" id="moreBtn" aria-haspopup="menu" title="Export, follow-up, video, delete">
+              <svg viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.7" /><circle cx="12" cy="12" r="1.7" /><circle cx="19" cy="12" r="1.7" /></svg>
             </button>
           </div>
 
